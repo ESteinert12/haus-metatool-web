@@ -205,6 +205,19 @@ export default function Home() {
                   </>
                 )}
               </div>
+
+              {/* Reference BPM */}
+              <div className={styles.filterGroup}>
+                <label>Reference BPM</label>
+                <input
+                  type="number"
+                  placeholder={tapBpm ? `${tapBpm} (from tap)` : 'e.g., 120'}
+                  value={bpm}
+                  onChange={(e) => setBpm(e.target.value)}
+                  min="40"
+                  max="200"
+                />
+              </div>
             </div>
 
             {/* SEARCH FILTERS SECTION */}
@@ -253,27 +266,6 @@ export default function Home() {
                   </select>
                 </div>
 
-                {/* BPM Range */}
-                <div className={styles.filterGroup}>
-                  <label>BPM Range: {minBpm} - {maxBpm}</label>
-                  <input
-                    type="range"
-                    min="40"
-                    max="200"
-                    value={minBpm}
-                    onChange={(e) => setMinBpm(parseInt(e.target.value))}
-                    style={{width: '100%'}}
-                  />
-                  <input
-                    type="range"
-                    min="40"
-                    max="200"
-                    value={maxBpm}
-                    onChange={(e) => setMaxBpm(parseInt(e.target.value))}
-                    style={{width: '100%'}}
-                  />
-                </div>
-
                 {/* Vocals */}
                 <div className={styles.filterGroup}>
                   <label>
@@ -284,19 +276,6 @@ export default function Home() {
                     />
                     Include Vocals
                   </label>
-                </div>
-
-                {/* Manual BPM Input */}
-                <div className={styles.filterGroup}>
-                  <label>Reference BPM</label>
-                  <input
-                    type="number"
-                    placeholder={tapBpm ? `${tapBpm} (from tap)` : 'e.g., 120'}
-                    value={bpm}
-                    onChange={(e) => setBpm(e.target.value)}
-                    min="40"
-                    max="200"
-                  />
                 </div>
 
                 {/* Search Button */}
