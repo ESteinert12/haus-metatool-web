@@ -101,24 +101,27 @@
   width: 100%;
   padding: 12px;
   margin-top: 20px;
-  background: #0066CC;
-  color: white;
-  border: none;
+  background: #FFFFFF;
+  color: #0066CC;
+  border: 2px solid;
+  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
   border-radius: 4px;
   font-size: 14px;
   font-weight: bold;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.3s;
 }
 
 .searchBtn:hover:not(:disabled) {
-  background: #0052A3;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
+  color: white;
+  border: 2px solid transparent;
   transform: translateY(-2px);
-  box-shadow: 0 4px 8px rgba(0, 102, 204, 0.2);
+  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
 }
 
 .searchBtn:disabled {
-  opacity: 0.7;
+  opacity: 0.5;
   cursor: not-allowed;
 }
 
@@ -228,7 +231,8 @@
   padding: 4px 10px;
   background: #FFFFFF;
   color: #0066CC;
-  border: 1px solid #0066CC;
+  border: 1px solid;
+  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
   border-radius: 4px;
   font-size: 12px;
   cursor: pointer;
@@ -236,9 +240,10 @@
 }
 
 .submixBtn:hover {
-  background: #0066CC;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
   color: white;
   font-weight: bold;
+  border: 1px solid transparent;
 }
 
 /* Actions */
@@ -265,22 +270,26 @@
 .copyBtn {
   background: #FFFFFF;
   color: #0066CC;
-  border: 1px solid #0066CC;
+  border: 1px solid;
+  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
 }
 
 .copyBtn:hover {
-  background: #0066CC;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
   color: white;
+  border: 1px solid transparent;
 }
 
 .playBtn {
-  background: #E91E63;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
   color: white;
+  border: none;
 }
 
 .playBtn:hover {
-  background: #C5004F;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
   transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
 }
 
 /* Responsive */
@@ -315,16 +324,22 @@
 
 .uploadBtn {
   padding: 12px;
-  background: #0066CC;
-  color: white;
+  background: #FFFFFF;
+  color: #0066CC;
+  border: 2px solid;
+  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
   border-radius: 4px;
   font-weight: bold;
-  transition: all 0.2s;
+  transition: all 0.3s;
+  cursor: pointer;
 }
 
 .uploadBtn:hover {
-  background: #0052A3;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
+  color: white;
+  border: 2px solid transparent;
   transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
 }
 
 .fileInfo {
@@ -376,18 +391,22 @@
 .tapStartBtn {
   width: 100%;
   padding: 12px;
-  background: #0066CC;
-  color: white;
-  border: none;
+  background: #FFFFFF;
+  color: #0066CC;
+  border: 2px solid;
+  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
   border-radius: 4px;
   font-weight: bold;
   cursor: pointer;
-  transition: all 0.2s;
+  transition: all 0.3s;
 }
 
 .tapStartBtn:hover {
-  background: #0052A3;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
+  color: white;
+  border: 2px solid transparent;
   transform: translateY(-2px);
+  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
 }
 
 .tapDisplay {
@@ -430,23 +449,27 @@
 }
 
 .tapStopBtn {
-  background: #E91E63;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
   color: white;
+  border: none;
 }
 
 .tapStopBtn:hover {
-  background: #C5004F;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
+  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
 }
 
 .tapResetBtn {
   background: #FFFFFF;
   color: #0066CC;
-  border: 1px solid #0066CC;
+  border: 1px solid;
+  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
 }
 
 .tapResetBtn:hover {
-  background: #0066CC;
+  background: linear-gradient(90deg, #0066CC, #E91E63);
   color: white;
+  border: 1px solid transparent;
 }
 
 @media (max-width: 768px) {
