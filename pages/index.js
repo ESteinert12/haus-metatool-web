@@ -125,7 +125,7 @@ export default function Home() {
     <div className={styles.container}>
       {/* Header */}
       <header className={styles.header}>
-        <div className={styles.logo}>🎵 HAUS Metatool</div>
+        <img src="/HAUS V2 Logo (1500x413).png" alt="HAUS Metatool Logo" className={styles.logoImg} />
         <div className={styles.subtitle}>Music Search & Matching</div>
       </header>
 
@@ -305,7 +305,7 @@ export default function Home() {
                   className={styles.searchBtn}
                   disabled={loading}
                 >
-                  {loading ? 'Searching...' : '🔍 Search Library'}
+                  {loading ? 'Searching...' : '🔍 Search Collection'}
                 </button>
               </form>
             </div>
