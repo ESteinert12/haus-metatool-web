@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import styles from '../styles/Home.module.css';
 
@@ -29,6 +29,75 @@ export default function Home() {
   const [minBpm, setMinBpm] = useState(80);
   const [maxBpm, setMaxBpm] = useState(140);
   const [includeVox, setIncludeVox] = useState(true);
+
+  // Source audio & tap tempo
+  const [sourceFile, setSourceFile] = useState(null);
+  const [isTapping, setIsTapping] = useState(false);
+  const [tapBpm, setTapBpm] = useState(null);
+  const [tapCount, setTapCount] = useState(0);
+  const tapTimesRef = useRef([]);
+  const fileInputRef = useRef(null);
+
+  // Tap tempo keyboard handler
+  useEffect(() => {
+    const handleKeyPress = (e) => {
+      if (e.code === 'Space' && isTapping) {
+        e.preventDefault();
+        recordTap();
+      }
+    };
+
+    if (isTapping) {
+      window.addEventListener('keydown', handleKeyPress);
+      return () => window.removeEventListener('keydown', handleKeyPress);
+    }
+  }, [isTapping, tapCount]);
+
+  const recordTap = () => {
+    const now = Date.now();
+    tapTimesRef.current.push(now);
+    setTapCount(tapTimesRef.current.length);
+
+    // Calculate BPM after 8+ taps
+    if (tapTimesRef.current.length >= 8) {
+      const intervals = [];
+      for (let i = 1; i < tapTimesRef.current.length; i++) {
+        intervals.push(tapTimesRef.current[i] - tapTimesRef.current[i - 1]);
+      }
+      const avgInterval = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+      const calculatedBpm = Math.round(60000 / avgInterval);
+      setTapBpm(calculatedBpm);
+      setBpm(calculatedBpm.toString());
+    }
+  };
+
+  const startTapTempo = () => {
+    setIsTapping(true);
+    setTapCount(0);
+    tapTimesRef.current = [];
+    setTapBpm(null);
+  };
+
+  const stopTapTempo = () => {
+    setIsTapping(false);
+  };
+
+  const resetTapTempo = () => {
+    setIsTapping(false);
+    setTapCount(0);
+    tapTimesRef.current = [];
+    setTapBpm(null);
+  };
+
+  const handleFileUpload = (e) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      setSourceFile({
+        name: file.name,
+        size: (file.size / 1024 / 1024).toFixed(2), // MB
+      });
+    }
+  };
 
   const handleSearch = async (e) => {
     e.preventDefault();
@@ -62,114 +131,191 @@ export default function Home() {
 
       <main className={styles.main}>
         <div className={styles.grid}>
-          {/* Sidebar - Filters */}
+          {/* Sidebar - Source Audio & Filters */}
           <aside className={styles.sidebar}>
-            <h2>Search Filters</h2>
+            {/* SOURCE AUDIO SECTION */}
+            <div className={styles.section}>
+              <h2>Source Audio</h2>
 
-            <form onSubmit={handleSearch}>
-              {/* Genre */}
-              <div className={styles.filterGroup}>
-                <label>Primary Genre</label>
-                <select
-                  value={genre}
-                  onChange={(e) => {
-                    setGenre(e.target.value);
-                    setSecondaryGenre('');
-                  }}
-                >
-                  <option value="">All Genres</option>
-                  {Object.keys(GENRES).map(g => (
-                    <option key={g} value={g}>{g}</option>
-                  ))}
-                </select>
+              {/* File Upload */}
+              <div className={styles.sourceBox}>
+                <label className={styles.uploadLabel}>
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="audio/*"
+                    onChange={handleFileUpload}
+                    style={{ display: 'none' }}
+                  />
+                  <div className={styles.uploadBtn}>
+                    📁 Import Audio File
+                  </div>
+                </label>
+                {sourceFile && (
+                  <div className={styles.fileInfo}>
+                    <p>✓ {sourceFile.name}</p>
+                    <small>{sourceFile.size} MB</small>
+                  </div>
+                )}
               </div>
 
-              {/* Secondary Genre */}
-              {genre && (
+              {/* Tap Tempo */}
+              <div className={styles.tapTempoBox}>
+                <div className={styles.tapHeader}>
+                  <h3>Tap Tempo</h3>
+                  <small>Press spacebar to tap</small>
+                </div>
+
+                {!isTapping ? (
+                  <button
+                    type="button"
+                    className={styles.tapStartBtn}
+                    onClick={startTapTempo}
+                  >
+                    ▶ Start Tapping
+                  </button>
+                ) : (
+                  <>
+                    <div className={styles.tapDisplay}>
+                      <div className={styles.tapCount}>
+                        Taps: {tapCount}
+                      </div>
+                      {tapBpm && (
+                        <div className={styles.tapBpmResult}>
+                          {tapBpm} BPM
+                        </div>
+                      )}
+                    </div>
+                    <div className={styles.tapButtonGroup}>
+                      <button
+                        type="button"
+                        className={styles.tapStopBtn}
+                        onClick={stopTapTempo}
+                      >
+                        ⏹ Stop
+                      </button>
+                      <button
+                        type="button"
+                        className={styles.tapResetBtn}
+                        onClick={resetTapTempo}
+                      >
+                        ↻ Reset
+                      </button>
+                    </div>
+                  </>
+                )}
+              </div>
+            </div>
+
+            {/* SEARCH FILTERS SECTION */}
+            <div className={styles.section}>
+              <h2>Search Filters</h2>
+
+              <form onSubmit={handleSearch}>
+                {/* Genre */}
                 <div className={styles.filterGroup}>
-                  <label>Sub Genre</label>
-                  <select value={secondaryGenre} onChange={(e) => setSecondaryGenre(e.target.value)}>
-                    <option value="">All</option>
-                    {GENRES[genre].map(sg => (
-                      <option key={sg} value={sg}>{sg}</option>
+                  <label>Primary Genre</label>
+                  <select
+                    value={genre}
+                    onChange={(e) => {
+                      setGenre(e.target.value);
+                      setSecondaryGenre('');
+                    }}
+                  >
+                    <option value="">All Genres</option>
+                    {Object.keys(GENRES).map(g => (
+                      <option key={g} value={g}>{g}</option>
                     ))}
                   </select>
                 </div>
-              )}
 
-              {/* Mood */}
-              <div className={styles.filterGroup}>
-                <label>Mood</label>
-                <select value={mood} onChange={(e) => setMood(e.target.value)}>
-                  <option value="">All Moods</option>
-                  {MOODS.map(m => (
-                    <option key={m} value={m}>{m}</option>
-                  ))}
-                </select>
-              </div>
+                {/* Secondary Genre */}
+                {genre && (
+                  <div className={styles.filterGroup}>
+                    <label>Sub Genre</label>
+                    <select value={secondaryGenre} onChange={(e) => setSecondaryGenre(e.target.value)}>
+                      <option value="">All</option>
+                      {GENRES[genre].map(sg => (
+                        <option key={sg} value={sg}>{sg}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
 
-              {/* BPM Range */}
-              <div className={styles.filterGroup}>
-                <label>BPM Range: {minBpm} - {maxBpm}</label>
-                <input
-                  type="range"
-                  min="40"
-                  max="200"
-                  value={minBpm}
-                  onChange={(e) => setMinBpm(parseInt(e.target.value))}
-                  style={{width: '100%'}}
-                />
-                <input
-                  type="range"
-                  min="40"
-                  max="200"
-                  value={maxBpm}
-                  onChange={(e) => setMaxBpm(parseInt(e.target.value))}
-                  style={{width: '100%'}}
-                />
-              </div>
+                {/* Mood */}
+                <div className={styles.filterGroup}>
+                  <label>Mood</label>
+                  <select value={mood} onChange={(e) => setMood(e.target.value)}>
+                    <option value="">All Moods</option>
+                    {MOODS.map(m => (
+                      <option key={m} value={m}>{m}</option>
+                    ))}
+                  </select>
+                </div>
 
-              {/* Vocals */}
-              <div className={styles.filterGroup}>
-                <label>
+                {/* BPM Range */}
+                <div className={styles.filterGroup}>
+                  <label>BPM Range: {minBpm} - {maxBpm}</label>
                   <input
-                    type="checkbox"
-                    checked={includeVox}
-                    onChange={(e) => setIncludeVox(e.target.checked)}
+                    type="range"
+                    min="40"
+                    max="200"
+                    value={minBpm}
+                    onChange={(e) => setMinBpm(parseInt(e.target.value))}
+                    style={{width: '100%'}}
                   />
-                  Include Vocals
-                </label>
-              </div>
+                  <input
+                    type="range"
+                    min="40"
+                    max="200"
+                    value={maxBpm}
+                    onChange={(e) => setMaxBpm(parseInt(e.target.value))}
+                    style={{width: '100%'}}
+                  />
+                </div>
 
-              {/* Manual BPM Input */}
-              <div className={styles.filterGroup}>
-                <label>Reference BPM (optional)</label>
-                <input
-                  type="number"
-                  placeholder="e.g., 120"
-                  value={bpm}
-                  onChange={(e) => setBpm(e.target.value)}
-                  min="40"
-                  max="200"
-                />
-              </div>
+                {/* Vocals */}
+                <div className={styles.filterGroup}>
+                  <label>
+                    <input
+                      type="checkbox"
+                      checked={includeVox}
+                      onChange={(e) => setIncludeVox(e.target.checked)}
+                    />
+                    Include Vocals
+                  </label>
+                </div>
 
-              {/* Search Button */}
-              <button
-                type="submit"
-                className={styles.searchBtn}
-                disabled={loading}
-              >
-                {loading ? 'Searching...' : '🔍 Search Library'}
-              </button>
-            </form>
+                {/* Manual BPM Input */}
+                <div className={styles.filterGroup}>
+                  <label>Reference BPM</label>
+                  <input
+                    type="number"
+                    placeholder={tapBpm ? `${tapBpm} (from tap)` : 'e.g., 120'}
+                    value={bpm}
+                    onChange={(e) => setBpm(e.target.value)}
+                    min="40"
+                    max="200"
+                  />
+                </div>
+
+                {/* Search Button */}
+                <button
+                  type="submit"
+                  className={styles.searchBtn}
+                  disabled={loading}
+                >
+                  {loading ? 'Searching...' : '🔍 Search Library'}
+                </button>
+              </form>
+            </div>
           </aside>
 
           {/* Results */}
           <section className={styles.results}>
             {results.length === 0 && !loading && (
               <div className={styles.placeholder}>
-                <p>👋 Enter search criteria and click "Search Library" to find matching tracks</p>
+                <p>👋 Upload audio or tap tempo, then search to find matching tracks</p>
               </div>
             )}
 

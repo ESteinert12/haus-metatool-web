@@ -295,6 +295,157 @@
   }
 }
 
+/* Source Audio & Tap Tempo Sections */
+.section {
+  margin-bottom: 30px;
+}
+
+.sourceBox {
+  background: #F5F5F5;
+  border: 2px dashed #0066CC;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+  text-align: center;
+}
+
+.uploadLabel {
+  cursor: pointer;
+}
+
+.uploadBtn {
+  padding: 12px;
+  background: #0066CC;
+  color: white;
+  border-radius: 4px;
+  font-weight: bold;
+  transition: all 0.2s;
+}
+
+.uploadBtn:hover {
+  background: #0052A3;
+  transform: translateY(-2px);
+}
+
+.fileInfo {
+  margin-top: 12px;
+  padding: 8px;
+  background: #E8F4FF;
+  border-radius: 4px;
+}
+
+.fileInfo p {
+  margin: 0;
+  font-size: 13px;
+  color: #1A1A18;
+  font-weight: bold;
+}
+
+.fileInfo small {
+  color: #888888;
+  font-size: 11px;
+}
+
+/* Tap Tempo */
+.tapTempoBox {
+  background: #F5F5F5;
+  border: 1px solid #E0E0E0;
+  border-radius: 8px;
+  padding: 16px;
+  margin-bottom: 16px;
+}
+
+.tapHeader {
+  margin-bottom: 12px;
+}
+
+.tapHeader h3 {
+  margin: 0 0 4px 0;
+  font-size: 14px;
+  color: #1A1A18;
+}
+
+.tapHeader small {
+  color: #888888;
+  font-size: 12px;
+}
+
+.tapStartBtn {
+  width: 100%;
+  padding: 12px;
+  background: #0066CC;
+  color: white;
+  border: none;
+  border-radius: 4px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+
+.tapStartBtn:hover {
+  background: #0052A3;
+  transform: translateY(-2px);
+}
+
+.tapDisplay {
+  background: #FFFFFF;
+  border: 1px solid #E0E0E0;
+  border-radius: 4px;
+  padding: 12px;
+  margin-bottom: 12px;
+  text-align: center;
+}
+
+.tapCount {
+  font-size: 16px;
+  font-weight: bold;
+  color: #1A1A18;
+  margin-bottom: 8px;
+}
+
+.tapBpmResult {
+  font-size: 24px;
+  font-weight: bold;
+  color: #E91E63;
+}
+
+.tapButtonGroup {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.tapStopBtn,
+.tapResetBtn {
+  padding: 10px;
+  border: none;
+  border-radius: 4px;
+  font-weight: bold;
+  cursor: pointer;
+  transition: all 0.2s;
+  font-size: 12px;
+}
+
+.tapStopBtn {
+  background: #E91E63;
+  color: white;
+}
+
+.tapStopBtn:hover {
+  background: #C5004F;
+}
+
+.tapResetBtn {
+  background: #FFFFFF;
+  color: #0066CC;
+  border: 1px solid #0066CC;
+}
+
+.tapResetBtn:hover {
+  background: #0066CC;
+  color: white;
+}
+
 @media (max-width: 768px) {
   .main {
     padding: 12px 20px;
