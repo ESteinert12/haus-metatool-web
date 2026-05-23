@@ -35,6 +35,7 @@ export default function Home() {
   const [isTapping, setIsTapping] = useState(false);
   const [tapBpm, setTapBpm] = useState(null);
   const [tapCount, setTapCount] = useState(0);
+  const [analyzing, setAnalyzing] = useState(false);
   const tapTimesRef = useRef([]);
   const fileInputRef = useRef(null);
 
@@ -89,7 +90,7 @@ export default function Home() {
     setTapBpm(null);
   };
 
-  const handleFileUpload = (e) => {
+  const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (file) {
       const audioUrl = URL.createObjectURL(file);
@@ -97,7 +98,51 @@ export default function Home() {
         name: file.name,
         size: (file.size / 1024 / 1024).toFixed(2), // MB
         url: audioUrl,
+        analyzing: true,
       });
+
+      // Analyze the audio file
+      setAnalyzing(true);
+      try {
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+          const audioData = event.target.result.split(',')[1]; // Get base64 part
+
+          const response = await axios.post('/api/analyze', {
+            audioData,
+            fileName: file.name,
+          });
+
+          const { analysis } = response.data;
+
+          // Auto-populate fields with analysis results
+          if (analysis.bpm) {
+            setBpm(analysis.bpm.toString());
+          }
+          if (analysis.genre) {
+            setGenre(analysis.genre);
+          }
+          if (analysis.mood) {
+            setMood(analysis.mood);
+          }
+
+          setSourceFile((prev) => ({
+            ...prev,
+            analyzing: false,
+            analysis,
+          }));
+        };
+        reader.readAsDataURL(file);
+      } catch (error) {
+        console.error('Analysis failed:', error);
+        setSourceFile((prev) => ({
+          ...prev,
+          analyzing: false,
+          error: 'Failed to analyze audio',
+        }));
+      } finally {
+        setAnalyzing(false);
+      }
     }
   };
 
@@ -168,6 +213,30 @@ export default function Home() {
                     >
                       Your browser does not support the audio element.
                     </audio>
+                  </div>
+                )}
+                {analyzing && (
+                  <div className={styles.analyzing}>
+                    🔄 Analyzing audio...
+                  </div>
+                )}
+                {sourceFile?.analysis && (
+                  <div className={styles.analysisResults}>
+                    <strong>Auto-Detected:</strong>
+                    <div className={styles.analysisMeta}>
+                      {sourceFile.analysis.bpm && (
+                        <span>🎵 {sourceFile.analysis.bpm} BPM</span>
+                      )}
+                      {sourceFile.analysis.genre && (
+                        <span>🎭 {sourceFile.analysis.genre}</span>
+                      )}
+                      {sourceFile.analysis.mood && (
+                        <span>😊 {sourceFile.analysis.mood}</span>
+                      )}
+                      {sourceFile.analysis.keySig && (
+                        <span>🎼 {sourceFile.analysis.keySig}</span>
+                      )}
+                    </div>
                   </div>
                 )}
               </div>
