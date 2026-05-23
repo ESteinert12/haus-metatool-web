@@ -92,9 +92,11 @@ export default function Home() {
   const handleFileUpload = (e) => {
     const file = e.target.files?.[0];
     if (file) {
+      const audioUrl = URL.createObjectURL(file);
       setSourceFile({
         name: file.name,
         size: (file.size / 1024 / 1024).toFixed(2), // MB
+        url: audioUrl,
       });
     }
   };
@@ -155,6 +157,17 @@ export default function Home() {
                   <div className={styles.fileInfo}>
                     <p>✓ {sourceFile.name}</p>
                     <small>{sourceFile.size} MB</small>
+                  </div>
+                )}
+                {sourceFile && sourceFile.url && (
+                  <div className={styles.playerBox}>
+                    <audio
+                      controls
+                      className={styles.audioPlayer}
+                      src={sourceFile.url}
+                    >
+                      Your browser does not support the audio element.
+                    </audio>
                   </div>
                 )}
               </div>
