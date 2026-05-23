@@ -339,6 +339,9 @@
   font-size: 13px;
   color: #1A1A18;
   font-weight: bold;
+  word-break: break-word;
+  overflow-wrap: break-word;
+  white-space: normal;
 }
 
 .fileInfo small {
