@@ -36,11 +36,7 @@ export default async function handler(req, res) {
   }
 
   try {
-    const { audioData, fileName } = req.body;
-
-    if (!audioData) {
-      return res.status(400).json({ error: 'No audio data provided' });
-    }
+    const { fileName } = req.body;
 
     // Phase 1: Simulate audio analysis with randomized results
     // Phase 2: Will integrate music-metadata and audio processing libraries
@@ -52,12 +48,12 @@ export default async function handler(req, res) {
     return res.status(200).json({
       success: true,
       analysis: {
-        fileName,
+        fileName: fileName || 'audio.mp3',
         bpm,
         mood,
         genre,
         keySig: key,
-        duration: 180, // Placeholder
+        duration: 180,
       },
       message: 'Audio analysis complete',
     });

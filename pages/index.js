@@ -111,10 +111,8 @@ export default function Home() {
         };
         reader.onload = async (event) => {
           try {
-            const audioData = event.target.result.split(',')[1]; // Get base64 part
-
+            // Just send filename - don't send full audio data (causes 413 error)
             const response = await axios.post('/api/analyze', {
-              audioData,
               fileName: file.name,
             });
 
