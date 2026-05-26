@@ -121,23 +121,29 @@ export default function Home() {
             const { analysis } = response.data;
             console.log('Analysis received:', analysis);
 
+            // Update all state at once
+            setAnalyzing(false);
+
             // Auto-populate fields with analysis results
             if (analysis?.bpm) {
               setBpm(analysis.bpm.toString());
+              console.log('Setting BPM to:', analysis.bpm.toString());
             }
             if (analysis?.genre) {
               setGenre(analysis.genre);
+              console.log('Setting genre to:', analysis.genre);
             }
             if (analysis?.mood) {
               setMood(analysis.mood);
+              console.log('Setting mood to:', analysis.mood);
             }
 
-            setSourceFile((prev) => ({
-              ...prev,
-              analyzing: false,
+            setSourceFile({
+              name: file.name,
+              size: (file.size / 1024 / 1024).toFixed(2),
+              url: audioUrl,
               analysis: analysis,
-            }));
-            setAnalyzing(false);
+            });
           } catch (error) {
             console.error('Analysis failed:', error);
             setSourceFile((prev) => ({
