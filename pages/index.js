@@ -385,11 +385,11 @@ export default function Home() {
               </div>
             )}
 
-            {results.length > 0 && (
+            {results && results.length > 0 && (
               <div>
                 <h2>Results ({results.length} found)</h2>
                 <div className={styles.resultsList}>
-                  {results.map((track, idx) => (
+                  {Array.isArray(results) && results.map((track, idx) => (
                     <div key={idx} className={styles.card}>
                       <div className={styles.cardHeader}>
                         <h3>{track.title}</h3>
