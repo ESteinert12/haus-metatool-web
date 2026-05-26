@@ -1,5 +1,5 @@
 export const dynamic = 'force-dynamic';
-
+export const revalidate = 0;
 
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios'
