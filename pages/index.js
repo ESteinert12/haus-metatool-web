@@ -105,42 +105,52 @@ export default function Home() {
       setAnalyzing(true);
       try {
         const reader = new FileReader();
+        reader.onerror = () => {
+          console.error('FileReader error');
+          setAnalyzing(false);
+        };
         reader.onload = async (event) => {
-          const audioData = event.target.result.split(',')[1]; // Get base64 part
+          try {
+            const audioData = event.target.result.split(',')[1]; // Get base64 part
 
-          const response = await axios.post('/api/analyze', {
-            audioData,
-            fileName: file.name,
-          });
+            const response = await axios.post('/api/analyze', {
+              audioData,
+              fileName: file.name,
+            });
 
-          const { analysis } = response.data;
+            const { analysis } = response.data;
+            console.log('Analysis received:', analysis);
 
-          // Auto-populate fields with analysis results
-          if (analysis.bpm) {
-            setBpm(analysis.bpm.toString());
+            // Auto-populate fields with analysis results
+            if (analysis?.bpm) {
+              setBpm(analysis.bpm.toString());
+            }
+            if (analysis?.genre) {
+              setGenre(analysis.genre);
+            }
+            if (analysis?.mood) {
+              setMood(analysis.mood);
+            }
+
+            setSourceFile((prev) => ({
+              ...prev,
+              analyzing: false,
+              analysis: analysis,
+            }));
+            setAnalyzing(false);
+          } catch (error) {
+            console.error('Analysis failed:', error);
+            setSourceFile((prev) => ({
+              ...prev,
+              analyzing: false,
+              error: 'Failed to analyze audio',
+            }));
+            setAnalyzing(false);
           }
-          if (analysis.genre) {
-            setGenre(analysis.genre);
-          }
-          if (analysis.mood) {
-            setMood(analysis.mood);
-          }
-
-          setSourceFile((prev) => ({
-            ...prev,
-            analyzing: false,
-            analysis,
-          }));
         };
         reader.readAsDataURL(file);
       } catch (error) {
-        console.error('Analysis failed:', error);
-        setSourceFile((prev) => ({
-          ...prev,
-          analyzing: false,
-          error: 'Failed to analyze audio',
-        }));
-      } finally {
+        console.error('File read error:', error);
         setAnalyzing(false);
       }
     }
