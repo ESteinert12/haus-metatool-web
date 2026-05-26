@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import styles from '../styles/Home.module.css';
-
+ 
 const GENRES = {
   'ALTERNATIVE ROCK': ['Grunge', 'Post-Grunge', 'Pop Punk', 'Indie', 'Nu-Metal'],
   'AMBIENT': ['Wallpaper', 'Ambient House', 'Acid Jazz', 'Trip Hop'],
@@ -12,13 +12,13 @@ const GENRES = {
   'FOLK': ['Acoustic', 'Indie Folk', 'Folk Rock', 'Americana'],
   'HIP HOP/RAP': ['Electro', 'East Coast', 'West Coast', 'Trap'],
 };
-
+ 
 const MOODS = [
   'Uplifting', 'Epic', 'Dramatic', 'Mysterious', 'Romantic',
   'Melancholic', 'Energetic', 'Calm', 'Tense', 'Playful',
   'Dark', 'Hopeful', 'Intense', 'Peaceful', 'Joyful'
 ];
-
+ 
 export default function Home() {
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
@@ -29,16 +29,17 @@ export default function Home() {
   const [minBpm, setMinBpm] = useState(80);
   const [maxBpm, setMaxBpm] = useState(140);
   const [includeVox, setIncludeVox] = useState(true);
-
+ 
   // Source audio & tap tempo
   const [sourceFile, setSourceFile] = useState(null);
   const [isTapping, setIsTapping] = useState(false);
   const [tapBpm, setTapBpm] = useState(null);
   const [tapCount, setTapCount] = useState(0);
   const [analyzing, setAnalyzing] = useState(false);
+ 
   const tapTimesRef = useRef([]);
   const fileInputRef = useRef(null);
-
+ 
   // Tap tempo keyboard handler
   useEffect(() => {
     const handleKeyPress = (e) => {
@@ -47,18 +48,18 @@ export default function Home() {
         recordTap();
       }
     };
-
+ 
     if (isTapping) {
       window.addEventListener('keydown', handleKeyPress);
       return () => window.removeEventListener('keydown', handleKeyPress);
     }
   }, [isTapping, tapCount]);
-
+ 
   const recordTap = () => {
     const now = Date.now();
     tapTimesRef.current.push(now);
     setTapCount(tapTimesRef.current.length);
-
+ 
     // Calculate BPM after 8+ taps
     if (tapTimesRef.current.length >= 8) {
       const intervals = [];
@@ -71,25 +72,25 @@ export default function Home() {
       setBpm(calculatedBpm.toString());
     }
   };
-
+ 
   const startTapTempo = () => {
     setIsTapping(true);
     setTapCount(0);
     tapTimesRef.current = [];
     setTapBpm(null);
   };
-
+ 
   const stopTapTempo = () => {
     setIsTapping(false);
   };
-
+ 
   const resetTapTempo = () => {
     setIsTapping(false);
     setTapCount(0);
     tapTimesRef.current = [];
     setTapBpm(null);
   };
-
+ 
   const handleFileUpload = async (e) => {
     const file = e.target.files?.[0];
     if (file) {
@@ -100,7 +101,7 @@ export default function Home() {
         url: audioUrl,
         analyzing: true,
       });
-
+ 
       // Analyze the audio file
       setAnalyzing(true);
       try {
@@ -108,10 +109,10 @@ export default function Home() {
         const response = await axios.post('/api/analyze', {
           fileName: file.name,
         });
-
+ 
         const { analysis } = response.data;
         console.log('Analysis received:', analysis);
-
+ 
         // Auto-populate fields with analysis results
         if (analysis?.bpm) {
           setBpm(analysis.bpm.toString());
@@ -125,7 +126,7 @@ export default function Home() {
           setMood(analysis.mood);
           console.log('Setting mood to:', analysis.mood);
         }
-
+ 
         setSourceFile({
           name: file.name,
           size: (file.size / 1024 / 1024).toFixed(2),
@@ -144,7 +145,8 @@ export default function Home() {
       }
     }
   };
-
+ 
+  // ✅ FIXED: Cache busting + proper error handling + safe results extraction
   const handleSearch = async (e) => {
     e.preventDefault();
     setLoading(true);
@@ -156,17 +158,32 @@ export default function Home() {
           mood,
           minBpm,
           maxBpm,
-        }
+        },
+        // Cache busting headers - force fresh data
+        headers: {
+          'Cache-Control': 'no-cache',
+          'Pragma': 'no-cache',
+        },
       });
-      setResults(response.data.results || []);
+ 
+      // Safely extract and validate results
+      const results = response.data?.results;
+      if (Array.isArray(results)) {
+        setResults(results);
+        console.log('Search successful:', results.length, 'results');
+      } else {
+        console.error('Invalid results format:', response.data);
+        setResults([]);
+      }
     } catch (error) {
       console.error('Search error:', error);
+      setResults([]); // Reset to empty array on error
       alert('Search failed: ' + error.message);
     } finally {
       setLoading(false);
     }
   };
-
+ 
   return (
     <div className={styles.container}>
       {/* Header */}
@@ -174,7 +191,7 @@ export default function Home() {
         <img src="/HAUS V2 Logo (1500x413).png" alt="HAUS Metatool Logo" className={styles.logoImg} />
         <div className={styles.subtitle}>Music Search & Matching</div>
       </header>
-
+ 
       <main className={styles.main}>
         <div className={styles.grid}>
           {/* Sidebar - Source Audio & Filters */}
@@ -182,7 +199,7 @@ export default function Home() {
             {/* SOURCE AUDIO SECTION */}
             <div className={styles.section}>
               <h2>Source Audio</h2>
-
+ 
               {/* File Upload */}
               <div className={styles.sourceBox}>
                 <label className={styles.uploadLabel}>
@@ -197,12 +214,14 @@ export default function Home() {
                     📁 Import Audio File
                   </div>
                 </label>
+ 
                 {sourceFile && (
                   <div className={styles.fileInfo}>
                     <p>✓ {sourceFile.name}</p>
                     <small>{sourceFile.size} MB</small>
                   </div>
                 )}
+ 
                 {sourceFile && sourceFile.url && (
                   <div className={styles.playerBox}>
                     <audio
@@ -214,11 +233,13 @@ export default function Home() {
                     </audio>
                   </div>
                 )}
+ 
                 {analyzing && (
                   <div className={styles.analyzing}>
                     🔄 Analyzing audio...
                   </div>
                 )}
+ 
                 {sourceFile?.analysis && (
                   <div className={styles.analysisResults}>
                     <strong>Auto-Detected:</strong>
@@ -239,14 +260,14 @@ export default function Home() {
                   </div>
                 )}
               </div>
-
+ 
               {/* Tap Tempo */}
               <div className={styles.tapTempoBox}>
                 <div className={styles.tapHeader}>
                   <h3>Tap Tempo</h3>
                   <small>Press spacebar to tap</small>
                 </div>
-
+ 
                 {!isTapping ? (
                   <button
                     type="button"
@@ -286,7 +307,7 @@ export default function Home() {
                   </>
                 )}
               </div>
-
+ 
               {/* Reference BPM */}
               <div className={styles.filterGroup}>
                 <label>Reference BPM</label>
@@ -300,11 +321,11 @@ export default function Home() {
                 />
               </div>
             </div>
-
+ 
             {/* SEARCH FILTERS SECTION */}
             <div className={styles.section}>
               <h2>Search Filters</h2>
-
+ 
               <form onSubmit={handleSearch}>
                 {/* Genre */}
                 <div className={styles.filterGroup}>
@@ -322,7 +343,7 @@ export default function Home() {
                     ))}
                   </select>
                 </div>
-
+ 
                 {/* Secondary Genre */}
                 {genre && (
                   <div className={styles.filterGroup}>
@@ -335,7 +356,7 @@ export default function Home() {
                     </select>
                   </div>
                 )}
-
+ 
                 {/* Mood */}
                 <div className={styles.filterGroup}>
                   <label>Mood</label>
@@ -346,7 +367,7 @@ export default function Home() {
                     ))}
                   </select>
                 </div>
-
+ 
                 {/* Vocals */}
                 <div className={styles.filterGroup}>
                   <label>
@@ -358,7 +379,7 @@ export default function Home() {
                     Include Vocals
                   </label>
                 </div>
-
+ 
                 {/* Search Button */}
                 <button
                   type="submit"
@@ -370,7 +391,7 @@ export default function Home() {
               </form>
             </div>
           </aside>
-
+ 
           {/* Results */}
           <section className={styles.results}>
             {results.length === 0 && !loading && (
@@ -378,13 +399,13 @@ export default function Home() {
                 <p>👋 Upload audio or tap tempo, then search to find matching tracks</p>
               </div>
             )}
-
+ 
             {loading && (
               <div className={styles.loading}>
                 <p>🔄 Searching {29169} tracks...</p>
               </div>
             )}
-
+ 
             {results && results.length > 0 && (
               <div>
                 <h2>Results ({results.length} found)</h2>
@@ -444,3 +465,4 @@ export default function Home() {
     </div>
   );
 }
+ 
