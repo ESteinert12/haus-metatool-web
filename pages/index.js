@@ -4,16 +4,9 @@ export const revalidate = 0;
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 
-const GENRES = {
-  'ALTERNATIVE ROCK': ['Grunge', 'Post-Grunge', 'Pop Punk', 'Indie', 'Nu-Metal'],
-  'AMBIENT': ['Wallpaper', 'Ambient House', 'Acid Jazz', 'Trip Hop'],
-  'BLUES': ['Delta Blues', 'Chicago Blues', 'Memphis Blues'],
-  'CLASSIC ROCK': ['Garage Rock', 'Prog Rock', 'Psychedelic', 'Jazz Rock'],
-  'COUNTRY': ['Americana', 'Country Rock', 'Pop Country', 'Classic Country'],
-  'ELECTRONIC': ['House', 'Techno', 'Drum & Bass', 'Dubstep'],
-  'FOLK': ['Acoustic', 'Indie Folk', 'Folk Rock', 'Americana'],
-  'HIP HOP/RAP': ['Electro', 'East Coast', 'West Coast', 'Trap'],
-};
+const GENRES = [
+  'ALTERNATIVE ROCK', 'AMBIENT', 'BLUES', 'CLASSIC ROCK', 'COUNTRY', 'ELECTRONIC', 'FOLK', 'HIP HOP/RAP'
+];
 
 const MOODS = [
   'Uplifting', 'Epic', 'Dramatic', 'Mysterious', 'Romantic',
@@ -28,11 +21,9 @@ export default function Home() {
   const [searchError, setSearchError] = useState(null);
   const [bpm, setBpm] = useState('');
   const [genre, setGenre] = useState('');
-  const [secondaryGenre, setSecondaryGenre] = useState('');
   const [mood, setMood] = useState('');
   const [minBpm, setMinBpm] = useState(80);
   const [maxBpm, setMaxBpm] = useState(140);
-  const [includeVox, setIncludeVox] = useState(true);
   const [sourceFile, setSourceFile] = useState(null);
   const [isTapping, setIsTapping] = useState(false);
   const [tapBpm, setTapBpm] = useState(null);
@@ -183,6 +174,7 @@ export default function Home() {
       <main style={{ padding: '30px', maxWidth: '1400px', margin: '0 auto' }}>
         <div style={{ display: 'grid', gridTemplateColumns: '350px 1fr', gap: '30px' }}>
           <aside>
+            {/* SOURCE AUDIO SECTION */}
             <div style={{ background: 'white', padding: '20px', borderRadius: '10px', marginBottom: '20px' }}>
               <h2 style={{ marginTop: 0, borderBottom: '2px solid #667eea', paddingBottom: '10px' }}>Source Audio</h2>
 
@@ -219,6 +211,7 @@ export default function Home() {
                 )}
               </div>
 
+              {/* TAP TEMPO */}
               <div style={{ border: '2px solid #667eea', padding: '15px', borderRadius: '8px', marginTop: '20px' }}>
                 <h3 style={{ margin: '0 0 15px 0' }}>Tap Tempo</h3>
                 {!isTapping ? (
@@ -238,33 +231,32 @@ export default function Home() {
               </div>
             </div>
 
+            {/* SEARCH FILTERS SECTION */}
             <div style={{ background: 'white', padding: '20px', borderRadius: '10px' }}>
               <h2 style={{ marginTop: 0, borderBottom: '2px solid #667eea', paddingBottom: '10px' }}>Search Filters</h2>
               <form onSubmit={handleSearch}>
                 <div style={{ marginBottom: '15px' }}>
-                  <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>Primary Genre</label>
-                  <select value={genre} onChange={(e) => { setGenre(e.target.value); setSecondaryGenre(''); }} style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '5px' }}>
+                  <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>Genre</label>
+                  <select value={genre} onChange={(e) => setGenre(e.target.value)} style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '5px' }}>
                     <option value="">All Genres</option>
-                    {Object.keys(GENRES).map(g => <option key={g} value={g}>{g}</option>)}
+                    {GENRES && GENRES.length > 0 && GENRES.map(g => <option key={g} value={g}>{g}</option>)}
                   </select>
                 </div>
-
-                {genre && (
-                  <div style={{ marginBottom: '15px' }}>
-                    <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>Sub Genre</label>
-                    <select value={secondaryGenre} onChange={(e) => setSecondaryGenre(e.target.value)} style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '5px' }}>
-                      <option value="">All</option>
-                      {GENRES[genre].map(sg => <option key={sg} value={sg}>{sg}</option>)}
-                    </select>
-                  </div>
-                )}
 
                 <div style={{ marginBottom: '15px' }}>
                   <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>Mood</label>
                   <select value={mood} onChange={(e) => setMood(e.target.value)} style={{ width: '100%', padding: '8px', border: '1px solid #ddd', borderRadius: '5px' }}>
                     <option value="">All Moods</option>
-                    {MOODS.map(m => <option key={m} value={m}>{m}</option>)}
+                    {MOODS && MOODS.length > 0 && MOODS.map(m => <option key={m} value={m}>{m}</option>)}
                   </select>
+                </div>
+
+                <div style={{ marginBottom: '15px' }}>
+                  <label style={{ display: 'block', marginBottom: '5px', fontWeight: 500 }}>BPM Range</label>
+                  <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                    <input type="number" placeholder="Min" value={minBpm} onChange={(e) => setMinBpm(e.target.value)} style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '5px' }} />
+                    <input type="number" placeholder="Max" value={maxBpm} onChange={(e) => setMaxBpm(e.target.value)} style={{ padding: '8px', border: '1px solid #ddd', borderRadius: '5px' }} />
+                  </div>
                 </div>
 
                 <button type="submit" disabled={loading} style={{ width: '100%', padding: '12px', background: 'linear-gradient(135deg, #667eea 0%, #764ba2 100%)', color: 'white', border: 'none', borderRadius: '5px', fontWeight: 600, cursor: 'pointer', marginTop: '20px', opacity: loading ? 0.6 : 1 }}>
@@ -274,6 +266,7 @@ export default function Home() {
             </div>
           </aside>
 
+          {/* RESULTS SECTION */}
           <section style={{ background: 'white', padding: '30px', borderRadius: '10px', minHeight: '400px' }}>
             {!loading && !hasResults && !searchError && (
               <div style={{ textAlign: 'center', padding: '60px 20px', color: '#999' }}>
