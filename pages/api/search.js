@@ -16,7 +16,7 @@ export default async function handler(req, res) {
 
     // Query Filemaker database
     const records = await queryFilemaker(query);
-    const tracks = formatTracks(records);
+    const tracks = await formatTracks(records);
 
     // Filter and sort by BPM match if reference BPM provided
     let filtered = tracks;

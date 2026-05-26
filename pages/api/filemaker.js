@@ -52,19 +52,40 @@ export async function queryFilemaker(query = {}) {
 }
 
 // Format Filemaker records for display
-export function formatTracks(records) {
-  return records.map((record) => {
-    const fields = record.fieldData;
-    return {
-      sku: fields.cSKUROOT || 'N/A',
-      title: fields.Title || 'Untitled',
-      composer: fields.ComposerTeamID_fk || 'Unknown',
-      bpm: fields.BPM ? parseInt(fields.BPM) : null,
-      genre: fields.GENRE_SA || 'Unknown',
-      mood: fields.MOOD_SA || 'Unknown',
-      key_sig: 'N/A', // Not available in database
-      duration: 0, // Not available in database
-      submixes: [], // Will populate from Dropbox if added later
-    };
-  });
+export async function formatTracks(records) {
+  const { findAudioFileBySKU, getPreviewLink } = await import('./dropbox.js');
+
+  const formatted = await Promise.all(
+    records.map(async (record) => {
+      const fields = record.fieldData;
+      const sku = fields.cSKUROOT || 'N/A';
+
+      // Find Dropbox file
+      let dropboxLink = null;
+      let dropboxFile = null;
+      try {
+        dropboxFile = await findAudioFileBySKU(sku);
+        if (dropboxFile) {
+          dropboxLink = await getPreviewLink(dropboxFile.path);
+        }
+      } catch (error) {
+        console.warn(`Could not fetch Dropbox link for ${sku}:`, error);
+      }
+
+      return {
+        sku,
+        title: fields.Title || 'Untitled',
+        composer: fields.ComposerTeamID_fk || 'Unknown',
+        bpm: fields.BPM ? parseInt(fields.BPM) : null,
+        genre: fields.GENRE_SA || 'Unknown',
+        mood: fields.MOOD_SA || 'Unknown',
+        key_sig: 'N/A', // Not available in database
+        duration: 0, // Not available in database
+        dropboxLink: dropboxLink, // Preview link from Dropbox
+        dropboxFile: dropboxFile?.name, // File name
+      };
+    })
+  );
+
+  return formatted;
 }

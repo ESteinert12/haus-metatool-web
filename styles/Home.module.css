@@ -298,6 +298,29 @@
   box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
 }
 
+/* Dropbox Preview Player */
+.dropboxPlayer {
+  margin: 12px 0;
+  padding: 12px;
+  background: #F5F5F5;
+  border: 1px solid #E0E0E0;
+  border-radius: 4px;
+}
+
+.audioPreview {
+  width: 100%;
+  height: 32px;
+  outline: none;
+}
+
+.fileName {
+  display: block;
+  margin-top: 8px;
+  font-size: 11px;
+  color: #888888;
+  word-break: break-word;
+}
+
 /* Responsive */
 @media (max-width: 1024px) {
   .grid {

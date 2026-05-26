@@ -420,6 +420,18 @@ export default function Home() {
                         <span>🎭 {track.genre}</span>
                         <span>⏱️ {track.duration}s</span>
                       </div>
+                      {track.dropboxLink && (
+                        <div className={styles.dropboxPlayer}>
+                          <audio
+                            controls
+                            className={styles.audioPreview}
+                            src={track.dropboxLink}
+                          >
+                            Your browser does not support audio preview.
+                          </audio>
+                          <small className={styles.fileName}>📁 {track.dropboxFile}</small>
+                        </div>
+                      )}
                       {track.submixes && (
                         <div className={styles.submixes}>
                           <strong>Versions:</strong>
