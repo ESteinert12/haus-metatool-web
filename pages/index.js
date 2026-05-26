@@ -1,5 +1,8 @@
+export const dynamic = 'force-dynamic';
+
+
 import { useState, useEffect, useRef } from 'react';
-import axios from 'axios';
+import axios from 'axios'
 import styles from '../styles/Home.module.css';
 
 const GENRES = {
