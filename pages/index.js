@@ -3,7 +3,7 @@ export const revalidate = 0;
 
 import { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import styles from '../styles/Home.module.css';
+// import  from '..//Home.module.css';
 
 export default function Home() {
   const [mounted, setMounted] = useState(false);
@@ -54,58 +54,58 @@ export default function Home() {
   };
 
   if (!mounted) {
-    return <div className={styles.container}><main className={styles.main}></main></div>;
+    return <div className={container}><main className={.main}></main></div>;
   }
 
   return (
-    <div className={styles.container}>
-      <header className={styles.header}>
-        <img src="/HAUS V2 Logo (1500x413).png" alt="HAUS Metatool Logo" className={styles.logoImg} />
-        <div className={styles.subtitle}>Music Search & Matching</div>
+    <div className={.container}>
+      <header className={.header}>
+        <img src="/HAUS V2 Logo (1500x413).png" alt="HAUS Metatool Logo" className={.logoImg} />
+        <div className={.subtitle}>Music Search & Matching</div>
       </header>
 
-      <main className={styles.main}>
-        <div className={styles.grid}>
-          <aside className={styles.sidebar}>
-            <div className={styles.section}>
+      <main className={.main}>
+        <div className={.grid}>
+          <aside className={.sidebar}>
+            <div className={.section}>
               <h2>Source Audio</h2>
 
-              <div className={styles.sourceBox}>
-                <label className={styles.uploadLabel}>
+              <div className={.sourceBox}>
+                <label className={.uploadLabel}>
                   <input
                     type="file"
                     accept="audio/*"
                     onChange={handleFileUpload}
                     style={{ display: 'none' }}
                   />
-                  <div className={styles.uploadBtn}>
+                  <div className={.uploadBtn}>
                     📁 Import Audio File
                   </div>
                 </label>
 
                 {sourceFile && (
-                  <div className={styles.fileInfo}>
+                  <div className={.fileInfo}>
                     <p>✓ {sourceFile.name}</p>
                     <small>{sourceFile.size} MB</small>
                   </div>
                 )}
 
                 {sourceFile?.url && (
-                  <div className={styles.playerBox}>
-                    <audio controls className={styles.audioPlayer} src={sourceFile.url}>
+                  <div className={.playerBox}>
+                    <audio controls className={.audioPlayer} src={sourceFile.url}>
                       Your browser does not support the audio element.
                     </audio>
                   </div>
                 )}
 
                 {analyzing && (
-                  <div className={styles.analyzing}>🔄 Analyzing audio...</div>
+                  <div className={.analyzing}>🔄 Analyzing audio...</div>
                 )}
 
                 {sourceFile?.analysis && (
-                  <div className={styles.analysisResults}>
+                  <div className={.analysisResults}>
                     <strong>Auto-Detected:</strong>
-                    <div className={styles.analysisMeta}>
+                    <div className={.analysisMeta}>
                       {sourceFile.analysis.bpm && <span>🎵 {sourceFile.analysis.bpm} BPM</span>}
                       {sourceFile.analysis.genre && <span>🎭 {sourceFile.analysis.genre}</span>}
                       {sourceFile.analysis.mood && <span>😊 {sourceFile.analysis.mood}</span>}
@@ -116,8 +116,8 @@ export default function Home() {
             </div>
           </aside>
 
-          <section className={styles.results}>
-            <div className={styles.placeholder}>
+          <section className={.results}>
+            <div className={.placeholder}>
               <p>👋 This is a test version to isolate the error</p>
               <p>Upload an audio file to test analysis</p>
             </div>
