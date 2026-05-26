@@ -20,6 +20,9 @@ const MOODS = [
 ];
 
 export default function Home() {
+  // Hydration fix: track if component is mounted
+  const [mounted, setMounted] = useState(false);
+
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searchError, setSearchError] = useState(null);
@@ -40,6 +43,11 @@ export default function Home() {
 
   const tapTimesRef = useRef([]);
   const fileInputRef = useRef(null);
+
+  // Mark component as mounted (fixes hydration mismatch)
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   // Tap tempo keyboard handler
   useEffect(() => {
@@ -98,15 +106,13 @@ export default function Home() {
       const audioUrl = URL.createObjectURL(file);
       setSourceFile({
         name: file.name,
-        size: (file.size / 1024 / 1024).toFixed(2), // MB
+        size: (file.size / 1024 / 1024).toFixed(2),
         url: audioUrl,
         analyzing: true,
       });
 
-      // Analyze the audio file
       setAnalyzing(true);
       try {
-        // Send to API for analysis (just filename - no audio data)
         const response = await axios.post('/api/analyze', {
           fileName: file.name,
         });
@@ -114,7 +120,6 @@ export default function Home() {
         const { analysis } = response.data;
         console.log('Analysis received:', analysis);
 
-        // Auto-populate fields with analysis results
         if (analysis?.bpm) {
           setBpm(analysis.bpm.toString());
           console.log('Setting BPM to:', analysis.bpm.toString());
@@ -151,7 +156,7 @@ export default function Home() {
     e.preventDefault();
     setLoading(true);
     setSearchError(null);
-    setResults([]); // Clear previous results before searching
+    setResults([]);
 
     try {
       const response = await axios.get('/api/search', {
@@ -168,7 +173,6 @@ export default function Home() {
         },
       });
 
-      // Safely extract and validate results
       const searchResults = response.data?.results;
       if (Array.isArray(searchResults)) {
         setResults(searchResults);
@@ -187,8 +191,12 @@ export default function Home() {
     }
   };
 
-  // Safely check if we have results to display
   const hasResults = Array.isArray(results) && results.length > 0;
+
+  // Don't render until mounted (prevents hydration mismatch)
+  if (!mounted) {
+    return <div className={styles.container}><main className={styles.main}></main></div>;
+  }
 
   return (
     <div className={styles.container}>
