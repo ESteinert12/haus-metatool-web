@@ -16,31 +16,39 @@ export async function queryFilemaker(query = {}) {
   try {
     const url = `https://${FILEMAKER_SERVER}/fmi/data/v1/databases/${FILEMAKER_DB}/layouts/${FILEMAKER_LAYOUT}/records`;
 
-    // Build query parameters
-    const params = new URLSearchParams();
+    // Build request body for Filemaker Find API
+    const requestBody = {
+      query: []
+    };
 
     // Map filter parameters to Filemaker field queries
     if (query.genre) {
-      params.append('_find', JSON.stringify([{ GENRE_SA: query.genre }]));
+      requestBody.query.push({ 'GENRE_SA': query.genre });
     }
     if (query.mood) {
-      params.append('_find', JSON.stringify([{ MOOD_SA: query.mood }]));
+      requestBody.query.push({ 'MOOD_SA': query.mood });
     }
     if (query.bpm) {
-      // Exact BPM match (or could do range with tolerance)
-      params.append('_find', JSON.stringify([{ BPM: query.bpm }]));
+      requestBody.query.push({ 'BPM': query.bpm.toString() });
     }
 
-    const response = await fetch(`${url}${params.toString() ? '?' + params.toString() : ''}`, {
-      method: 'GET',
+    // If no filters, just get all records with limit
+    if (requestBody.query.length === 0) {
+      requestBody.limit = 50;
+    }
+
+    const response = await fetch(url + '/_find', {
+      method: 'POST',
       headers: {
         'Authorization': getAuthHeader(),
         'Content-Type': 'application/json',
       },
+      body: JSON.stringify(requestBody),
     });
 
     if (!response.ok) {
-      throw new Error(`Filemaker API error: ${response.status} ${response.statusText}`);
+      const errorData = await response.text();
+      throw new Error(`Filemaker API error: ${response.status} - ${errorData}`);
     }
 
     const data = await response.json();

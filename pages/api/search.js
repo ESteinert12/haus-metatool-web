@@ -46,9 +46,11 @@ export default async function handler(req, res) {
     });
   } catch (error) {
     console.error('Search error:', error);
+    console.error('Full error:', JSON.stringify(error, null, 2));
     res.status(500).json({
       error: 'Search failed',
       details: error.message,
+      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined,
     });
   }
 }
