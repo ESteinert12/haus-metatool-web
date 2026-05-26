@@ -1,349 +1,83 @@
-/* HAUS Brand Colors - using direct values since CSS Modules don't support :root */
-
 .container {
   min-height: 100vh;
-  background: #FFFFFF;
-  display: flex;
-  flex-direction: column;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
 }
 
-/* Header */
 .header {
-  background: #FFFFFF;
-  border-bottom: 2px solid #E0E0E0;
-  padding: 20px 40px;
-  box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-}
-
-.logo {
-  font-size: 28px;
-  font-weight: bold;
-  color: #0066CC;
-  margin-bottom: 4px;
+  background: rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  text-align: center;
+  border-bottom: 2px solid rgba(255, 255, 255, 0.2);
 }
 
 .logoImg {
-  max-height: 60px;
-  width: auto;
-  margin-bottom: 8px;
+  max-width: 300px;
+  height: auto;
+  margin-bottom: 10px;
 }
 
 .subtitle {
-  font-size: 14px;
-  color: #888888;
+  color: white;
+  font-size: 18px;
+  font-weight: 500;
 }
 
-/* Main Layout */
 .main {
-  flex: 1;
-  display: flex;
-  padding: 20px 40px;
+  padding: 30px;
+  max-width: 1400px;
+  margin: 0 auto;
 }
 
 .grid {
   display: grid;
-  grid-template-columns: 300px 1fr;
+  grid-template-columns: 350px 1fr;
   gap: 30px;
-  width: 100%;
-  max-width: 1400px;
 }
 
-/* Sidebar - Filters */
 .sidebar {
-  background: #FFFFFF;
-  padding: 20px;
-  border: 1px solid #E0E0E0;
-  border-radius: 8px;
-  height: fit-content;
-  position: sticky;
-  top: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 
-.sidebar h2 {
-  margin: 0 0 20px 0;
-  font-size: 18px;
-  color: #1A1A18;
-  border-bottom: 2px solid #0066CC;
+.section {
+  background: white;
+  padding: 20px;
+  border-radius: 10px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.section h2 {
+  margin-top: 0;
+  color: #333;
+  border-bottom: 2px solid #667eea;
   padding-bottom: 10px;
 }
 
 .filterGroup {
-  margin-bottom: 16px;
+  margin-bottom: 15px;
 }
 
 .filterGroup label {
   display: block;
-  font-size: 12px;
-  font-weight: bold;
-  color: #1A1A18;
-  margin-bottom: 6px;
-  text-transform: uppercase;
+  margin-bottom: 5px;
+  font-weight: 500;
+  color: #555;
 }
 
 .filterGroup input,
 .filterGroup select {
   width: 100%;
   padding: 8px;
-  border: 1px solid #E0E0E0;
-  border-radius: 4px;
+  border: 1px solid #ddd;
+  border-radius: 5px;
   font-size: 14px;
-  color: #1A1A18;
-  background: #FFFFFF;
-}
-
-.filterGroup input:focus,
-.filterGroup select:focus {
-  outline: none;
-  border-color: #0066CC;
-  box-shadow: 0 0 0 2px rgba(0, 102, 204, 0.1);
-}
-
-.filterGroup input[type="checkbox"] {
-  width: auto;
-  margin-right: 8px;
-}
-
-.searchBtn {
-  width: 100%;
-  padding: 12px;
-  margin-top: 20px;
-  background: #FFFFFF;
-  color: #0066CC;
-  border: 2px solid;
-  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
-  border-radius: 4px;
-  font-size: 14px;
-  font-weight: bold;
-  cursor: pointer;
-  transition: all 0.3s;
-}
-
-.searchBtn:hover:not(:disabled) {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  color: white;
-  border: 2px solid transparent;
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
-}
-
-.searchBtn:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
-}
-
-/* Results Section */
-.results {
-  background: #FFFFFF;
-}
-
-.results h2 {
-  color: #1A1A18;
-  margin-bottom: 20px;
-  font-size: 20px;
-}
-
-.placeholder {
-  text-align: center;
-  padding: 60px 20px;
-  color: #888888;
-  font-size: 16px;
-}
-
-.loading {
-  text-align: center;
-  padding: 60px 20px;
-  color: #0066CC;
-  font-size: 16px;
-}
-
-/* Results List */
-.resultsList {
-  display: grid;
-  gap: 16px;
-}
-
-.card {
-  background: #FFFFFF;
-  border: 1px solid #E0E0E0;
-  border-radius: 8px;
-  padding: 16px;
-  transition: all 0.2s;
-}
-
-.card:hover {
-  box-shadow: 0 4px 12px rgba(0, 102, 204, 0.1);
-  border-color: #0066CC;
-}
-
-.cardHeader {
-  display: flex;
-  justify-content: space-between;
-  align-items: flex-start;
-  margin-bottom: 12px;
-}
-
-.cardHeader h3 {
-  margin: 0;
-  color: #1A1A18;
-  font-size: 16px;
-  flex: 1;
-}
-
-.sku {
-  font-size: 12px;
-  color: #888888;
-  background: #F5F5F5;
-  padding: 4px 8px;
-  border-radius: 4px;
-  white-space: nowrap;
-  margin-left: 12px;
-}
-
-.cardMeta {
-  display: flex;
-  gap: 16px;
-  font-size: 13px;
-  color: #1A1A18;
-  margin-bottom: 12px;
-  flex-wrap: wrap;
-}
-
-.cardMeta span {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* Submixes */
-.submixes {
-  margin: 12px 0;
-}
-
-.submixes strong {
-  display: block;
-  font-size: 12px;
-  color: #888888;
-  margin-bottom: 8px;
-  text-transform: uppercase;
-}
-
-.submixBtns {
-  display: flex;
-  gap: 6px;
-  flex-wrap: wrap;
-}
-
-.submixBtn {
-  padding: 4px 10px;
-  background: #FFFFFF;
-  color: #0066CC;
-  border: 1px solid;
-  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
-  border-radius: 4px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.submixBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  color: white;
-  font-weight: bold;
-  border: 1px solid transparent;
-}
-
-/* Actions */
-.actions {
-  display: flex;
-  gap: 8px;
-  margin-top: 12px;
-  border-top: 1px solid #E0E0E0;
-  padding-top: 12px;
-}
-
-.copyBtn,
-.playBtn {
-  flex: 1;
-  padding: 8px 12px;
-  border: none;
-  border-radius: 4px;
-  font-size: 13px;
-  font-weight: bold;
-  cursor: pointer;
-  transition: all 0.2s;
-}
-
-.copyBtn {
-  background: #FFFFFF;
-  color: #0066CC;
-  border: 1px solid;
-  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
-}
-
-.copyBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  color: white;
-  border: 1px solid transparent;
-}
-
-.playBtn {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  color: white;
-  border: none;
-}
-
-.playBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
-}
-
-/* Dropbox Preview Player */
-.dropboxPlayer {
-  margin: 12px 0;
-  padding: 12px;
-  background: #F5F5F5;
-  border: 1px solid #E0E0E0;
-  border-radius: 4px;
-}
-
-.audioPreview {
-  width: 100%;
-  height: 32px;
-  outline: none;
-}
-
-.fileName {
-  display: block;
-  margin-top: 8px;
-  font-size: 11px;
-  color: #888888;
-  word-break: break-word;
-}
-
-/* Responsive */
-@media (max-width: 1024px) {
-  .grid {
-    grid-template-columns: 1fr;
-  }
-
-  .sidebar {
-    position: relative;
-    top: 0;
-  }
-}
-
-/* Source Audio & Tap Tempo Sections */
-.section {
-  margin-bottom: 30px;
 }
 
 .sourceBox {
-  background: #F5F5F5;
-  border: 2px dashed #0066CC;
+  border: 2px dashed #667eea;
+  padding: 20px;
   border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
   text-align: center;
 }
 
@@ -352,222 +86,331 @@
 }
 
 .uploadBtn {
-  padding: 12px;
-  background: #FFFFFF;
-  color: #0066CC;
-  border: 2px solid;
-  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
-  border-radius: 4px;
-  font-weight: bold;
-  transition: all 0.3s;
-  cursor: pointer;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+  color: white;
+  padding: 15px 20px;
+  border-radius: 5px;
+  font-weight: 600;
+  transition: transform 0.2s;
 }
 
 .uploadBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  color: white;
-  border: 2px solid transparent;
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
+  transform: scale(1.05);
 }
 
 .fileInfo {
-  margin-top: 12px;
-  padding: 8px;
-  background: #E8F4FF;
-  border-radius: 4px;
+  margin-top: 15px;
+  padding: 10px;
+  background: #f0f0f0;
+  border-radius: 5px;
 }
 
 .fileInfo p {
-  margin: 0;
-  font-size: 13px;
-  color: #1A1A18;
-  font-weight: bold;
-  word-break: break-word;
-  overflow-wrap: break-word;
-  white-space: normal;
+  margin: 5px 0;
+  font-weight: 600;
 }
 
-.fileInfo small {
-  color: #888888;
-  font-size: 11px;
-}
-
-/* Audio Player */
 .playerBox {
-  margin-top: 12px;
-  padding: 12px;
-  background: #FFFFFF;
-  border: 1px solid #E0E0E0;
-  border-radius: 4px;
+  margin-top: 15px;
 }
 
 .audioPlayer {
   width: 100%;
-  height: 32px;
-  outline: none;
+  margin-top: 10px;
 }
 
 .analyzing {
-  margin-top: 12px;
-  padding: 12px;
-  background: #E8F4FF;
-  border: 1px solid #0066CC;
-  border-radius: 4px;
-  text-align: center;
-  color: #0066CC;
-  font-weight: bold;
-  font-size: 13px;
+  color: #667eea;
+  font-weight: 600;
+  margin-top: 10px;
 }
 
 .analysisResults {
-  margin-top: 12px;
-  padding: 12px;
-  background: #F0FFF0;
-  border: 1px solid #4CAF50;
-  border-radius: 4px;
-}
-
-.analysisResults strong {
-  display: block;
-  font-size: 12px;
-  color: #2E7D32;
-  margin-bottom: 8px;
-  text-transform: uppercase;
+  background: #e8f5e9;
+  padding: 15px;
+  border-radius: 5px;
+  margin-top: 15px;
+  border-left: 4px solid #4caf50;
 }
 
 .analysisMeta {
   display: flex;
   flex-direction: column;
-  gap: 6px;
-  font-size: 12px;
-  color: #1A1A18;
+  gap: 8px;
+  margin-top: 10px;
+  font-size: 14px;
 }
 
-.analysisMeta span {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-/* Tap Tempo */
 .tapTempoBox {
-  background: #F5F5F5;
-  border: 1px solid #E0E0E0;
+  border: 2px solid #667eea;
+  padding: 15px;
   border-radius: 8px;
-  padding: 16px;
-  margin-bottom: 16px;
 }
 
 .tapHeader {
-  margin-bottom: 12px;
+  margin-bottom: 15px;
 }
 
 .tapHeader h3 {
-  margin: 0 0 4px 0;
-  font-size: 14px;
-  color: #1A1A18;
+  margin: 0 0 5px 0;
 }
 
 .tapHeader small {
-  color: #888888;
-  font-size: 12px;
+  color: #999;
+}
+
+.tapStartBtn,
+.tapStopBtn,
+.tapResetBtn {
+  padding: 10px 15px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: 600;
+  width: 100%;
+  margin-bottom: 10px;
 }
 
 .tapStartBtn {
-  width: 100%;
-  padding: 12px;
-  background: #FFFFFF;
-  color: #0066CC;
-  border: 2px solid;
-  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
-  border-radius: 4px;
-  font-weight: bold;
-  cursor: pointer;
-  transition: all 0.3s;
+  background: #4caf50;
+  color: white;
 }
 
-.tapStartBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
+.tapStopBtn {
+  background: #f44336;
   color: white;
-  border: 2px solid transparent;
-  transform: translateY(-2px);
-  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
+}
+
+.tapResetBtn {
+  background: #ff9800;
+  color: white;
 }
 
 .tapDisplay {
-  background: #FFFFFF;
-  border: 1px solid #E0E0E0;
-  border-radius: 4px;
-  padding: 12px;
-  margin-bottom: 12px;
+  background: #f5f5f5;
+  padding: 15px;
+  border-radius: 5px;
+  margin-bottom: 15px;
   text-align: center;
 }
 
 .tapCount {
-  font-size: 16px;
-  font-weight: bold;
-  color: #1A1A18;
-  margin-bottom: 8px;
+  font-size: 18px;
+  font-weight: 600;
 }
 
 .tapBpmResult {
   font-size: 24px;
-  font-weight: bold;
-  color: #E91E63;
+  color: #667eea;
+  font-weight: 700;
+  margin-top: 10px;
 }
 
 .tapButtonGroup {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 8px;
+  gap: 10px;
 }
 
-.tapStopBtn,
-.tapResetBtn {
+.tapButtonGroup button {
   padding: 10px;
   border: none;
-  border-radius: 4px;
-  font-weight: bold;
+  border-radius: 5px;
   cursor: pointer;
-  transition: all 0.2s;
-  font-size: 12px;
+  font-weight: 600;
 }
 
-.tapStopBtn {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
+.searchBtn {
+  width: 100%;
+  padding: 12px;
+  background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
   color: white;
   border: none;
+  border-radius: 5px;
+  font-weight: 600;
+  cursor: pointer;
+  font-size: 16px;
+  margin-top: 20px;
 }
 
-.tapStopBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
-  box-shadow: 0 6px 16px rgba(233, 30, 99, 0.3);
+.searchBtn:hover:not(:disabled) {
+  opacity: 0.9;
 }
 
-.tapResetBtn {
-  background: #FFFFFF;
-  color: #0066CC;
-  border: 1px solid;
-  border-image: linear-gradient(90deg, #0066CC, #E91E63) 1;
+.searchBtn:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
-.tapResetBtn:hover {
-  background: linear-gradient(90deg, #0066CC, #E91E63);
+.results {
+  background: white;
+  padding: 30px;
+  border-radius: 10px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+  min-height: 400px;
+}
+
+.placeholder {
+  text-align: center;
+  padding: 60px 20px;
+  color: #999;
+}
+
+.placeholder p {
+  font-size: 18px;
+  margin: 10px 0;
+}
+
+.loading {
+  text-align: center;
+  padding: 40px;
+  color: #667eea;
+  font-weight: 600;
+}
+
+.resultsList {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+  gap: 20px;
+  margin-top: 20px;
+}
+
+.card {
+  border: 1px solid #ddd;
+  padding: 20px;
+  border-radius: 8px;
+  background: #f9f9f9;
+  transition: transform 0.2s, box-shadow 0.2s;
+}
+
+.card:hover {
+  transform: translateY(-5px);
+  box-shadow: 0 8px 12px rgba(0, 0, 0, 0.15);
+}
+
+.cardHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: start;
+  margin-bottom: 15px;
+  border-bottom: 2px solid #667eea;
+  padding-bottom: 10px;
+}
+
+.cardHeader h3 {
+  margin: 0;
+  color: #333;
+  flex: 1;
+}
+
+.sku {
+  background: #667eea;
   color: white;
-  border: 1px solid transparent;
+  padding: 5px 10px;
+  border-radius: 3px;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  margin-left: 10px;
+}
+
+.cardMeta {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  margin-bottom: 15px;
+  font-size: 14px;
+  color: #666;
+}
+
+.dropboxPlayer {
+  background: #f0f0f0;
+  padding: 10px;
+  border-radius: 5px;
+  margin: 15px 0;
+}
+
+.audioPreview {
+  width: 100%;
+  height: 30px;
+}
+
+.fileName {
+  display: block;
+  margin-top: 5px;
+  font-size: 12px;
+  color: #999;
+}
+
+.submixes {
+  margin: 15px 0;
+  padding: 10px;
+  background: #f5f5f5;
+  border-radius: 5px;
+}
+
+.submixBtns {
+  display: flex;
+  gap: 5px;
+  margin-top: 8px;
+  flex-wrap: wrap;
+}
+
+.submixBtn {
+  padding: 5px 10px;
+  background: white;
+  border: 1px solid #ddd;
+  border-radius: 3px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.submixBtn:hover {
+  background: #667eea;
+  color: white;
+}
+
+.actions {
+  display: flex;
+  gap: 10px;
+  margin-top: 15px;
+}
+
+.copyBtn,
+.playBtn {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: 0.2s;
+}
+
+.copyBtn {
+  background: #667eea;
+  color: white;
+}
+
+.playBtn {
+  background: #4caf50;
+  color: white;
+}
+
+.copyBtn:hover {
+  opacity: 0.8;
+}
+
+.playBtn:hover {
+  opacity: 0.8;
 }
 
 @media (max-width: 768px) {
-  .main {
-    padding: 12px 20px;
+  .grid {
+    grid-template-columns: 1fr;
   }
 
-  .header {
-    padding: 16px 20px;
-  }
-
-  .logo {
-    font-size: 20px;
+  .resultsList {
+    grid-template-columns: 1fr;
   }
 }
