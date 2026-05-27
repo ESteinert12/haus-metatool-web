@@ -1,38 +1,15 @@
 // Temporary mock data while debugging Filemaker integration
 const MOCK_TRACKS = [
-  {
-    sku: 'S33a',
-    title: 'Nice With Thrust',
-    composer: 'Unknown',
-    genre: 'Classic Rock',
-    mood: 'Dramatic',
-    bpm: 150,
-    key_sig: 'E',
-    duration: 0,
-    dropboxLink: null,
-  },
-  {
-    sku: 'S33b',
-    title: 'Classic Rock Anthem',
-    composer: 'Unknown',
-    genre: 'Classic Rock',
-    mood: 'Energetic',
-    bpm: 140,
-    key_sig: 'G',
-    duration: 0,
-    dropboxLink: null,
-  },
-  {
-    sku: 'S33c',
-    title: 'Dramatic Journey',
-    composer: 'Unknown',
-    genre: 'Classic Rock',
-    mood: 'Dramatic',
-    bpm: 155,
-    key_sig: 'D',
-    duration: 0,
-    dropboxLink: null,
-  },
+  { sku: 'S33a', title: 'Epic Journey', composer: 'Unknown', genre: 'Classic Rock', mood: 'Dramatic', bpm: 150, key_sig: 'E', duration: 0, dropboxLink: null },
+  { sku: 'S33b', title: 'Uplifting Vibes', composer: 'Unknown', genre: 'Alternative Rock', mood: 'Uplifting', bpm: 120, key_sig: 'G', duration: 0, dropboxLink: null },
+  { sku: 'S33c', title: 'Blues Soul', composer: 'Unknown', genre: 'Blues', mood: 'Melancholic', bpm: 90, key_sig: 'D', duration: 0, dropboxLink: null },
+  { sku: 'S33d', title: 'Electronic Pulse', composer: 'Unknown', genre: 'Electronic', mood: 'Energetic', bpm: 130, key_sig: 'A', duration: 0, dropboxLink: null },
+  { sku: 'S33e', title: 'Folk Tale', composer: 'Unknown', genre: 'Folk', mood: 'Peaceful', bpm: 80, key_sig: 'C', duration: 0, dropboxLink: null },
+  { sku: 'S33f', title: 'Hip Hop Beat', composer: 'Unknown', genre: 'Hip Hop/Rap', mood: 'Energetic', bpm: 95, key_sig: 'F', duration: 0, dropboxLink: null },
+  { sku: 'S33g', title: 'Country Roads', composer: 'Unknown', genre: 'Country', mood: 'Hopeful', bpm: 110, key_sig: 'B', duration: 0, dropboxLink: null },
+  { sku: 'S33h', title: 'Ambient Dreams', composer: 'Unknown', genre: 'Ambient', mood: 'Peaceful', bpm: 70, key_sig: 'Am', duration: 0, dropboxLink: null },
+  { sku: 'S33i', title: 'Rock Anthem', composer: 'Unknown', genre: 'Classic Rock', mood: 'Epic', bpm: 140, key_sig: 'G#', duration: 0, dropboxLink: null },
+  { sku: 'S33j', title: 'Dark Electronic', composer: 'Unknown', genre: 'Electronic', mood: 'Dark', bpm: 125, key_sig: 'Dm', duration: 0, dropboxLink: null },
 ];
  
 export default async function handler(req, res) {
