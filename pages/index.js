@@ -186,8 +186,8 @@ export default function Home() {
 
                 {sourceFile && (
                   <div style={{ marginTop: '15px', padding: '10px', background: '#f0f0f0', borderRadius: '5px' }}>
-                    <p style={{ margin: '5px 0', fontWeight: 600 }}>✓ {sourceFile.name}</p>
-                    <small>{sourceFile.size} MB</small>
+                    <p style={{ margin: '5px 0', fontWeight: 600, wordBreak: 'break-word', overflowWrap: 'break-word' }}>✓ {sourceFile.name}</p>
+                    <small style={{ display: 'block', wordBreak: 'break-word', overflowWrap: 'break-word' }}>{sourceFile.size} MB</small>
                   </div>
                 )}
 
