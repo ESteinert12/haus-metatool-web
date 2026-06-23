@@ -1074,8 +1074,44 @@ async function doLogin() {
   const avatarEl = document.getElementById('user-avatar')
   if (nameEl)   nameEl.textContent   = r.user.display_name
   if (avatarEl) avatarEl.textContent = r.user.display_name.slice(0,2).toUpperCase()
+  // Apply per-user default paths (overrides any stale localStorage values)
+  await applyUserDefaultPaths(r.user.username)
   // Hide login screen
   document.getElementById('login-screen').style.display = 'none'
+}
+
+// Per-user path defaults — runs after every login to keep paths fresh
+const USER_PATH_DEFAULTS = {
+  kyle:  {
+    intake:  '/Users/kyle/Library/CloudStorage/Dropbox/1. COLLECTION UPLOADER/1. ATMOS_Staging',
+    hausjup: '/Users/kyle/Library/CloudStorage/Dropbox/1. COLLECTION UPLOADER/2. ATMOS_Shipping',
+    staging: '/Users/kyle/Library/CloudStorage/Dropbox/1. COLLECTION UPLOADER/1. ATMOS_Staging',
+  },
+  erik:  {
+    intake:  '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/1. ATMOS_Staging',
+    hausjup: '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping',
+    staging: '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/1. ATMOS_Staging',
+  },
+}
+
+async function applyUserDefaultPaths(username) {
+  const defaults = USER_PATH_DEFAULTS[username.toLowerCase()]
+  if (!defaults) {
+    // Unknown user — fall back to auto-detect
+    cfg.intake = ''; cfg.hausjup = ''; cfg.staging = ''
+    await autoFillDropboxPaths()
+    return
+  }
+  cfg.intake  = defaults.intake
+  cfg.hausjup = defaults.hausjup
+  cfg.staging = defaults.staging
+  localStorage.setItem('haus-cfg', JSON.stringify(cfg))
+  const intakeEl  = document.getElementById('cfg-intake')
+  const hausjupEl = document.getElementById('cfg-hausjup')
+  const stagingEl = document.getElementById('cfg-staging')
+  if (intakeEl)  intakeEl.value  = cfg.intake
+  if (hausjupEl) hausjupEl.value = cfg.hausjup
+  if (stagingEl) stagingEl.value = cfg.staging
 }
 
 function showChangePasswordModal() {
@@ -4175,6 +4211,7 @@ loadLibraryStats()
       const avatarEl = document.getElementById('user-avatar')
       if (nameEl)   nameEl.textContent   = user.display_name
       if (avatarEl) avatarEl.textContent = user.display_name.slice(0,2).toUpperCase()
+      await applyUserDefaultPaths(user.username)
       document.getElementById('login-screen').style.display = 'none'
     }
   }
