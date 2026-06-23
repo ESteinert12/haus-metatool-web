@@ -234,6 +234,15 @@ webview{flex:1;border:none}
 .setting-input{padding:6px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;background:var(--bg);color:var(--text);font-family:monospace;width:320px;outline:none}
 .setting-input:focus{border-color:var(--accent)}
 </style>
+<!-- Web mode: load haus-api.js shim so window.haus works without Electron.
+     When running inside Electron, preload.js sets window.haus before this
+     script loads, so this tag is a harmless no-op in that case. -->
+<script>
+  // Only load the shim if window.haus hasn't been set by Electron's preload
+  if (typeof window.haus === 'undefined') {
+    document.write('<script src="/haus-api.js"><\/script>')
+  }
+</script>
 </head>
 <body>
 
@@ -3158,7 +3167,11 @@ async function renderIntake(step) {
       const audioFile = d.files.find(f => /full/i.test(f) && /\.(wav|aiff|aif)$/i.test(f))
         || d.files.find(f => /\.(wav|aiff|aif)$/i.test(f))
         || d.files.find(f => /\.mp3$/i.test(f))
-      const audioSrc = audioFile ? encodeURI(`file://${d.path}/${audioFile}`) : ''
+      const audioSrc = audioFile
+        ? (window.haus.audioUrl
+            ? window.haus.audioUrl(`${d.path}/${audioFile}`)
+            : encodeURI(`file://${d.path}/${audioFile}`))
+        : ''
 
       return `
       <div class="card" style="margin-bottom:16px">
@@ -4142,6 +4155,22 @@ loadCfg()
 renderTopbarDate()
 loadLibraryStats()
 
+// In web mode, check for an existing server-side session so the login
+// screen is skipped when the user refreshes the page.
+;(async () => {
+  if (typeof window.__hausCheckSession === 'function') {
+    const user = await window.__hausCheckSession()
+    if (user) {
+      currentUser = user
+      const nameEl   = document.getElementById('user-name')
+      const avatarEl = document.getElementById('user-avatar')
+      if (nameEl)   nameEl.textContent   = user.display_name
+      if (avatarEl) avatarEl.textContent = user.display_name.slice(0,2).toUpperCase()
+      document.getElementById('login-screen').style.display = 'none'
+    }
+  }
+})()
+
 // ─── Projects / Playlists ──────────────────────────────────────────────────
 let currentProjectId = null
 let currentPlaylistId = null
@@ -4885,7 +4914,11 @@ async function exportPlaylist() {
   if (_exportFolder) document.getElementById('exp-folder-label').textContent = _exportFolder
 
   modal.querySelector('#exp-pick-btn').addEventListener('click', async () => {
-    const folder = await window.haus.shell.showFolderPicker()
+    let folder = await window.haus.shell.showFolderPicker()
+    if (!folder) {
+      // Web mode: no native picker — prompt for path
+      folder = prompt('Enter export folder path:') || null
+    }
     if (folder) {
       _exportFolder = folder
       const lbl = document.getElementById('exp-folder-label')

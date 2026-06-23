@@ -4,12 +4,16 @@
   "description": "HAUS Music unified workspace",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "serve": "node server.js"
   },
   "devDependencies": {
     "electron": "^28.3.3"
   },
   "dependencies": {
+    "express": "^4.18.2",
+    "express-session": "^1.17.3",
+    "multer": "^1.4.5-lts.1",
     "pg": "^8.21.0"
   }
 }
