@@ -2328,7 +2328,7 @@ async function loadCatalogPG() {
 function populateGenreFilter() {
   const sel = document.getElementById('catalog-genre-filter')
   if (!sel) return
-  const genres = [...new Set(allTracks.map(t => t.genre).filter(g => g && g !== '—'))].sort()
+  const genres = [...new Set(allTracks.map(t => t.primaryGenre).filter(g => g && g !== '—'))].sort()
   sel.innerHTML = '<option value="">All genres</option>'
   genres.forEach(g => { const o = document.createElement('option'); o.value = g; o.textContent = g; sel.appendChild(o) })
 }
@@ -2502,10 +2502,10 @@ async function selectTrack(i) {
 
   document.getElementById('track-detail').innerHTML = `
     <div class="track-detail-title">${t.title}</div>
-    <div class="track-detail-sub">${t.composerName || t.composerID} · ${t.genre} · ${t.key}</div>
+    <div class="track-detail-sub">${t.composerName || t.composerID} · ${t.primaryGenre || t.genre} · ${t.key}</div>
     <div class="detail-row"><span class="detail-label">Composer</span><span class="detail-val">${t.composerName ? t.composerName + ' (' + t.composerID + ')' : t.composerID}</span></div>
     <div class="detail-row"><span class="detail-label">Key</span><span class="detail-val">${t.key}</span></div>
-    <div class="detail-row"><span class="detail-label">Genre</span><span class="detail-val">${t.genre}</span></div>
+    <div class="detail-row"><span class="detail-label">Genre</span><span class="detail-val">${t.primaryGenre || t.genre}${t.subGenre ? ` <span class="version-chip" style="margin-left:5px">${t.subGenre}</span>` : ''}</span></div>
     ${t.files.length ? `<div class="detail-row"><span class="detail-label">Files</span><span class="detail-val">${t.files.length}</span></div>` : ''}
     ${t.folder ? `<div class="detail-row"><span class="detail-label">Folder</span><span class="detail-val" style="font-size:11px;font-family:monospace">${t.folder}</span></div>` : ''}
     ${t.recordId ? `<div class="detail-row"><span class="detail-label">FM Record</span><span class="detail-val">${t.recordId}</span></div>` : ''}
@@ -2549,7 +2549,7 @@ function filterTracks(q) {
 
     let filtered = allTracks
     if (prod)  filtered = filtered.filter(t => parseShowName(t.lot) === prod)
-    if (genre) filtered = filtered.filter(t => t.genre === genre)
+    if (genre) filtered = filtered.filter(t => t.primaryGenre === genre)
     if (key)   filtered = filtered.filter(t => t.key === key)
     if (mood)  filtered = filtered.filter(t => t.mood1 === mood || t.mood2?.split(',').map(x=>x.trim()).includes(mood))
     if (lq)    filtered = filtered.filter(t =>
