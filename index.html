@@ -1427,11 +1427,8 @@ function detectStemName(filename) {
 }
 // ─── Dropbox auto-detection ────────────────────────────────
 // Relative paths inside Dropbox that both Erik and Kyle share
-const DROPBOX_RELATIVE = {
-  intake:  '2. COLLECTION UPLOADER/1. ATMOS_Staging',
-  hausjup: '2. COLLECTION UPLOADER/2. ATMOS_Shipping',
-  staging: '2. COLLECTION UPLOADER/1. ATMOS_Staging',
-}
+// Subfolder names vary by machine — try numbered variants and pick whichever exists
+const COLLECTION_SUBFOLDERS = ['1. COLLECTION UPLOADER', '2. COLLECTION UPLOADER', 'COLLECTION UPLOADER']
 
 async function detectDropboxRoot() {
   const home = await window.haus.shell.homeDir()
@@ -1446,14 +1443,22 @@ async function detectDropboxRoot() {
   return null
 }
 
+async function detectCollectionUploader(root) {
+  for (const sub of COLLECTION_SUBFOLDERS) {
+    if (await window.haus.fs.pathExists(`${root}/${sub}`)) return sub
+  }
+  return COLLECTION_SUBFOLDERS[0] // fallback
+}
+
 async function autoFillDropboxPaths() {
   // Only auto-fill if paths are blank (first run / new machine)
   if (cfg.intake && cfg.hausjup && cfg.staging) return
   const root = await detectDropboxRoot()
   if (!root) return
-  if (!cfg.intake)  cfg.intake  = `${root}/${DROPBOX_RELATIVE.intake}`
-  if (!cfg.hausjup) cfg.hausjup = `${root}/${DROPBOX_RELATIVE.hausjup}`
-  if (!cfg.staging) cfg.staging = `${root}/${DROPBOX_RELATIVE.staging}`
+  const col = await detectCollectionUploader(root)
+  if (!cfg.intake)  cfg.intake  = `${root}/${col}/1. ATMOS_Staging`
+  if (!cfg.hausjup) cfg.hausjup = `${root}/${col}/2. ATMOS_Shipping`
+  if (!cfg.staging) cfg.staging = `${root}/${col}/1. ATMOS_Staging`
   // Persist so it doesn't re-detect every time
   localStorage.setItem('haus-cfg', JSON.stringify(cfg))
   // Update settings fields if visible
@@ -2303,7 +2308,10 @@ function populateKeyFilter() {
 function populateMoodFilter() {
   const sel = document.getElementById('catalog-mood-filter')
   if (!sel) return
-  const moods = [...new Set(allTracks.map(t => t.mood).filter(Boolean))].sort()
+  const moods = [...new Set([
+    ...allTracks.map(t => t.mood1).filter(Boolean),
+    ...allTracks.flatMap(t => (t.mood2||'').split(',').map(x=>x.trim())).filter(Boolean)
+  ])].sort()
   sel.innerHTML = '<option value="">All moods</option>'
   moods.forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o) })
 }
@@ -2507,10 +2515,11 @@ function filterTracks(q) {
     if (prod)  filtered = filtered.filter(t => parseShowName(t.lot) === prod)
     if (genre) filtered = filtered.filter(t => t.genre === genre)
     if (key)   filtered = filtered.filter(t => t.key === key)
-    if (mood)  filtered = filtered.filter(t => t.mood === mood)
+    if (mood)  filtered = filtered.filter(t => t.mood1 === mood || t.mood2?.split(',').map(x=>x.trim()).includes(mood))
     if (lq)    filtered = filtered.filter(t =>
       t.title.toLowerCase().includes(lq) ||
       (t.composerID || '').toLowerCase().includes(lq) ||
+      (t.composerName || '').toLowerCase().includes(lq) ||
       (t.sku || '').toLowerCase().includes(lq)
     )
 
