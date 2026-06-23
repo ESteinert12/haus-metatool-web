@@ -1,0 +1,15 @@
+{
+  "name": "haus-workspace",
+  "version": "1.0.0",
+  "description": "HAUS Music unified workspace",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron ."
+  },
+  "devDependencies": {
+    "electron": "^28.3.3"
+  },
+  "dependencies": {
+    "pg": "^8.21.0"
+  }
+}

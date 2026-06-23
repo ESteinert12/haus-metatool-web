@@ -1,0 +1,864 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HAUS — Producer Portal</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
+  --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
+  --accent:#1a1a18;--radius:10px;--radius-sm:6px;
+  --blue:#1a6cf6;--blue-bg:#eef4fe;--blue-text:#1251c2;
+  --green:#1a8a4a;--green-bg:#eaf6ef;--green-text:#156638;
+  --amber:#b87500;--amber-bg:#fdf3e0;--amber-text:#8a5800;
+  --red:#d63030;--red-bg:#fdeaea;--red-text:#a82020;
+  --purple:#7c3aed;--purple-bg:#f3f0ff;--purple-text:#5b21b6;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column;padding-top:38px}
+#drag{position:fixed;top:0;left:0;right:0;height:38px;-webkit-app-region:drag;background:var(--bg2);border-bottom:0.5px solid var(--border);display:flex;align-items:center;padding:0 20px;gap:10px;z-index:200}
+#drag-title{font-size:12px;font-weight:500;color:var(--text2)}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;font-size:12px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;transition:background 0.1s;font-family:inherit;white-space:nowrap}
+.btn:hover{background:var(--bg2)}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn.primary:hover{opacity:0.88}
+.btn.danger{background:var(--red-bg);color:var(--red-text);border-color:transparent}
+.btn i{font-size:14px}
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;flex-shrink:0}
+.pill.blue{background:var(--blue-bg);color:var(--blue-text)}
+.pill.green{background:var(--green-bg);color:var(--green-text)}
+.pill.amber{background:var(--amber-bg);color:var(--amber-text)}
+.pill.red{background:var(--red-bg);color:var(--red-text)}
+.pill.gray{background:var(--bg2);color:var(--text2)}
+.pill.purple{background:var(--purple-bg);color:var(--purple-text)}
+.form-input{padding:7px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);font-family:inherit;outline:none;width:100%}
+.form-input:focus{border-color:var(--accent)}
+select.form-input{cursor:pointer}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+/* ── Login ── */
+#login-screen{flex:1;display:flex;align-items:center;justify-content:center}
+.login-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:32px;width:360px;box-shadow:0 2px 16px rgba(0,0,0,0.07)}
+.login-logo{font-size:22px;font-weight:700;letter-spacing:0.04em;margin-bottom:6px}
+.login-sub{font-size:13px;color:var(--text3);margin-bottom:24px}
+.form-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:5px;display:block}
+
+/* ── App shell ── */
+#app-shell{flex:1;display:none;flex-direction:column;overflow:hidden}
+#app-shell.visible{display:flex}
+
+/* ── Top nav ── */
+.topbar{display:flex;align-items:center;gap:0;padding:0 20px;height:48px;border-bottom:0.5px solid var(--border);background:var(--bg3);flex-shrink:0}
+.topbar-brand{font-size:14px;font-weight:700;letter-spacing:0.04em;margin-right:20px}
+.nav-tabs{display:flex;gap:2px;flex:1}
+.nav-tab{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:13px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.nav-tab i{font-size:15px}
+.topbar-right{display:flex;align-items:center;gap:8px}
+.user-chip{font-size:12px;color:var(--text3);display:flex;align-items:center;gap:6px}
+.avatar-sm{width:24px;height:24px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:9px;font-weight:700;color:#fff;flex-shrink:0}
+
+/* ── Sections ── */
+.section{flex:1;overflow:hidden;display:none;flex-direction:column}
+.section.active{display:flex}
+
+/* ── Stat bar ── */
+.stat-bar{display:flex;gap:12px;padding:10px 20px;border-bottom:0.5px solid var(--border);background:var(--bg);flex-shrink:0}
+.stat-item{text-align:center}
+.stat-num{font-size:17px;font-weight:600;color:var(--text)}
+.stat-lbl{font-size:10px;color:var(--text3);margin-top:1px}
+
+/* ── Two-pane layout ── */
+.two-pane{flex:1;display:grid;overflow:hidden}
+.two-pane.split{grid-template-columns:1fr 360px}
+.left-pane{display:flex;flex-direction:column;overflow:hidden;border-right:0.5px solid var(--border)}
+.right-pane{display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.pane-header{padding:12px 16px;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:8px;flex-shrink:0;background:var(--bg3)}
+.pane-scroll{flex:1;overflow-y:auto}
+.filter-tabs{display:flex;gap:3px;background:var(--bg2);border-radius:var(--radius-sm);padding:3px}
+.filter-tab{background:none;border:none;padding:4px 10px;border-radius:var(--radius-sm);font-size:12px;font-weight:500;color:var(--text2);cursor:pointer;font-family:inherit}
+.filter-tab.active{background:var(--bg3);color:var(--text);box-shadow:0 0.5px 2px rgba(0,0,0,0.08)}
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:10px;color:var(--text3);text-align:center;padding:40px}
+.empty-state i{font-size:28px}
+.empty-state p{font-size:13px}
+
+/* ── Assignments ── */
+.assign-item{padding:12px 16px;border-bottom:0.5px solid var(--border);cursor:pointer}
+.assign-item:hover{background:var(--bg2)}
+.assign-item.selected{background:var(--blue-bg)}
+.assign-item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:8px;margin-bottom:4px}
+.assign-item-title{font-size:13px;font-weight:500;color:var(--text);line-height:1.4}
+.assign-item-meta{font-size:11px;color:var(--text3);display:flex;align-items:center;gap:6px}
+.due-soon{color:var(--amber-text);font-weight:600}
+.overdue{color:var(--red-text);font-weight:600}
+.priority-dot{width:7px;height:7px;border-radius:50%;flex-shrink:0;margin-top:4px}
+.priority-dot.Urgent{background:var(--red)}
+.priority-dot.High{background:var(--amber)}
+.priority-dot.Normal{background:var(--green)}
+.detail-scroll{flex:1;overflow-y:auto;padding:18px}
+.detail-block{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px;margin-bottom:12px}
+.section-lbl{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px}
+.file-row{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg2);border-radius:var(--radius-sm);margin-top:6px;font-size:12px;color:var(--text2)}
+.file-row i{font-size:14px;color:var(--text3);flex-shrink:0}
+.deliv-row{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--green-bg);border-radius:var(--radius-sm);margin-top:6px;font-size:12px;color:var(--green-text)}
+.upload-zone{border:1.5px dashed var(--border2);border-radius:var(--radius-sm);padding:20px;text-align:center;cursor:pointer;margin-top:6px;transition:all 0.15s}
+.upload-zone:hover,.upload-zone.drag-over{border-color:var(--blue);background:var(--blue-bg)}
+.upload-zone i{font-size:22px;color:var(--text3);margin-bottom:5px}
+.upload-zone p{font-size:12px;color:var(--text3)}
+.action-bar{padding:12px 16px;border-top:0.5px solid var(--border);background:var(--bg3);display:flex;align-items:center;gap:8px;flex-shrink:0}
+
+/* ── Playlists ── */
+.playlist-list-item{display:flex;align-items:center;gap:12px;padding:12px 16px;border-bottom:0.5px solid var(--border);cursor:pointer}
+.playlist-list-item:hover{background:var(--bg2)}
+.playlist-list-item.selected{background:var(--blue-bg)}
+.playlist-thumb{width:40px;height:40px;border-radius:var(--radius-sm);background:var(--bg2);display:flex;align-items:center;justify-content:center;font-size:18px;flex-shrink:0}
+.playlist-info{flex:1;min-width:0}
+.playlist-name{font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.playlist-meta{font-size:11px;color:var(--text3);margin-top:2px}
+.track-row{display:flex;align-items:center;gap:10px;padding:9px 14px;border-bottom:0.5px solid var(--border)}
+.track-row:last-child{border-bottom:none}
+.track-num{font-size:11px;color:var(--text3);width:18px;text-align:right;flex-shrink:0}
+.track-row-info{flex:1;min-width:0}
+.track-row-title{font-size:13px;font-weight:500;color:var(--text);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.track-row-meta{font-size:11px;color:var(--text3);margin-top:1px}
+.track-row-actions{display:flex;gap:4px;opacity:0;transition:opacity 0.1s}
+.track-row:hover .track-row-actions{opacity:1}
+.ext-badge{font-size:9px;font-weight:700;padding:1px 5px;border-radius:3px;background:var(--purple-bg);color:var(--purple-text)}
+
+/* Add track modal */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,0.35);z-index:300;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:var(--bg3);border-radius:var(--radius);padding:22px;width:500px;max-height:80vh;display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,0.18)}
+.modal-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.modal-title{font-size:15px;font-weight:600}
+.modal-body{flex:1;overflow-y:auto}
+.track-pick-row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--radius-sm);cursor:pointer}
+.track-pick-row:hover{background:var(--bg2)}
+.track-pick-row input[type=checkbox]{cursor:pointer;width:14px;height:14px}
+
+/* ── Ideas ── */
+.ideas-layout{flex:1;display:grid;grid-template-columns:1fr 320px;overflow:hidden}
+.feed{display:flex;flex-direction:column;overflow:hidden;border-right:0.5px solid var(--border)}
+.feed-header{padding:12px 16px;border-bottom:0.5px solid var(--border);background:var(--bg3);flex-shrink:0;display:flex;align-items:center;gap:8px}
+.feed-items{flex:1;overflow-y:auto;padding:16px;display:flex;flex-direction:column;gap:12px}
+.idea-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px}
+.idea-card:hover{border-color:var(--border2)}
+.idea-header{display:flex;align-items:center;gap:8px;margin-bottom:10px}
+.idea-avatar{width:28px;height:28px;border-radius:50%;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
+.idea-author{font-size:12px;font-weight:600;color:var(--text)}
+.idea-time{font-size:11px;color:var(--text3)}
+.idea-body{font-size:13px;color:var(--text);line-height:1.6;margin-bottom:10px}
+.idea-ref{display:flex;align-items:center;gap:8px;padding:8px 10px;background:var(--bg2);border-radius:var(--radius-sm);font-size:12px;color:var(--text2);margin-bottom:10px;cursor:pointer}
+.idea-ref:hover{background:var(--bg)}
+.idea-ref i{font-size:14px;color:var(--text3);flex-shrink:0}
+.idea-actions{display:flex;align-items:center;gap:12px}
+.idea-action-btn{background:none;border:none;font-size:11px;color:var(--text3);cursor:pointer;font-family:inherit;display:flex;align-items:center;gap:4px;padding:3px 0}
+.idea-action-btn:hover{color:var(--text)}
+.idea-action-btn.liked{color:var(--red);font-weight:600}
+.idea-action-btn i{font-size:13px}
+.compose-box{background:var(--bg3);border-top:0.5px solid var(--border);padding:12px 16px;flex-shrink:0}
+.compose-inner{display:flex;gap:8px;align-items:flex-end}
+.compose-textarea{flex:1;padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);font-family:inherit;outline:none;resize:none;min-height:38px;max-height:120px}
+.compose-textarea:focus{border-color:var(--accent)}
+.compose-opts{display:flex;gap:6px;margin-top:8px;align-items:center}
+.comments-pane{display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
+.comments-header{padding:12px 16px;border-bottom:0.5px solid var(--border);background:var(--bg3);font-size:13px;font-weight:600;flex-shrink:0}
+.comments-scroll{flex:1;overflow-y:auto;padding:14px;display:flex;flex-direction:column;gap:10px}
+.comment-row{display:flex;gap:8px}
+.comment-bubble{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius-sm);padding:10px 12px;flex:1}
+.comment-meta{display:flex;align-items:center;gap:6px;margin-bottom:5px}
+.comment-author{font-size:11px;font-weight:600;color:var(--text)}
+.comment-time{font-size:10px;color:var(--text3)}
+.comment-body{font-size:12px;color:var(--text);line-height:1.5}
+.comment-compose{padding:12px 14px;border-top:0.5px solid var(--border);background:var(--bg3);display:flex;gap:6px;flex-shrink:0}
+.placeholder-pane{display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;gap:8px;color:var(--text3);padding:30px;text-align:center}
+.placeholder-pane i{font-size:24px}
+.placeholder-pane p{font-size:12px}
+
+@keyframes spin{to{transform:rotate(360deg)}}
+</style>
+</head>
+<body>
+
+<div id="drag"><span id="drag-title">HAUS Producer Portal</span></div>
+
+<!-- ── LOGIN ── -->
+<div id="login-screen">
+  <div class="login-card">
+    <div class="login-logo">HAUS</div>
+    <div class="login-sub">Producer & Editor Portal</div>
+    <label class="form-label">Who are you?</label>
+    <select class="form-input" id="login-select" style="margin-bottom:16px">
+      <option value="">— Select your ID —</option>
+      <option value="R13a|Ben Zwerin|Composer|#2563eb">R13a — Ben Zwerin (Composer)</option>
+      <option value="R48a|R48a Composer|Composer|#7c3aed">R48a — Composer</option>
+      <option value="R03b|R03b Composer|Composer|#059669">R03b — Composer</option>
+      <option value="ED01|Maya Lin|Editor|#d97706">ED01 — Maya Lin (Editor)</option>
+      <option value="ED02|James Park|Editor|#dc2626">ED02 — James Park (Editor)</option>
+    </select>
+    <button class="btn primary" style="width:100%" onclick="doLogin()"><i class="ti ti-arrow-right"></i> Enter</button>
+  </div>
+</div>
+
+<!-- ── APP ── -->
+<div id="app-shell">
+  <div class="topbar">
+    <span class="topbar-brand">HAUS</span>
+    <div class="nav-tabs">
+      <button class="nav-tab active" onclick="switchTab('assignments',this)"><i class="ti ti-checklist"></i> Assignments</button>
+      <button class="nav-tab" onclick="switchTab('playlists',this)"><i class="ti ti-playlist"></i> Playlists</button>
+      <button class="nav-tab" onclick="switchTab('ideas',this)"><i class="ti ti-bulb"></i> Ideas</button>
+    </div>
+    <div class="topbar-right">
+      <div class="user-chip">
+        <div class="avatar-sm" id="portal-avatar"></div>
+        <span id="portal-user-label"></span>
+      </div>
+      <button class="btn" onclick="doLogout()"><i class="ti ti-logout"></i></button>
+    </div>
+  </div>
+
+  <!-- ── ASSIGNMENTS ── -->
+  <div class="section active" id="tab-assignments">
+    <div class="stat-bar" id="stat-bar"></div>
+    <div class="two-pane split">
+      <div class="left-pane">
+        <div class="pane-header">
+          <div class="filter-tabs">
+            <button class="filter-tab active" onclick="setAssignFilter('all',this)">All</button>
+            <button class="filter-tab" onclick="setAssignFilter('Pending',this)">Pending</button>
+            <button class="filter-tab" onclick="setAssignFilter('In Progress',this)">In Progress</button>
+            <button class="filter-tab" onclick="setAssignFilter('Needs Review',this)">Needs Review</button>
+            <button class="filter-tab" onclick="setAssignFilter('Delivered',this)">Delivered</button>
+          </div>
+        </div>
+        <div class="pane-scroll" id="assign-list"></div>
+      </div>
+      <div class="right-pane">
+        <div class="detail-scroll" id="assign-detail">
+          <div class="empty-state"><i class="ti ti-checklist"></i><p>Select an assignment</p></div>
+        </div>
+        <div class="action-bar" id="assign-action-bar" style="display:none"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── PLAYLISTS ── -->
+  <div class="section" id="tab-playlists">
+    <div class="two-pane split">
+      <div class="left-pane">
+        <div class="pane-header">
+          <span style="font-size:13px;font-weight:600;flex:1">My Playlists</span>
+          <button class="btn primary" onclick="newPlaylist()"><i class="ti ti-plus"></i> New</button>
+        </div>
+        <div class="pane-scroll" id="playlist-list"></div>
+      </div>
+      <div class="right-pane">
+        <div id="playlist-detail" style="display:flex;flex-direction:column;height:100%">
+          <div class="empty-state" style="flex:1"><i class="ti ti-playlist"></i><p>Select or create a playlist</p></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── IDEAS ── -->
+  <div class="section" id="tab-ideas">
+    <div class="ideas-layout">
+      <div class="feed">
+        <div class="feed-header">
+          <span style="font-size:13px;font-weight:600;flex:1">Team Ideas</span>
+          <div class="filter-tabs">
+            <button class="filter-tab active" onclick="setIdeaFilter('all',this)">All</button>
+            <button class="filter-tab" onclick="setIdeaFilter('mine',this)">Mine</button>
+          </div>
+        </div>
+        <div class="feed-items" id="ideas-feed"></div>
+        <div class="compose-box">
+          <div class="compose-inner">
+            <textarea class="compose-textarea" id="idea-compose" placeholder="Share an idea, reference, or note with the team…" rows="2" oninput="autoResize(this)"></textarea>
+            <button class="btn primary" onclick="postIdea()"><i class="ti ti-send"></i></button>
+          </div>
+          <div class="compose-opts">
+            <span style="font-size:11px;color:var(--text3)">Attach:</span>
+            <button class="btn" onclick="attachRef()" style="font-size:11px;padding:3px 8px"><i class="ti ti-music"></i> Track ref</button>
+            <button class="btn" onclick="attachLink()" style="font-size:11px;padding:3px 8px"><i class="ti ti-link"></i> Link</button>
+            <select class="form-input" id="idea-tag" style="width:auto;font-size:11px;padding:3px 8px">
+              <option value="">No tag</option>
+              <option value="vibe">Vibe</option>
+              <option value="feedback">Feedback</option>
+              <option value="reference">Reference</option>
+              <option value="question">Question</option>
+            </select>
+          </div>
+        </div>
+      </div>
+      <div class="comments-pane">
+        <div class="comments-header" id="comments-header">Comments</div>
+        <div class="comments-scroll" id="comments-scroll">
+          <div class="placeholder-pane"><i class="ti ti-message-circle"></i><p>Click an idea to see its thread</p></div>
+        </div>
+        <div class="comment-compose">
+          <input class="form-input" id="comment-input" placeholder="Reply…" style="font-size:12px" onkeydown="if(event.key==='Enter')postComment()">
+          <button class="btn primary" onclick="postComment()" style="padding:5px 9px"><i class="ti ti-send" style="font-size:13px"></i></button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Add Track Modal -->
+<div class="modal-overlay" id="add-track-modal">
+  <div class="modal">
+    <div class="modal-header">
+      <div class="modal-title">Add tracks</div>
+      <button class="btn" onclick="closeAddTrackModal()" style="padding:4px 8px"><i class="ti ti-x"></i></button>
+    </div>
+    <div style="margin-bottom:10px">
+      <input class="form-input" id="track-search" placeholder="Search by title, key, composer…" oninput="renderTrackPicker(this.value)">
+    </div>
+    <div class="modal-body" id="track-picker" style="max-height:320px"></div>
+    <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" onclick="closeAddTrackModal()">Cancel</button>
+      <button class="btn primary" onclick="confirmAddTracks()"><i class="ti ti-check"></i> Add selected</button>
+    </div>
+  </div>
+</div>
+
+<!-- New external link modal -->
+<div class="modal-overlay" id="add-link-modal">
+  <div class="modal" style="width:400px">
+    <div class="modal-header">
+      <div class="modal-title">Add external track</div>
+      <button class="btn" onclick="closeAddLinkModal()" style="padding:4px 8px"><i class="ti ti-x"></i></button>
+    </div>
+    <div class="form-group" style="margin-bottom:10px">
+      <label class="form-label" style="display:block;margin-bottom:5px">Title / label</label>
+      <input class="form-input" id="ext-title" placeholder="e.g. Hans Zimmer — Inception Theme">
+    </div>
+    <div class="form-group" style="margin-bottom:16px">
+      <label class="form-label" style="display:block;margin-bottom:5px">URL</label>
+      <input class="form-input" id="ext-url" placeholder="https://open.spotify.com/…">
+    </div>
+    <div style="display:flex;justify-content:flex-end;gap:8px">
+      <button class="btn" onclick="closeAddLinkModal()">Cancel</button>
+      <button class="btn primary" onclick="confirmAddLink()"><i class="ti ti-plus"></i> Add</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
+
+// ── Mock catalog tracks ───────────────────────────────────────
+const CATALOG_TRACKS = [
+  { id:'t01', title:'Tension Rise', composer:'R13a', key:'Cm', genre:'Cinematic', duration:'2:34' },
+  { id:'t02', title:'Midnight Drive', composer:'R48a', key:'Am', genre:'Electronic', duration:'3:12' },
+  { id:'t03', title:'Urban Pulse', composer:'R03b', key:'Gm', genre:'Hip-Hop', duration:'2:48' },
+  { id:'t04', title:'Neon Horizon', composer:'R13a', key:'Dm', genre:'Synthwave', duration:'3:45' },
+  { id:'t05', title:'Storm Front', composer:'R03b', key:'Em', genre:'Cinematic', duration:'2:20' },
+  { id:'t06', title:'Summer Drift', composer:'R48a', key:'C', genre:'Pop', duration:'2:54' },
+  { id:'t07', title:'Deep Current', composer:'R13a', key:'Bm', genre:'Ambient', duration:'4:10' },
+  { id:'t08', title:'City After Dark', composer:'R03b', key:'F#m', genre:'Lo-Fi', duration:'3:02' },
+  { id:'t09', title:'Cascade', composer:'R48a', key:'G', genre:'Orchestral', duration:'2:38' },
+  { id:'t10', title:'Fault Line', composer:'R13a', key:'Dm', genre:'Thriller', duration:'1:58' },
+]
+
+// ── Mock assignments ──────────────────────────────────────────
+const ALL_ASSIGNMENTS = [
+  { id:'A001', title:'Cinematic trailer cut — 0:30', type:'Edit', assigneeId:'R13a', track:'HAUS_TensionRise_Cm_R13a', brief:'Trim the full to exactly 0:30 for trailer sync. Fade begins at 0:27. Keep the main hook at 0:14–0:20. Deliver WAV + MP3.', dueDate:'2026-06-20', status:'In Progress', priority:'High', files:['HAUS_TensionRise_Cm_R13a_FULL.wav','HAUS_TensionRise_Cm_R13a_FULL.mp3'], deliverables:[], created:'2026-06-10', notes:'For Netflix review — deadline is firm.' },
+  { id:'A004', title:'Master — streaming loudness', type:'Master', assigneeId:'R13a', track:'HAUS_NeonHorizon_Dm_R13a', brief:'Master to -14 LUFS integrated for streaming. No limiting artifacts. Deliver as 24bit WAV.', dueDate:'2026-06-25', status:'Pending', priority:'Normal', files:['HAUS_NeonHorizon_Dm_R13a_FULL.wav'], deliverables:[], created:'2026-06-13', notes:'' },
+  { id:'A002', title:'Stem split — full stems package', type:'Stem Split', assigneeId:'R48a', track:'HAUS_MidnightDrive_Am_R48a', brief:'Export all stems: Melody, Bass, Drums, Pads, FX as 24bit WAV. Include a stereo mixdown.', dueDate:'2026-06-18', status:'Pending', priority:'Normal', files:['HAUS_MidnightDrive_Am_R48a_FULL.wav'], deliverables:[], created:'2026-06-12', notes:'' },
+  { id:'A003', title:'Alt version — underscore / no melody', type:'Alt Version', assigneeId:'R03b', track:'HAUS_UrbanPulse_Gm_R03b', brief:'Create an underscore version with the lead melody muted. Keep energy and rhythm intact.', dueDate:'2026-06-15', status:'Needs Review', priority:'Urgent', files:['HAUS_UrbanPulse_Gm_R03b_FULL.wav'], deliverables:['HAUS_UrbanPulse_Gm_R03b_UNDRSCR.wav'], created:'2026-06-08', notes:'Hulu needs this asap' },
+  { id:'A005', title:'Mix revision — client notes applied', type:'Mix', assigneeId:'R03b', track:'HAUS_StormFront_Em_R03b', brief:'Reduce low end by 3–4dB below 80Hz. Bring strings up +2dB in chorus. Deliver updated FULL.', dueDate:'2026-06-14', status:'Delivered', priority:'High', files:['HAUS_StormFront_Em_R03b_FULL.wav'], deliverables:['HAUS_StormFront_Em_R03b_FULL_v2.wav','HAUS_StormFront_Em_R03b_FULL_v2.mp3'], created:'2026-06-07', notes:'' },
+  { id:'A006', title:'60s cut — broadcast version', type:'Edit', assigneeId:'ED01', track:'HAUS_SummerDrift_C_R48a', brief:'Edit full 2:34 to exactly 0:60. Maintain energy arc. Broadcast safe: -23 LUFS.', dueDate:'2026-06-22', status:'Pending', priority:'High', files:['HAUS_SummerDrift_C_R48a_FULL.wav'], deliverables:[], created:'2026-06-14', notes:'' },
+  { id:'A007', title:'30s + 15s cuts for social', type:'Edit', assigneeId:'ED01', track:'HAUS_NeonHorizon_Dm_R13a', brief:'Cut a 0:30 and a 0:15. Both end on a natural downbeat. Deliver WAV + MP3 for each.', dueDate:'2026-06-19', status:'In Progress', priority:'Normal', files:['HAUS_NeonHorizon_Dm_R13a_FULL.wav'], deliverables:[], created:'2026-06-11', notes:'' },
+  { id:'A008', title:'Cue sheet prep — HBO package', type:'Edit', assigneeId:'ED02', track:'HAUS_StormFront_Em_R03b', brief:'Prepare cue sheet entries for the 3-track HBO background license package. Include timecodes, composers, durations.', dueDate:'2026-06-17', status:'Needs Review', priority:'Urgent', files:[], deliverables:['HBO_CueSheet_Draft_v1.pdf'], created:'2026-06-09', notes:'Legal review pending' },
+]
+
+// ── Playlists data ────────────────────────────────────────────
+let PLAYLISTS = [
+  {
+    id:'pl01', name:'Netflix Brief — Dramatic Tension', emoji:'🎬', createdBy:'R13a',
+    shared: true,
+    tracks: [
+      { type:'haus', trackId:'t01' },
+      { type:'haus', trackId:'t05' },
+      { type:'haus', trackId:'t10' },
+      { type:'external', title:'Ennio Morricone — The Ecstasy of Gold', url:'https://open.spotify.com/track/0mXuMVCOiAhPlHJXxLortn' },
+    ]
+  },
+  {
+    id:'pl02', name:'Synthwave / Neon References', emoji:'🌆', createdBy:'R13a',
+    shared: false,
+    tracks: [
+      { type:'haus', trackId:'t04' },
+      { type:'haus', trackId:'t02' },
+      { type:'external', title:'Perturbator — Neo Tokyo', url:'https://open.spotify.com/track/6JJrn07vgBEWMmBmVMTzYS' },
+      { type:'external', title:'Kavinsky — Nightcall', url:'https://open.spotify.com/track/0U0ldCRmgCqhVvD5XlYfO7' },
+    ]
+  },
+  {
+    id:'pl03', name:'Hulu — Underscore Moods', emoji:'📺', createdBy:'R03b',
+    shared: true,
+    tracks: [
+      { type:'haus', trackId:'t03' },
+      { type:'haus', trackId:'t07' },
+      { type:'haus', trackId:'t08' },
+    ]
+  },
+]
+
+// ── Ideas data ────────────────────────────────────────────────
+let IDEAS = [
+  {
+    id:'i01', authorId:'R13a', authorName:'Ben Zwerin', time:'Jun 14, 9:22am',
+    body:'Working on the Netflix brief — I think we need something darker in the low end, almost like a heartbeat pulse. Checked out some Trent Reznor work for reference.',
+    ref: { type:'haus', trackId:'t01', title:'Tension Rise' },
+    tag:'vibe', likes:['R48a','R03b'], comments:[
+      { id:'c01', authorId:'R03b', authorName:'R03b', time:'9:45am', body:'Agreed — maybe layer a sub 808 pulse at 60bpm. I can try a version.' },
+      { id:'c02', authorId:'ED01', authorName:'Maya Lin', time:'10:12am', body:'Reel already has that feel at 0:42, worth listening.' },
+    ]
+  },
+  {
+    id:'i02', authorId:'R48a', authorName:'R48a Composer', time:'Jun 13, 2:15pm',
+    body:'For the Hulu underscore brief — I think the reference playlist is missing some lo-fi / late night stuff. Urban Pulse is close but needs to breathe more.',
+    ref: { type:'external', title:'Nujabes — Feather', url:'https://youtu.be/r2t2OLEG4v4' },
+    tag:'reference', likes:['R13a'], comments:[
+      { id:'c03', authorId:'R13a', authorName:'Ben Zwerin', time:'2:40pm', body:'Adding Nujabes to the Hulu playlist now.' },
+    ]
+  },
+  {
+    id:'i03', authorId:'ED01', authorName:'Maya Lin', time:'Jun 12, 11:00am',
+    body:'Quick question on the Netflix 30s cut — should the drop hit before or after the title card? I have versions of both, not sure which direction they want.',
+    ref: null,
+    tag:'question', likes:[], comments:[
+      { id:'c04', authorId:'R13a', authorName:'Ben Zwerin', time:'11:22am', body:'Hit before — they want the impact on the title.' },
+    ]
+  },
+  {
+    id:'i04', authorId:'R03b', authorName:'R03b Composer', time:'Jun 11, 4:00pm',
+    body:'Submitted the underscore for Hulu review. Stripped the melody entirely and layered room tone underneath. Feels way more like background TV now.',
+    ref: null,
+    tag:'feedback', likes:['R13a','R48a','ED01','ED02'], comments:[]
+  },
+]
+
+// ── State ─────────────────────────────────────────────────────
+let currentUser = null
+let assignFilter = 'all'
+let selectedAssignId = null
+let selectedPlaylistId = null
+let selectedIdeaId = null
+let ideaFilter = 'all'
+let pickerSelected = new Set()
+let pendingLinkTarget = null // 'playlist' or 'idea'
+
+// ── Auth ──────────────────────────────────────────────────────
+function doLogin() {
+  const val = document.getElementById('login-select').value
+  if (!val) { alert('Please select your ID'); return }
+  const [id, name, role, color] = val.split('|')
+  currentUser = { id, name, role, color }
+  document.getElementById('login-screen').style.display = 'none'
+  document.getElementById('app-shell').classList.add('visible')
+  const initials = name.split(/[\s.]+/).map(w=>w[0]).join('').toUpperCase().slice(0,2)
+  document.getElementById('portal-avatar').textContent = initials
+  document.getElementById('portal-avatar').style.background = color
+  document.getElementById('portal-user-label').textContent = `${name} (${id})`
+  document.getElementById('drag-title').textContent = `HAUS Portal — ${name}`
+  renderStats(); renderAssignList()
+  renderPlaylistList(); renderIdeasFeed()
+}
+function doLogout() {
+  currentUser = null; selectedAssignId = null; selectedPlaylistId = null; selectedIdeaId = null
+  document.getElementById('app-shell').classList.remove('visible')
+  document.getElementById('login-screen').style.display = 'flex'
+  document.getElementById('login-select').value = ''
+}
+
+// ── Tab nav ───────────────────────────────────────────────────
+function switchTab(id, btn) {
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'))
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'))
+  document.getElementById('tab-' + id).classList.add('active')
+  btn.classList.add('active')
+}
+
+// ── Assignments ───────────────────────────────────────────────
+function myAssignments() {
+  return currentUser ? ALL_ASSIGNMENTS.filter(a => a.assigneeId === currentUser.id) : []
+}
+function renderStats() {
+  const mine = myAssignments()
+  const c = {pending:0,active:0,review:0,done:0}
+  mine.forEach(a => { if(a.status==='Pending')c.pending++; else if(a.status==='In Progress')c.active++; else if(a.status==='Needs Review')c.review++; else if(a.status==='Delivered')c.done++ })
+  document.getElementById('stat-bar').innerHTML = `
+    <div class="stat-item"><div class="stat-num">${mine.length}</div><div class="stat-lbl">Total</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--text3)">${c.pending}</div><div class="stat-lbl">Pending</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--blue)">${c.active}</div><div class="stat-lbl">In Progress</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--amber)">${c.review}</div><div class="stat-lbl">Needs Review</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--green)">${c.done}</div><div class="stat-lbl">Delivered</div></div>`
+}
+function setAssignFilter(f, btn) {
+  assignFilter = f
+  document.querySelectorAll('#tab-assignments .filter-tab').forEach(t => t.classList.remove('active'))
+  btn.classList.add('active'); renderAssignList()
+}
+function renderAssignList() {
+  const items = assignFilter === 'all' ? myAssignments() : myAssignments().filter(a => a.status === assignFilter)
+  const sc = {Pending:'gray','In Progress':'blue','Needs Review':'amber',Delivered:'green'}
+  const today = new Date(); today.setHours(0,0,0,0)
+  document.getElementById('assign-list').innerHTML = items.length === 0
+    ? `<div class="empty-state"><i class="ti ti-circle-check"></i><p>Nothing here</p></div>`
+    : items.map(a => {
+        const due = a.dueDate ? new Date(a.dueDate+'T12:00:00') : null
+        const diff = due ? Math.ceil((due-today)/86400000) : null
+        let dueLabel = a.dueDate ? `Due ${fmtDate(a.dueDate)}` : ''
+        let dueClass = ''
+        if(diff !== null && a.status !== 'Delivered') {
+          if(diff < 0){ dueLabel='Overdue'; dueClass='overdue' }
+          else if(diff <= 2){ dueLabel=diff===0?'Due today':`Due in ${diff}d`; dueClass='due-soon' }
+        }
+        return `<div class="assign-item${selectedAssignId===a.id?' selected':''}" onclick="selectAssignment('${a.id}')">
+          <div class="assign-item-top">
+            <div style="display:flex;gap:7px;flex:1;min-width:0">
+              <div class="priority-dot ${a.priority}" style="margin-top:5px"></div>
+              <div class="assign-item-title">${a.title}</div>
+            </div>
+            <span class="pill ${sc[a.status]||'gray'}">${a.status}</span>
+          </div>
+          <div class="assign-item-meta" style="margin-left:14px">
+            <span>${a.type}</span>${dueLabel?`<span>·</span><span class="${dueClass}">${dueLabel}</span>`:''}
+          </div>
+        </div>`
+      }).join('')
+}
+function selectAssignment(id) {
+  selectedAssignId = id; renderAssignList()
+  const a = ALL_ASSIGNMENTS.find(x => x.id === id); if(!a) return
+  const sc = {Pending:'gray','In Progress':'blue','Needs Review':'amber',Delivered:'green'}
+  document.getElementById('assign-detail').innerHTML = `
+    <div style="margin-bottom:14px">
+      <div style="font-size:16px;font-weight:600;margin-bottom:6px;line-height:1.4">${a.title}</div>
+      <div style="display:flex;gap:5px;flex-wrap:wrap">
+        <span class="pill ${sc[a.status]}">${a.status}</span>
+        <span class="pill gray">${a.type}</span>
+        <span class="pill ${a.priority==='Urgent'?'red':a.priority==='High'?'amber':'gray'}">${a.priority}</span>
+      </div>
+    </div>
+    <div class="detail-block">
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px"><span style="color:var(--text3)">Track</span><span style="font-family:monospace;font-size:11px">${a.track}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--text3)">Due</span><span style="font-weight:500">${a.dueDate?fmtDateFull(a.dueDate):'—'}</span></div>
+      ${a.notes?`<div style="margin-top:9px;padding-top:9px;border-top:0.5px solid var(--border);font-size:12px;color:var(--amber-text)">${a.notes}</div>`:''}
+    </div>
+    <div class="detail-block">
+      <div class="section-lbl">Brief</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.65">${a.brief}</div>
+    </div>
+    <div class="detail-block">
+      <div class="section-lbl">Source files</div>
+      ${a.files.map(f=>`<div class="file-row"><i class="ti ti-file-music"></i><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f}</span><button class="btn" style="padding:3px 7px;font-size:11px" onclick="alert('In production this downloads:\\n${f}')"><i class="ti ti-download"></i></button></div>`).join('')||'<p style="font-size:12px;color:var(--text3)">None attached</p>'}
+    </div>
+    <div class="detail-block">
+      <div class="section-lbl">Deliverables</div>
+      ${a.deliverables.map(f=>`<div class="deliv-row"><i class="ti ti-circle-check"></i><span style="flex:1">${f}</span></div>`).join('')}
+      ${a.status!=='Delivered'?`<div class="upload-zone" onclick="triggerUpload('${a.id}')" ondragover="dragOver(event,this)" ondragleave="dragLeave(this)" ondrop="handleDrop(event,'${a.id}',this)"><input type="file" id="fi-${a.id}" multiple onchange="handleFiles(event,'${a.id}')"><i class="ti ti-cloud-upload"></i><p>Drop files or click to upload</p></div>`:''}
+    </div>`
+  const nextActions = {
+    'Pending':`<button class="btn primary" onclick="setAssignStatus('${id}','In Progress')"><i class="ti ti-play"></i> Start working</button>`,
+    'In Progress':`<button class="btn primary" onclick="submitForReview('${id}')"><i class="ti ti-send"></i> Submit for review</button>`,
+    'Needs Review':`<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--amber-text)"><i class="ti ti-clock"></i> Waiting on review</div>`,
+    'Delivered':`<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--green-text)"><i class="ti ti-circle-check"></i> Complete</div>`
+  }
+  const ab = document.getElementById('assign-action-bar')
+  ab.style.display = 'flex'
+  ab.innerHTML = `<div style="flex:1;font-size:11px;color:var(--text3)">${a.id}</div>${nextActions[a.status]||''}`
+}
+function setAssignStatus(id, status) {
+  const a = ALL_ASSIGNMENTS.find(x=>x.id===id); if(a){ a.status=status; renderStats(); renderAssignList(); selectAssignment(id) }
+}
+function submitForReview(id) {
+  const a = ALL_ASSIGNMENTS.find(x=>x.id===id); if(!a) return
+  if(a.deliverables.length===0){ alert('Upload at least one deliverable first.'); return }
+  setAssignStatus(id, 'Needs Review')
+}
+function triggerUpload(id){ document.getElementById('fi-'+id)?.click() }
+function dragOver(e,el){ e.preventDefault(); el.classList.add('drag-over') }
+function dragLeave(el){ el.classList.remove('drag-over') }
+function handleDrop(e,id,el){ e.preventDefault(); el.classList.remove('drag-over'); addDelivs(id,Array.from(e.dataTransfer.files).map(f=>f.name)) }
+function handleFiles(e,id){ addDelivs(id,Array.from(e.target.files).map(f=>f.name)) }
+function addDelivs(id,names){ const a=ALL_ASSIGNMENTS.find(x=>x.id===id); if(a){ a.deliverables.push(...names); selectAssignment(id); renderStats() } }
+
+// ── Playlists ─────────────────────────────────────────────────
+function renderPlaylistList() {
+  const el = document.getElementById('playlist-list')
+  if(!PLAYLISTS.length){ el.innerHTML=`<div class="empty-state"><i class="ti ti-playlist"></i><p>No playlists yet</p></div>`; return }
+  el.innerHTML = PLAYLISTS.map(pl => `
+    <div class="playlist-list-item${selectedPlaylistId===pl.id?' selected':''}" onclick="selectPlaylist('${pl.id}')">
+      <div class="playlist-thumb">${pl.emoji}</div>
+      <div class="playlist-info">
+        <div class="playlist-name">${pl.name}</div>
+        <div class="playlist-meta">${pl.tracks.length} track${pl.tracks.length!==1?'s':''} · by ${pl.createdBy}${pl.shared?' · <span style="color:var(--blue-text)">shared</span>':''}</div>
+      </div>
+      ${pl.shared?`<i class="ti ti-users" style="font-size:14px;color:var(--text3)"></i>`:''}
+    </div>`).join('')
+}
+function selectPlaylist(id) {
+  selectedPlaylistId = id; renderPlaylistList()
+  const pl = PLAYLISTS.find(p=>p.id===id); if(!pl) return
+  const detail = document.getElementById('playlist-detail')
+  const resolveTrack = t => t.type==='haus' ? CATALOG_TRACKS.find(c=>c.id===t.trackId) : null
+  detail.innerHTML = `
+    <div class="pane-header" style="background:var(--bg3)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:15px;font-weight:600">${pl.emoji} ${pl.name}</div>
+        <div style="font-size:11px;color:var(--text3);margin-top:2px">${pl.tracks.length} tracks · by ${pl.createdBy}</div>
+      </div>
+      <button class="btn" onclick="toggleShare('${pl.id}')" style="font-size:11px">
+        <i class="ti ti-${pl.shared?'lock':'users'}"></i> ${pl.shared?'Make private':'Share'}
+      </button>
+      <button class="btn primary" onclick="openAddTrackModal('${pl.id}')" style="font-size:11px"><i class="ti ti-plus"></i> Add</button>
+    </div>
+    <div class="pane-scroll">
+      <div style="background:var(--bg3);border-bottom:0.5px solid var(--border)">
+        ${pl.tracks.length===0?`<div class="empty-state" style="padding:30px"><i class="ti ti-music-off"></i><p>No tracks yet — add some above</p></div>`
+          : pl.tracks.map((t,i) => {
+              if(t.type==='haus'){
+                const tr = resolveTrack(t)
+                if(!tr) return ''
+                return `<div class="track-row">
+                  <span class="track-num">${i+1}</span>
+                  <div class="track-row-info">
+                    <div class="track-row-title">${tr.title}</div>
+                    <div class="track-row-meta">${tr.composer} · ${tr.key} · ${tr.genre} · ${tr.duration}</div>
+                  </div>
+                  <div class="track-row-actions">
+                    <button class="btn" style="padding:3px 7px;font-size:11px" onclick="removeTrackFromPlaylist('${pl.id}',${i})"><i class="ti ti-x"></i></button>
+                  </div>
+                </div>`
+              } else {
+                return `<div class="track-row">
+                  <span class="track-num">${i+1}</span>
+                  <div class="track-row-info">
+                    <div class="track-row-title" style="display:flex;align-items:center;gap:5px">${t.title} <span class="ext-badge">EXT</span></div>
+                    <div class="track-row-meta"><a href="${t.url}" target="_blank" style="color:var(--blue-text);font-size:10px;text-decoration:none">${t.url.replace('https://','')}</a></div>
+                  </div>
+                  <div class="track-row-actions">
+                    <button class="btn" style="padding:3px 7px;font-size:11px" onclick="window.open('${t.url}','_blank')"><i class="ti ti-external-link"></i></button>
+                    <button class="btn" style="padding:3px 7px;font-size:11px" onclick="removeTrackFromPlaylist('${pl.id}',${i})"><i class="ti ti-x"></i></button>
+                  </div>
+                </div>`
+              }
+            }).join('')}
+      </div>
+    </div>`
+}
+function toggleShare(id) {
+  const pl = PLAYLISTS.find(p=>p.id===id); if(pl){ pl.shared=!pl.shared; renderPlaylistList(); selectPlaylist(id) }
+}
+function newPlaylist() {
+  const name = prompt('Playlist name:'); if(!name) return
+  const emoji = ['🎬','🌆','🎵','🌙','⚡','🎸','🌊','🔥'][Math.floor(Math.random()*8)]
+  const id = 'pl'+Date.now()
+  PLAYLISTS.push({ id, name, emoji, createdBy: currentUser.id, shared:false, tracks:[] })
+  renderPlaylistList(); selectPlaylist(id)
+}
+function openAddTrackModal(playlistId) {
+  pendingLinkTarget = playlistId; pickerSelected = new Set()
+  document.getElementById('track-search').value = ''
+  renderTrackPicker(''); document.getElementById('add-track-modal').classList.add('open')
+}
+function closeAddTrackModal(){ document.getElementById('add-track-modal').classList.remove('open') }
+function renderTrackPicker(q) {
+  const filtered = q ? CATALOG_TRACKS.filter(t=>t.title.toLowerCase().includes(q)||t.composer.toLowerCase().includes(q)||t.key.toLowerCase().includes(q)) : CATALOG_TRACKS
+  document.getElementById('track-picker').innerHTML = filtered.map(t=>`
+    <div class="track-pick-row">
+      <input type="checkbox" ${pickerSelected.has(t.id)?'checked':''} onchange="togglePick('${t.id}',this.checked)">
+      <div style="flex:1;min-width:0">
+        <div style="font-size:13px;font-weight:500">${t.title}</div>
+        <div style="font-size:11px;color:var(--text3)">${t.composer} · ${t.key} · ${t.genre} · ${t.duration}</div>
+      </div>
+    </div>`).join('')
+}
+function togglePick(id, checked){ checked ? pickerSelected.add(id) : pickerSelected.delete(id) }
+function confirmAddTracks() {
+  const pl = PLAYLISTS.find(p=>p.id===pendingLinkTarget); if(!pl) return
+  pickerSelected.forEach(id => {
+    if(!pl.tracks.find(t=>t.type==='haus'&&t.trackId===id)) pl.tracks.push({ type:'haus', trackId:id })
+  })
+  closeAddTrackModal(); renderPlaylistList(); selectPlaylist(pl.id)
+}
+function removeTrackFromPlaylist(plId, idx) {
+  const pl = PLAYLISTS.find(p=>p.id===plId); if(pl){ pl.tracks.splice(idx,1); selectPlaylist(plId); renderPlaylistList() }
+}
+function closeAddLinkModal(){ document.getElementById('add-link-modal').classList.remove('open') }
+function confirmAddLink() {
+  const title = document.getElementById('ext-title').value.trim()
+  const url   = document.getElementById('ext-url').value.trim()
+  if(!title||!url){ alert('Title and URL required'); return }
+  if(pendingLinkTarget && pendingLinkTarget.startsWith('pl')) {
+    const pl = PLAYLISTS.find(p=>p.id===pendingLinkTarget); if(pl) pl.tracks.push({ type:'external', title, url })
+    closeAddLinkModal(); renderPlaylistList(); selectPlaylist(pl.id)
+  } else if(pendingLinkTarget === 'idea') {
+    document.getElementById('idea-ref-preview').dataset.ref = JSON.stringify({ type:'external', title, url })
+    document.getElementById('idea-ref-preview').innerHTML = `<i class="ti ti-link"></i> ${title} <button class="btn" style="padding:1px 5px;margin-left:auto" onclick="clearRef()"><i class="ti ti-x"></i></button>`
+    document.getElementById('idea-ref-preview').style.display='flex'
+    closeAddLinkModal()
+  }
+}
+
+// ── Ideas ─────────────────────────────────────────────────────
+function setIdeaFilter(f, btn) {
+  ideaFilter = f
+  document.querySelectorAll('#tab-ideas .filter-tab').forEach(t=>t.classList.remove('active'))
+  btn.classList.add('active'); renderIdeasFeed()
+}
+const TAG_COLORS = { vibe:'purple', feedback:'blue', reference:'green', question:'amber' }
+const USER_COLORS = { R13a:'#2563eb', R48a:'#7c3aed', R03b:'#059669', ED01:'#d97706', ED02:'#dc2626' }
+function initials(name){ return name.split(/[\s.]+/).map(w=>w[0]).join('').toUpperCase().slice(0,2) }
+
+function renderIdeasFeed() {
+  const ideas = ideaFilter === 'mine' ? IDEAS.filter(i=>i.authorId===currentUser.id) : IDEAS
+  const el = document.getElementById('ideas-feed')
+  el.innerHTML = ideas.length===0
+    ? `<div class="empty-state"><i class="ti ti-bulb"></i><p>No ideas yet — post one below</p></div>`
+    : ideas.map(idea => {
+        const liked = idea.likes.includes(currentUser.id)
+        let refHtml = ''
+        if(idea.ref) {
+          if(idea.ref.type==='haus'){
+            const tr = CATALOG_TRACKS.find(t=>t.id===idea.ref.trackId)
+            if(tr) refHtml=`<div class="idea-ref"><i class="ti ti-music"></i><span>${tr.title} — ${tr.composer} · ${tr.key}</span></div>`
+          } else {
+            refHtml=`<div class="idea-ref" onclick="window.open('${idea.ref.url}','_blank')"><i class="ti ti-link"></i><span>${idea.ref.title}</span><i class="ti ti-external-link" style="margin-left:auto;font-size:12px;color:var(--text3)"></i></div>`
+          }
+        }
+        return `<div class="idea-card" id="idea-${idea.id}">
+          <div class="idea-header">
+            <div class="idea-avatar" style="background:${USER_COLORS[idea.authorId]||'#888'}">${initials(idea.authorName)}</div>
+            <div style="flex:1">
+              <div style="display:flex;align-items:center;gap:6px">
+                <span class="idea-author">${idea.authorName}</span>
+                ${idea.tag?`<span class="pill ${TAG_COLORS[idea.tag]||'gray'}">${idea.tag}</span>`:''}
+              </div>
+              <div class="idea-time">${idea.time}</div>
+            </div>
+          </div>
+          <div class="idea-body">${idea.body}</div>
+          ${refHtml}
+          <div class="idea-actions">
+            <button class="idea-action-btn${liked?' liked':''}" onclick="toggleLike('${idea.id}')"><i class="ti ti-heart${liked?'-filled':''}"></i> ${idea.likes.length}</button>
+            <button class="idea-action-btn" onclick="openComments('${idea.id}')"><i class="ti ti-message-circle"></i> ${idea.comments.length}</button>
+          </div>
+        </div>`
+      }).join('')
+}
+
+function toggleLike(id) {
+  const idea = IDEAS.find(i=>i.id===id); if(!idea) return
+  const idx = idea.likes.indexOf(currentUser.id)
+  if(idx>-1) idea.likes.splice(idx,1); else idea.likes.push(currentUser.id)
+  renderIdeasFeed()
+  if(selectedIdeaId===id) openComments(id)
+}
+
+function openComments(id) {
+  selectedIdeaId = id
+  const idea = IDEAS.find(i=>i.id===id); if(!idea) return
+  document.getElementById('comments-header').textContent = `${idea.comments.length} comment${idea.comments.length!==1?'s':''}`
+  document.getElementById('comments-scroll').innerHTML = idea.comments.length===0
+    ? `<div class="placeholder-pane"><i class="ti ti-message-circle"></i><p>No comments yet</p></div>`
+    : idea.comments.map(c=>`
+        <div class="comment-row">
+          <div class="idea-avatar" style="background:${USER_COLORS[c.authorId]||'#888'};width:26px;height:26px;font-size:9px;flex-shrink:0">${initials(c.authorName)}</div>
+          <div class="comment-bubble">
+            <div class="comment-meta">
+              <span class="comment-author">${c.authorName}</span>
+              <span class="comment-time">${c.time}</span>
+            </div>
+            <div class="comment-body">${c.body}</div>
+          </div>
+        </div>`).join('')
+  document.getElementById('comment-input').focus()
+}
+
+function postComment() {
+  const input = document.getElementById('comment-input')
+  const body = input.value.trim(); if(!body || !selectedIdeaId) return
+  const idea = IDEAS.find(i=>i.id===selectedIdeaId); if(!idea) return
+  const now = new Date()
+  idea.comments.push({
+    id: 'c'+Date.now(), authorId: currentUser.id, authorName: currentUser.name,
+    time: now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}), body
+  })
+  input.value = ''
+  openComments(selectedIdeaId); renderIdeasFeed()
+}
+
+function postIdea() {
+  const body = document.getElementById('idea-compose').value.trim(); if(!body) return
+  const tag  = document.getElementById('idea-tag').value
+  const refEl = document.getElementById('idea-ref-preview')
+  let ref = null
+  if(refEl && refEl.dataset.ref) { try{ ref = JSON.parse(refEl.dataset.ref) }catch{} }
+  const now = new Date()
+  IDEAS.unshift({
+    id: 'i'+Date.now(), authorId: currentUser.id, authorName: currentUser.name,
+    time: `${MONTHS[now.getMonth()].slice(0,3)} ${now.getDate()}, ${now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`,
+    body, ref, tag: tag||null, likes:[], comments:[]
+  })
+  document.getElementById('idea-compose').value = ''
+  document.getElementById('idea-tag').value = ''
+  if(refEl){ refEl.style.display='none'; delete refEl.dataset.ref }
+  renderIdeasFeed()
+}
+
+function attachRef() {
+  const list = CATALOG_TRACKS.map((t, i) => (i+1) + '. ' + t.title + ' (' + t.composer + ')').join('\n')
+  const input = prompt('Pick a track number:\n' + list)
+  if (!input) return
+  const track = CATALOG_TRACKS[parseInt(input) - 1]
+  if (!track) return
+  const refEl = getOrCreateRefPreview()
+  refEl.dataset.ref = JSON.stringify({ type:'haus', trackId: track.id, title: track.title })
+  refEl.innerHTML = '<i class="ti ti-music"></i> ' + track.title + ' — ' + track.composer + ' <button class="btn" style="padding:1px 5px;margin-left:auto" onclick="clearRef()"><i class="ti ti-x"></i></button>'
+  refEl.style.display = 'flex'
+}
+
+function attachLink() {
+  pendingLinkTarget = 'idea'
+  document.getElementById('ext-title').value = ''
+  document.getElementById('ext-url').value = ''
+  document.getElementById('add-link-modal').classList.add('open')
+}
+
+function getOrCreateRefPreview() {
+  let el = document.getElementById('idea-ref-preview')
+  if(!el){
+    el = document.createElement('div')
+    el.id = 'idea-ref-preview'
+    el.className = 'idea-ref'
+    el.style.cssText = 'display:none;margin-bottom:8px;align-items:center;gap:8px'
+    document.querySelector('.compose-opts').before(el)
+  }
+  return el
+}
+function clearRef(){
+  const el = document.getElementById('idea-ref-preview')
+  if(el){ el.style.display='none'; delete el.dataset.ref }
+}
+
+// ── Utilities ─────────────────────────────────────────────────
+function fmtDate(s){ if(!s)return'—'; const d=new Date(s+'T12:00:00'); return `${MONTHS[d.getMonth()].slice(0,3)} ${d.getDate()}` }
+function fmtDateFull(s){ if(!s)return'—'; const d=new Date(s+'T12:00:00'); return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}` }
+function autoResize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px' }
+</script>
+</body>
+</html>
