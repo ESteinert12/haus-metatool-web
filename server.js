@@ -31,9 +31,10 @@ app.use(session({
 // Serve static files (index.html, assets, etc.)
 app.use(express.static(__dirname))
 
-// Auth guard — all /api routes except /api/auth/login require a session
+// Auth guard — pg/connect, pg/status, and auth/login are public (needed before login)
+const PUBLIC_ROUTES = ['/auth/login', '/pg/connect', '/pg/status', '/pg/query']
 app.use('/api', (req, res, next) => {
-  if (req.path === '/auth/login') return next()
+  if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
   next()
 })
@@ -103,21 +104,23 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-// Auto-connect to Neon on startup using saved config
+const DEFAULT_NEON = 'postgresql://neondb_owner:npg_jP9W8hvVAoGn@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+
+// Auto-connect to Neon on startup — tries saved config first, falls back to default
 ;(async () => {
   try {
+    let connStr = DEFAULT_NEON
     const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
     if (fs.existsSync(cfgPath)) {
       const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      if (cfg.pgConn) {
-        const { Pool } = require('pg')
-        pgPool = new Pool({ connectionString: cfg.pgConn, ssl: { rejectUnauthorized: false } })
-        await pgPool.query('SELECT 1')
-        console.log('✅ PostgreSQL connected')
-      }
+      if (cfg.pgConn) connStr = cfg.pgConn
     }
+    pgPool = new Pool({ connectionString: connStr, ssl: { rejectUnauthorized: false } })
+    await pgPool.query('SELECT 1')
+    console.log('✅ PostgreSQL connected')
   } catch (e) {
     console.log('⚠ PG auto-connect failed:', e.message)
+    pgPool = null
   }
 })()
 
