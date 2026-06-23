@@ -19,25 +19,27 @@
   --sidebar:220px;
 }
 body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;padding-top:38px}
-#drag{position:fixed;top:0;left:0;right:0;height:38px;-webkit-app-region:drag;background:var(--bg2);border-bottom:0.5px solid var(--border);display:flex;align-items:center;padding-left:76px;gap:10px;z-index:100}
+#drag{position:fixed;top:0;left:0;right:0;height:38px;-webkit-app-region:drag;background:#0b2a5b;border-bottom:none;display:flex;align-items:center;padding-left:76px;gap:10px;z-index:100}
 #drag-title{font-size:12px;font-weight:500;color:var(--text2)}
 
 /* Sidebar */
-#sidebar{width:var(--sidebar);min-width:var(--sidebar);background:var(--bg2);border-right:0.5px solid var(--border);display:flex;flex-direction:column;height:100%;overflow-y:auto}
-.nav-section{padding:16px 10px 4px;font-size:10px;font-weight:600;color:var(--text3);letter-spacing:0.07em;text-transform:uppercase}
-.nav-item{display:flex;align-items:center;gap:9px;padding:7px 12px;font-size:13px;color:var(--text2);cursor:pointer;border-radius:var(--radius-sm);margin:1px 6px;transition:background 0.1s}
-.nav-item:hover{background:var(--bg);color:var(--text)}
-.nav-item.active{background:var(--bg3);color:var(--text);font-weight:500;box-shadow:0 0.5px 2px rgba(0,0,0,0.08)}
+#sidebar{width:var(--sidebar);min-width:var(--sidebar);background:#0b2a5b;border-right:none;display:flex;flex-direction:column;height:100%;overflow-y:auto}
+.nav-section{padding:16px 10px 4px;font-size:10px;font-weight:600;color:rgba(255,255,255,0.35);letter-spacing:0.07em;text-transform:uppercase}
+.nav-item{display:flex;align-items:center;gap:9px;padding:7px 12px;font-size:13px;color:rgba(255,255,255,0.65);cursor:pointer;border-radius:var(--radius-sm);margin:1px 6px;transition:background 0.1s}
+.nav-item:hover{background:rgba(255,255,255,0.08);color:#fff}
+.nav-item.active{background:rgba(255,255,255,0.12);color:#fff;font-weight:500}
 .nav-item i{font-size:15px;opacity:0.75;flex-shrink:0}
 .nav-item.active i{opacity:1}
-.nav-badge{margin-left:auto;font-size:10px;background:var(--red-bg);color:var(--red-text);border-radius:10px;padding:1px 6px;font-weight:600}
-.nav-badge.blue{background:var(--blue-bg);color:var(--blue-text)}
-.sidebar-bottom{margin-top:auto;padding:10px 12px 12px;border-top:0.5px solid var(--border)}
+.nav-badge{margin-left:auto;font-size:10px;background:rgba(255,80,80,0.3);color:#ffaaaa;border-radius:10px;padding:1px 6px;font-weight:600}
+.nav-badge.blue{background:rgba(150,200,255,0.2);color:#aad4ff}
+.sidebar-bottom{margin-top:auto;padding:10px 12px 12px;border-top:1px solid rgba(255,255,255,0.1)}
 .user-row{display:flex;align-items:center;gap:8px}
-.avatar{width:28px;height:28px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff;flex-shrink:0}
-.user-name{font-size:12px;color:var(--text2)}
-.settings-btn{margin-left:auto;color:var(--text3);cursor:pointer;font-size:15px}
-.settings-btn:hover{color:var(--text)}
+.avatar{width:28px;height:28px;border-radius:50%;background:rgba(255,255,255,0.15);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:600;color:#fff;flex-shrink:0}
+.user-name{font-size:12px;color:rgba(255,255,255,0.6)}
+.settings-btn{margin-left:auto;color:rgba(255,255,255,0.35);cursor:pointer;font-size:15px}
+.settings-btn:hover{color:#fff}
+.sidebar-logo{display:block;padding:16px 14px 8px;opacity:0.9}
+.sidebar-logo img{width:100%;max-width:160px}
 
 /* Main content */
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
@@ -238,36 +240,35 @@ webview{flex:1;border:none}
 <!-- ─── Login Screen ──────────────────────────────────────── -->
 <div id="login-screen" style="
   position:fixed;inset:0;z-index:9999;
-  background:#1a1a1a;
+  background:#0b2a5b;
   display:flex;flex-direction:column;align-items:center;justify-content:center;
   font-family:var(--font-ui,'Inter',sans-serif);
 ">
   <div style="width:320px;">
     <div style="text-align:center;margin-bottom:32px;">
-      <div style="font-size:22px;font-weight:700;letter-spacing:.08em;color:#f0ede6;">HAUS</div>
-      <div style="font-size:12px;color:#666;margin-top:4px;letter-spacing:.04em;">WORKSPACE</div>
+      <img src="assets/atmosphere-logo.svg" alt="Atmosphere" style="width:260px;opacity:0.95;" />
     </div>
-    <div id="login-error" style="display:none;background:#3a1a1a;color:#f08080;padding:9px 12px;border-radius:6px;font-size:12px;margin-bottom:14px;"></div>
+    <div id="login-error" style="display:none;background:rgba(255,80,80,0.15);color:#ffaaaa;padding:9px 12px;border-radius:6px;font-size:12px;margin-bottom:14px;border:1px solid rgba(255,80,80,0.3);"></div>
     <div style="margin-bottom:12px;">
       <input id="login-username" type="text" placeholder="Username"
-        style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:7px;border:1px solid #333;background:#252525;color:#f0ede6;font-size:14px;outline:none;"
+        style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:7px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.1);color:#fff;font-size:14px;outline:none;"
         autocomplete="username" autocapitalize="off" spellcheck="false" />
     </div>
     <div style="margin-bottom:20px;">
       <input id="login-password" type="password" placeholder="Password"
-        style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:7px;border:1px solid #333;background:#252525;color:#f0ede6;font-size:14px;outline:none;"
+        style="width:100%;box-sizing:border-box;padding:11px 14px;border-radius:7px;border:1px solid rgba(255,255,255,0.2);background:rgba(255,255,255,0.1);color:#fff;font-size:14px;outline:none;"
         autocomplete="current-password" />
     </div>
     <button id="login-btn" onclick="doLogin()"
       style="width:100%;padding:12px;border-radius:7px;border:none;background:#c8a96e;color:#1a1a1a;font-size:14px;font-weight:600;cursor:pointer;letter-spacing:.03em;">
       Sign In
     </button>
-    <div id="login-status" style="text-align:center;font-size:11px;color:#555;margin-top:14px;">Connecting to database…</div>
+    <div id="login-status" style="text-align:center;font-size:11px;color:rgba(255,255,255,0.4);margin-top:14px;">Connecting to database…</div>
   </div>
 </div>
 
 <div id="drag">
-  <span id="drag-title">HAUS Workspace</span>
+  <img src="assets/atmosphere-logo.svg" id="drag-title" alt="Atmosphere" style="height:28px;opacity:0.85;pointer-events:none;" />
 </div>
 
 
@@ -285,8 +286,19 @@ webview{flex:1;border:none}
 .playlist-track-row{padding:8px 14px;font-size:12px;cursor:pointer;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:10px}
 .playlist-track-row:hover{background:var(--bg)}
 .playlist-track-row.plt-active{background:var(--bg3)}
+/* Today page layout */
+#section-today.active{display:flex;padding:0;overflow:hidden}
+.today-main{flex:1;overflow-y:auto;padding:20px}
+.today-playlists-panel{width:210px;flex-shrink:0;border-left:0.5px solid var(--border);overflow-y:auto;display:flex;flex-direction:column}
+.today-pl-header{padding:10px 14px;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em;border-bottom:0.5px solid var(--border);flex-shrink:0;display:flex;align-items:center;gap:6px}
+.today-pl-project-label{padding:8px 12px 3px;font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:.06em}
+.today-pl-item{padding:5px 12px 5px 20px;font-size:12px;cursor:pointer;color:var(--text2);display:flex;align-items:center;gap:6px;border-radius:4px;margin:0 4px}
+.today-pl-item:hover{background:var(--bg3);color:var(--text)}
 </style>
 <nav id="sidebar">
+  <div class="sidebar-logo">
+    <img src="assets/atmosphere-logo.svg" alt="Atmosphere" />
+  </div>
   <div class="nav-section">Overview</div>
   <div class="nav-item active" data-section="today"><i class="ti ti-layout-dashboard"></i> Today</div>
 
@@ -313,8 +325,8 @@ webview{flex:1;border:none}
   <div class="sidebar-bottom">
     <div style="padding:8px 14px 4px;display:flex;align-items:center;gap:7px;cursor:pointer" onclick="navigate('settings')" title="Go to Settings">
       <span id="nav-pg-dot" style="width:8px;height:8px;border-radius:50%;background:#999;flex-shrink:0;transition:background .3s"></span>
-      <span id="nav-pg-label" style="font-size:11px;color:var(--text-muted)">DB Offline</span>
-      <span id="nav-pg-retry" style="font-size:10px;color:var(--text-muted);margin-left:auto;display:none">retrying…</span>
+      <span id="nav-pg-label" style="font-size:11px;color:rgba(255,255,255,0.4)">DB Offline</span>
+      <span id="nav-pg-retry" style="font-size:10px;color:rgba(255,255,255,0.3);margin-left:auto;display:none">retrying…</span>
     </div>
     <div class="user-row">
       <div class="avatar" id="user-avatar">JB</div>
@@ -333,49 +345,55 @@ webview{flex:1;border:none}
 
   <!-- TODAY -->
   <div class="section active" id="section-today">
-    <div class="grid-2" style="margin-bottom:14px">
-      <div class="card">
-        <div class="card-title">Inbox highlights</div>
-        <div id="today-inbox">
-          <div class="row">
-            <i class="ti ti-mail row-icon"></i>
-            <div class="row-main"><div class="row-title">Connect email to see messages</div><div class="row-sub">Go to Settings → Email</div></div>
+    <div class="today-main">
+      <div class="grid-2" style="margin-bottom:14px">
+        <div class="card">
+          <div class="card-title">Inbox highlights</div>
+          <div id="today-inbox">
+            <div class="row">
+              <i class="ti ti-mail row-icon"></i>
+              <div class="row-main"><div class="row-title">Connect email to see messages</div><div class="row-sub">Go to Settings → Email</div></div>
+            </div>
           </div>
         </div>
+        <div class="card">
+          <div class="card-title" id="cal-month-label">Schedule</div>
+          <div class="cal-grid" id="today-cal"></div>
+          <div style="margin-top:12px" id="today-events"></div>
+        </div>
       </div>
-      <div class="card">
-        <div class="card-title" id="cal-month-label">Schedule</div>
-        <div class="cal-grid" id="today-cal"></div>
-        <div style="margin-top:12px" id="today-events"></div>
+      <div class="grid-2">
+        <div class="card">
+          <div class="card-title">Library</div>
+          <div class="grid-3" id="library-stats">
+            <div class="stat-card"><div class="stat-val" id="stat-tracks">—</div><div class="stat-lbl">audio files</div></div>
+            <div class="stat-card"><div class="stat-val" id="stat-folders">—</div><div class="stat-lbl">track folders</div></div>
+            <div class="stat-card"><div class="stat-val" id="stat-intake">—</div><div class="stat-lbl">in intake</div></div>
+          </div>
+          <div style="margin-top:12px">
+            <div class="row" id="recent-intake-row" style="display:none">
+              <i class="ti ti-inbox row-icon"></i>
+              <div class="row-main"><div class="row-title" id="recent-intake-title">Recent intake</div></div>
+              <div class="row-end"><button class="btn" onclick="navigate('intake')"><i class="ti ti-arrow-right"></i></button></div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Open deals</div>
+          <div id="today-deals">
+            <div class="row"><div class="row-main"><div class="row-title">Netflix — dramatic tension pack</div><div class="row-sub">8 tracks</div></div><span class="pill amber">Review</span></div>
+            <div class="row"><div class="row-main"><div class="row-title">HBO — background license</div><div class="row-sub">3 tracks</div></div><span class="pill blue">Active</span></div>
+            <div class="row"><div class="row-main"><div class="row-title">Apple — mood series</div><div class="row-sub">15 tracks · signed</div></div><span class="pill green">Closed</span></div>
+          </div>
+          <div style="margin-top:10px">
+            <button class="btn" onclick="navigate('deals')" style="width:100%"><i class="ti ti-writing"></i> All deals</button>
+          </div>
+        </div>
       </div>
     </div>
-    <div class="grid-2">
-      <div class="card">
-        <div class="card-title">Library</div>
-        <div class="grid-3" id="library-stats">
-          <div class="stat-card"><div class="stat-val" id="stat-tracks">—</div><div class="stat-lbl">audio files</div></div>
-          <div class="stat-card"><div class="stat-val" id="stat-folders">—</div><div class="stat-lbl">track folders</div></div>
-          <div class="stat-card"><div class="stat-val" id="stat-intake">—</div><div class="stat-lbl">in intake</div></div>
-        </div>
-        <div style="margin-top:12px">
-          <div class="row" id="recent-intake-row" style="display:none">
-            <i class="ti ti-inbox row-icon"></i>
-            <div class="row-main"><div class="row-title" id="recent-intake-title">Recent intake</div></div>
-            <div class="row-end"><button class="btn" onclick="navigate('intake')"><i class="ti ti-arrow-right"></i></button></div>
-          </div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-title">Open deals</div>
-        <div id="today-deals">
-          <div class="row"><div class="row-main"><div class="row-title">Netflix — dramatic tension pack</div><div class="row-sub">8 tracks</div></div><span class="pill amber">Review</span></div>
-          <div class="row"><div class="row-main"><div class="row-title">HBO — background license</div><div class="row-sub">3 tracks</div></div><span class="pill blue">Active</span></div>
-          <div class="row"><div class="row-main"><div class="row-title">Apple — mood series</div><div class="row-sub">15 tracks · signed</div></div><span class="pill green">Closed</span></div>
-        </div>
-        <div style="margin-top:10px">
-          <button class="btn" onclick="navigate('deals')" style="width:100%"><i class="ti ti-writing"></i> All deals</button>
-        </div>
-      </div>
+    <div class="today-playlists-panel">
+      <div class="today-pl-header"><i class="ti ti-playlist" style="font-size:13px"></i> Playlists</div>
+      <div id="today-pl-list" style="flex:1;overflow-y:auto"></div>
     </div>
   </div>
 
@@ -1442,7 +1460,7 @@ function applyName() {
   const n = cfg.name || 'Boss'
   document.getElementById('user-name').textContent = n
   document.getElementById('user-avatar').textContent = n.split(/[\s.]+/).map(w => w[0]).join('').toUpperCase().slice(0,2)
-  document.getElementById('drag-title').textContent = `HAUS Workspace — ${n}`
+  // drag-title is now an img (logo), no text update needed
 }
 
 // ─── Navigation ────────────────────────────────────────────
@@ -1471,7 +1489,7 @@ document.querySelectorAll('.nav-item[data-section]').forEach(el => {
 function onSectionEnter(id) {
   document.getElementById('topbar-sub').textContent = ''
   document.getElementById('topbar-actions').innerHTML = ''
-  if (id === 'today')    { renderTopbarDate(); loadLibraryStats(); loadDayliteToday() }
+  if (id === 'today')    { renderTopbarDate(); loadLibraryStats(); loadDayliteToday(); loadTodayPlaylists() }
   if (id === 'inbox')    initWebview('inbox-inner', cfg.gmail || 'https://mail.google.com', 'email')
   if (id === 'slack')    initWebview('slack-inner', cfg.slack || 'https://app.slack.com', 'slack')
   if (id === 'schedule') { renderSchedule(); loadDayliteSchedule() }
@@ -2184,7 +2202,8 @@ let showAltsOnly = false
 
 async function loadCatalogPG() {
   catalogSource = 'pg'
-  document.getElementById('track-count-label').textContent = 'Loading from database…'
+  const countLabel = document.getElementById('track-count-label')
+  if (countLabel) countLabel.textContent = 'Loading from database…'
   const badge = document.getElementById('pg-catalog-badge')
   const rows = await pgQ(
     `SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id,
@@ -2192,42 +2211,68 @@ async function loadCatalogPG() {
             pg.primary_genre_name,
             sg.secondary_genre_name,
             m1.mood_1_name,
-            l.lot_name
+            l.lot_name,
+            COALESCE(
+              string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name),
+            '') AS mood2_names,
+            COALESCE(
+              string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name),
+            '') AS ksl_names,
+            COALESCE(
+              string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name),
+            '') AS rmo_names
      FROM titles t
-     LEFT JOIN composers        c  ON c.composer_id          = regexp_replace(t.composer_id, '[a-z]+$', '')
-     LEFT JOIN primary_genres   pg ON pg.primary_genre_id   = t.primary_genre_id
-     LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-     LEFT JOIN mood_1 m1           ON m1.mood_1_id          = t.mood_1_id
-     LEFT JOIN lots l              ON l.lot_id              = t.lot_id
+     LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
+     LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
+     LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
+     LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
+     LEFT JOIN lots             l   ON l.lot_id              = t.lot_id
+     LEFT JOIN title_moods      tm  ON tm.sku_root           = t.sku_root
+     LEFT JOIN moods            mo  ON mo.mood_id            = tm.mood_id
+     LEFT JOIN ksl              k   ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
+     LEFT JOIN title_rmo        tr  ON tr.sku_root           = t.sku_root
+     LEFT JOIN rmo              r   ON r.rmo_id              = tr.rmo_id
+     GROUP BY t.sku_root, t.title, t.key, t.bpm, t.composer_id,
+              c.full_name, pg.primary_genre_name, sg.secondary_genre_name,
+              m1.mood_1_name, l.lot_name
      ORDER BY t.title ASC`
   )
-  if (!rows) { document.getElementById('track-count-label').textContent = 'DB error'; return }
+  if (!rows) { if (countLabel) countLabel.textContent = 'DB error'; return }
   allTracks = rows.map(r => ({
-    composerID: r.composer_id        || '—',
-    composerName: r.full_name       || '',
-    title:      r.title,
-    key:        r.key                || '—',
-    genre:      r.primary_genre_name
-                  ? (r.secondary_genre_name
-                      ? `${r.primary_genre_name}_${r.secondary_genre_name}`
-                      : r.primary_genre_name)
-                  : '—',
-    mood:       r.mood_1_name        || '',
-    ksl:        '',
-    mmw:        '',
-    sku:        r.sku_root           || '',
-    isJup:      false,
-    lot:        r.lot_name           || '',
-    dateAdded:  null,
-    titleId:    r.sku_root,
+    composerID:   r.composer_id           || '—',
+    composerName: r.full_name             || '',
+    title:        r.title,
+    key:          r.key                   || '—',
+    bpm:          r.bpm                   || null,
+    primaryGenre: r.primary_genre_name    || '',
+    subGenre:     r.secondary_genre_name  || '',
+    genre:        r.primary_genre_name
+                    ? (r.secondary_genre_name
+                        ? `${r.primary_genre_name}_${r.secondary_genre_name}`
+                        : r.primary_genre_name)
+                    : '—',
+    mood1:        r.mood_1_name           || '',
+    mood2:        r.mood2_names           || '',
+    ksl:          r.ksl_names             || '',
+    rmo:          r.rmo_names             || '',
+    mmw:          '',
+    sku:          r.sku_root              || '',
+    isJup:        false,
+    lot:          r.lot_name              || '',
+    dateAdded:    null,
+    titleId:      r.sku_root,
     folder: '', path: '', files: [], versions: []
   }))
   if (badge) badge.textContent = '● DB'
-  populateProductionFilter()
-  populateGenreFilter()
-  populateKeyFilter()
-  populateMoodFilter()
-  filterTracks('')
+  if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
+  // Only update catalog UI if we're in the catalog section
+  if (document.getElementById('track-count-label')) {
+    populateProductionFilter()
+    populateGenreFilter()
+    populateKeyFilter()
+    populateMoodFilter()
+    filterTracks('')
+  }
 }
 
 function populateGenreFilter() {
@@ -4211,6 +4256,53 @@ function showPlaylistMenu(e, id, name, projectId) {
   })
 }
 
+// ─── Today page playlists panel ───────────────────────────────────────────
+async function loadTodayPlaylists() {
+  const panel = document.getElementById('today-pl-list')
+  if (!panel) return
+  if (!pgConnected) {
+    panel.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text3)">Not connected</div>'
+    return
+  }
+  const rows = await pgQ(`
+    SELECT p.id, p.name, pr.name AS project_name, pr.id AS project_id
+    FROM playlists p
+    JOIN projects pr ON pr.id = p.project_id
+    ORDER BY pr.name, p.name
+  `)
+  if (!rows || !rows.length) {
+    panel.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text3)">No playlists yet</div>'
+    return
+  }
+  // Group by project
+  const byProject = {}
+  for (const r of rows) {
+    if (!byProject[r.project_id]) byProject[r.project_id] = { name: r.project_name, playlists: [] }
+    byProject[r.project_id].playlists.push(r)
+  }
+  panel.innerHTML = Object.values(byProject).map(proj => `
+    <div class="today-pl-project-label">${proj.name}</div>
+    ${proj.playlists.map(pl => `
+      <div class="today-pl-item" onclick="openPlaylistFromToday(${pl.project_id}, ${pl.id})">
+        <i class="ti ti-playlist" style="font-size:12px;color:var(--text3);flex-shrink:0"></i>
+        <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${pl.name}</span>
+      </div>
+    `).join('')}
+  `).join('')
+}
+
+async function openPlaylistFromToday(projectId, playlistId) {
+  navigate('projects')
+  // loadProjects is called by onSectionEnter; wait for DOM to populate
+  setTimeout(async () => {
+    await selectProject(projectId)
+    setTimeout(() => {
+      const plEl = document.getElementById(`pl-${playlistId}`)
+      if (plEl) { plEl.click(); plEl.scrollIntoView({ behavior: 'smooth', block: 'center' }) }
+    }, 300)
+  }, 150)
+}
+
 async function loadProjects() {
   const projects = await pgQ('SELECT * FROM projects ORDER BY name')
   renderProjectsSidebar(projects)
@@ -4430,58 +4522,149 @@ async function removeFromPlaylist(skuRoot) {
   selectPlaylist(currentPlaylistId)
 }
 
-// Add Tracks modal
+// ─── Add Tracks modal (full filter UI) ────────────────────────────────────
+function _atlUniq(field) {
+  // For comma-separated aggregate fields, split and flatten
+  const vals = new Set()
+  for (const t of (window._addTracksAll || [])) {
+    const v = t[field] || ''
+    if (v.includes(',')) v.split(',').forEach(x => { const s = x.trim(); if (s) vals.add(s) })
+    else if (v) vals.add(v)
+  }
+  return [...vals].sort()
+}
+
+function _atlSubGenres(primaryGenre) {
+  const vals = new Set()
+  for (const t of (window._addTracksAll || [])) {
+    if (!primaryGenre || t.primaryGenre === primaryGenre)
+      if (t.subGenre) vals.add(t.subGenre)
+  }
+  return [...vals].sort()
+}
+
+function _atlOpts(vals, placeholder) {
+  return `<option value="">${placeholder}</option>` + vals.map(v => `<option value="${v.replace(/"/g,'&quot;')}">${v}</option>`).join('')
+}
+
 async function addTracksToPlaylist() {
   if (!currentPlaylistId) return
+  if (!allTracks || !allTracks.length) await loadCatalogPG()
+  window._addTracksAll = allTracks
+  const existing = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
+  window._addTracksExisting = new Set((existing||[]).map(r=>r.sku_root))
+
+  const genres    = _atlUniq('primaryGenre')
+  const composers = [...new Set((window._addTracksAll||[]).map(t => t.composerName || t.composerID).filter(Boolean))].sort()
+  const keys      = _atlUniq('key')
+  const moods1    = _atlUniq('mood1')
+  const moods2    = _atlUniq('mood2')
+  const ksls      = _atlUniq('ksl')
+  const rmos      = _atlUniq('rmo')
+
   const modal = document.createElement('div')
   modal.id = 'add-tracks-modal'
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center'
   modal.innerHTML = `
-    <div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;width:620px;max-height:75vh;display:flex;flex-direction:column;overflow:hidden">
-      <div style="padding:14px 16px;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0">
+    <div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;width:780px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">
+      <div style="padding:12px 16px;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0">
         <b style="font-size:13px">Add tracks to playlist</b>
+        <span id="atl-count" style="font-size:11px;color:var(--text3);margin-left:4px"></span>
         <button class="btn" style="margin-left:auto" onclick="document.getElementById('add-tracks-modal').remove()"><i class="ti ti-x"></i></button>
       </div>
-      <div style="padding:10px 16px;border-bottom:0.5px solid var(--border);flex-shrink:0">
-        <input class="form-input" id="add-tracks-search" placeholder="Search title, SKU, composer…" style="width:100%" oninput="filterAddTracks(this.value)" autocomplete="off">
+      <!-- Filter bar -->
+      <div style="padding:10px 16px;border-bottom:0.5px solid var(--border);flex-shrink:0;display:flex;flex-wrap:wrap;gap:7px;align-items:center">
+        <input class="form-input" id="atl-q" placeholder="Title, SKU, composer…" style="width:180px" oninput="applyAddTracksFilters()" autocomplete="off">
+        <select class="form-input" id="atl-genre" style="width:130px" onchange="atlGenreChanged()"><option value="">All genres</option>${_atlOpts(genres,'All genres').replace('<option value="">All genres</option>','')}</select>
+        <select class="form-input" id="atl-subgenre" style="width:130px" onchange="applyAddTracksFilters()"><option value="">All sub-genres</option></select>
+        <select class="form-input" id="atl-composer" style="width:130px" onchange="applyAddTracksFilters()">${_atlOpts(composers,'All composers')}</select>
+        <select class="form-input" id="atl-key" style="width:80px" onchange="applyAddTracksFilters()">${_atlOpts(keys,'Key')}</select>
+        <div style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text3)">
+          BPM <input class="form-input" id="atl-bpm-min" type="number" placeholder="min" style="width:54px;padding:4px 6px" oninput="applyAddTracksFilters()">
+          – <input class="form-input" id="atl-bpm-max" type="number" placeholder="max" style="width:54px;padding:4px 6px" oninput="applyAddTracksFilters()">
+        </div>
+        <select class="form-input" id="atl-mood1" style="width:120px" onchange="applyAddTracksFilters()">${_atlOpts(moods1,'Mood 1')}</select>
+        <select class="form-input" id="atl-mood2" style="width:120px" onchange="applyAddTracksFilters()">${_atlOpts(moods2,'Mood 2')}</select>
+        <select class="form-input" id="atl-ksl" style="width:110px" onchange="applyAddTracksFilters()">${_atlOpts(ksls,'KSL')}</select>
+        <select class="form-input" id="atl-rmo" style="width:110px" onchange="applyAddTracksFilters()">${_atlOpts(rmos,'RMO')}</select>
+        <button class="btn" style="font-size:11px" onclick="atlClearFilters()"><i class="ti ti-x"></i> Clear</button>
       </div>
       <div id="add-tracks-list" style="flex:1;overflow-y:auto"></div>
     </div>`
   document.body.appendChild(modal)
   modal.addEventListener('click', e => { if(e.target===modal) modal.remove() })
-  setTimeout(() => document.getElementById('add-tracks-search')?.focus(), 50)
-  const existing = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
-  window._addTracksExisting = new Set((existing||[]).map(r=>r.sku_root))
-  if (!allTracks || !allTracks.length) await loadCatalogPG()
-  window._addTracksAll = allTracks
-  renderAddTracksList(allTracks)
+  setTimeout(() => document.getElementById('atl-q')?.focus(), 50)
+  applyAddTracksFilters()
 }
 
-function filterAddTracks(q) {
-  const all = window._addTracksAll || []
-  if (!q.trim()) { renderAddTracksList(all); return }
-  const lq = q.toLowerCase()
-  renderAddTracksList(all.filter(t =>
-    t.title?.toLowerCase().includes(lq) ||
-    t.sku?.toLowerCase().includes(lq) ||
-    t.composerName?.toLowerCase().includes(lq) ||
-    t.composerID?.toLowerCase().includes(lq)
-  ))
+function atlGenreChanged() {
+  const genre = document.getElementById('atl-genre')?.value || ''
+  const sub = document.getElementById('atl-subgenre')
+  if (sub) sub.innerHTML = `<option value="">All sub-genres</option>` + _atlSubGenres(genre).map(v => `<option value="${v.replace(/"/g,'&quot;')}">${v}</option>`).join('')
+  applyAddTracksFilters()
 }
+
+function atlClearFilters() {
+  ;['atl-q','atl-genre','atl-subgenre','atl-composer','atl-key','atl-mood1','atl-mood2','atl-ksl','atl-rmo','atl-bpm-min','atl-bpm-max']
+    .forEach(id => { const el = document.getElementById(id); if (el) el.value = '' })
+  atlGenreChanged()
+}
+
+function applyAddTracksFilters() {
+  const all = window._addTracksAll || []
+  const q       = (document.getElementById('atl-q')?.value || '').toLowerCase().trim()
+  const genre   = document.getElementById('atl-genre')?.value || ''
+  const sub     = document.getElementById('atl-subgenre')?.value || ''
+  const comp    = document.getElementById('atl-composer')?.value || ''
+  const key     = document.getElementById('atl-key')?.value || ''
+  const bpmMin  = parseFloat(document.getElementById('atl-bpm-min')?.value || '') || null
+  const bpmMax  = parseFloat(document.getElementById('atl-bpm-max')?.value || '') || null
+  const mood1   = document.getElementById('atl-mood1')?.value || ''
+  const mood2   = document.getElementById('atl-mood2')?.value || ''
+  const ksl     = document.getElementById('atl-ksl')?.value || ''
+  const rmo     = document.getElementById('atl-rmo')?.value || ''
+
+  const filtered = all.filter(t => {
+    if (q && !(t.title?.toLowerCase().includes(q) || t.sku?.toLowerCase().includes(q) || t.composerName?.toLowerCase().includes(q) || t.composerID?.toLowerCase().includes(q))) return false
+    if (genre   && t.primaryGenre !== genre) return false
+    if (sub     && t.subGenre !== sub) return false
+    if (comp    && (t.composerName || t.composerID) !== comp) return false
+    if (key     && t.key !== key) return false
+    if (bpmMin  !== null && (t.bpm === null || t.bpm < bpmMin)) return false
+    if (bpmMax  !== null && (t.bpm === null || t.bpm > bpmMax)) return false
+    if (mood1   && t.mood1 !== mood1) return false
+    if (mood2   && !t.mood2?.split(',').map(x=>x.trim()).includes(mood2)) return false
+    if (ksl     && !t.ksl?.split(',').map(x=>x.trim()).includes(ksl)) return false
+    if (rmo     && !t.rmo?.split(',').map(x=>x.trim()).includes(rmo)) return false
+    return true
+  })
+  const countEl = document.getElementById('atl-count')
+  if (countEl) countEl.textContent = `${filtered.length} track${filtered.length!==1?'s':''}`
+  renderAddTracksList(filtered)
+}
+
+// legacy alias kept for safety
+function filterAddTracks(q) { applyAddTracksFilters() }
 
 function renderAddTracksList(tracks) {
   const el = document.getElementById('add-tracks-list')
   if (!el) return
   const ex = window._addTracksExisting || new Set()
   const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
-  el.innerHTML = (tracks||[]).slice(0,500).map((t,i) => {
+  if (!tracks || !tracks.length) {
+    el.innerHTML = '<div style="padding:24px;text-align:center;font-size:12px;color:var(--text3)">No tracks match</div>'
+    return
+  }
+  el.innerHTML = tracks.slice(0, 500).map(t => {
     const inPl = ex.has(t.sku)
-    return `<div class="atl-row" data-sku="${esc(t.sku)}" style="padding:8px 16px;font-size:12px;display:flex;align-items:center;gap:10px;border-bottom:0.5px solid var(--border);cursor:pointer">
+    const meta = [t.composerName||t.composerID, t.primaryGenre, t.subGenre, t.key, t.bpm ? `${t.bpm} BPM` : ''].filter(Boolean).join(' · ')
+    return `<div class="atl-row" data-sku="${esc(t.sku)}" style="padding:7px 16px;font-size:12px;display:flex;align-items:center;gap:10px;border-bottom:0.5px solid var(--border)">
       <div style="flex:1;min-width:0">
         <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title)}</div>
-        <div style="color:var(--text3);font-size:11px">${esc(t.composerName||t.composerID)} · ${esc(t.genre)}</div>
+        <div style="color:var(--text3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(meta)}</div>
       </div>
-      <button class="btn atl-btn" data-sku="${esc(t.sku)}" style="flex-shrink:0;font-size:11px${inPl?';opacity:0.4;pointer-events:none':''}" ${inPl?'disabled':''}>${inPl?'Added':'+ Add'}</button>
+      ${t.mood1 ? `<span style="font-size:10px;color:var(--text3);white-space:nowrap">${esc(t.mood1)}</span>` : ''}
+      <button class="btn atl-btn" data-sku="${esc(t.sku)}" style="flex-shrink:0;font-size:11px${inPl?';opacity:0.4;pointer-events:none':''}" ${inPl?'disabled':''}>${inPl?'✓ Added':'+ Add'}</button>
     </div>`
   }).join('')
   el.querySelectorAll('.atl-btn:not([disabled])').forEach(btn => {

@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 470 200" width="470" height="200" aria-label="Atmosphere">
+  <defs>
+    <radialGradient id="atmos-core" cx="50%" cy="50%" r="50%">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="1"></stop>
+      <stop offset="28%" stop-color="#eaf2ff" stop-opacity="0.95"></stop>
+      <stop offset="60%" stop-color="#bcd6ff" stop-opacity="0.45"></stop>
+      <stop offset="100%" stop-color="#bcd6ff" stop-opacity="0"></stop>
+    </radialGradient>
+    <linearGradient id="atmos-vspk" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0"></stop>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="1"></stop>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"></stop>
+    </linearGradient>
+    <linearGradient id="atmos-hspk" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#ffffff" stop-opacity="0"></stop>
+      <stop offset="50%" stop-color="#ffffff" stop-opacity="1"></stop>
+      <stop offset="100%" stop-color="#ffffff" stop-opacity="0"></stop>
+    </linearGradient>
+    <filter id="atmos-soft" x="-60%" y="-60%" width="220%" height="220%"><feGaussianBlur stdDeviation="0.9"></feGaussianBlur></filter>
+  </defs>
+  <path d="M100,28 A72,72 0 1 0 100,172 A72,72 0 1 0 100,28 Z M100,30 A67,67 0 1 1 100,164 A67,67 0 1 1 100,30 Z" fill="#ffffff" fill-rule="evenodd"></path>
+  <g filter="url(#atmos-soft)">
+    <polygon points="100,-12 103.2,29 100,70 96.8,29" fill="url(#atmos-vspk)"></polygon>
+    <polygon points="54,29 100,26 146,29 100,32" fill="url(#atmos-hspk)"></polygon>
+  </g>
+  <circle cx="100" cy="29" r="21" fill="url(#atmos-core)"></circle>
+  <circle cx="100" cy="29" r="2.6" fill="#ffffff"></circle>
+  <text x="166" y="111" text-anchor="middle" fill="#ffffff" font-family="Inter,system-ui,sans-serif" font-size="28" font-weight="700" letter-spacing="8">ATMOSPHERE</text>
+</svg>
