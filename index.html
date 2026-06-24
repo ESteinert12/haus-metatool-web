@@ -452,7 +452,7 @@ webview{flex:1;border:none}
       <button class="btn" onclick="openSoundMiner()"><i class="ti ti-music"></i> SoundMiner</button>
       <button class="btn" onclick="openFileMaker()"><i class="ti ti-database"></i> FileMaker</button>
     </div>
-    <div style="display:flex;gap:6px;padding:4px 0 6px;flex-wrap:wrap;align-items:center">
+    <div style="display:flex;gap:6px;padding:4px 0 4px;flex-wrap:wrap;align-items:center">
       <select id="catalog-genre-filter" onchange="filterTracks(document.getElementById('catalog-search').value)" style="height:28px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);padding:0 8px;font-size:12px;cursor:pointer">
         <option value="">All genres</option>
       </select>
@@ -462,10 +462,22 @@ webview{flex:1;border:none}
       <select id="catalog-mood-filter" onchange="filterTracks(document.getElementById('catalog-search').value)" style="height:28px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);padding:0 8px;font-size:12px;cursor:pointer">
         <option value="">All moods</option>
       </select>
+      <select id="catalog-ksl-filter" onchange="filterTracks(document.getElementById('catalog-search').value)" style="height:28px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);padding:0 8px;font-size:12px;cursor:pointer">
+        <option value="">All KSL</option>
+      </select>
       <select id="catalog-production-filter" onchange="filterTracks(document.getElementById('catalog-search').value)" style="height:28px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);padding:0 8px;font-size:12px;cursor:pointer">
         <option value="">All productions</option>
       </select>
       <button class="btn" id="catalog-alts-btn" onclick="toggleAltsFilter()" style="height:28px;font-size:12px;opacity:0.45" title="Show alternate mixes">+ Alts</button>
+    </div>
+    <div style="display:flex;gap:8px;padding:0 0 8px;align-items:center">
+      <i class="ti ti-git-merge" style="color:var(--text3);font-size:14px" title="Triangulated RMO search"></i>
+      <input list="rmo-datalist" id="catalog-rmo-filter" placeholder="Reminds me of… (film, show, album)"
+        oninput="onRmoInput(this.value)"
+        style="flex:1;max-width:320px;height:28px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);padding:0 10px;font-size:12px;outline:none">
+      <datalist id="rmo-datalist"></datalist>
+      <span id="rmo-mood-tags" style="font-size:11px;color:var(--text3);display:flex;gap:4px;flex-wrap:wrap"></span>
+      <button class="btn" id="rmo-clear-btn" onclick="clearRmoFilter()" style="height:24px;font-size:11px;display:none">clear</button>
     </div>
     <div class="track-layout">
       <div class="track-list">
@@ -2321,6 +2333,9 @@ async function loadCatalogPG() {
     populateGenreFilter()
     populateKeyFilter()
     populateMoodFilter()
+    populateKslFilter()
+    populateRmoDatalist()
+    loadRmoMoodsMap()
     filterTracks('')
   }
 }
@@ -2350,6 +2365,88 @@ function populateMoodFilter() {
   ])].sort()
   sel.innerHTML = '<option value="">All moods</option>'
   moods.forEach(m => { const o = document.createElement('option'); o.value = m; o.textContent = m; sel.appendChild(o) })
+}
+
+// ─── KSL filter ───────────────────────────────────────────────────────────────
+function populateKslFilter() {
+  const sel = document.getElementById('catalog-ksl-filter')
+  if (!sel) return
+  const ksls = [...new Set(
+    allTracks.flatMap(t => (t.ksl || '').split(',').map(x => x.trim())).filter(Boolean)
+  )].sort()
+  sel.innerHTML = '<option value="">All KSL</option>'
+  ksls.forEach(k => { const o = document.createElement('option'); o.value = k; o.textContent = k; sel.appendChild(o) })
+}
+
+// ─── RMO triangulation ────────────────────────────────────────────────────────
+let rmoMoodsMap  = {}  // { rmoName: [moodName, ...] }
+let activeRmoMoods = []  // mood names for the currently selected RMO
+
+async function loadRmoMoodsMap() {
+  const rows = await pgQ(`
+    SELECT r.name AS rmo_name, m.mood_name
+    FROM rmo r
+    JOIN rmo_moods rm ON rm.rmo_id = r.rmo_id
+    JOIN moods m ON m.mood_id = rm.mood_id
+    ORDER BY r.name, m.mood_name
+  `)
+  if (!rows) return
+  rmoMoodsMap = {}
+  rows.forEach(row => {
+    if (!rmoMoodsMap[row.rmo_name]) rmoMoodsMap[row.rmo_name] = []
+    rmoMoodsMap[row.rmo_name].push(row.mood_name)
+  })
+}
+
+async function populateRmoDatalist() {
+  const dl = document.getElementById('rmo-datalist')
+  if (!dl) return
+  const rows = await pgQ('SELECT name FROM rmo ORDER BY name')
+  if (!rows) return
+  dl.innerHTML = ''
+  rows.forEach(r => {
+    const opt = document.createElement('option')
+    opt.value = r.name
+    dl.appendChild(opt)
+  })
+}
+
+function onRmoInput(value) {
+  const moods = rmoMoodsMap[value]
+  if (moods && moods.length) {
+    activeRmoMoods = moods
+    renderRmoMoodTags(moods)
+    document.getElementById('rmo-clear-btn').style.display = ''
+  } else if (!value) {
+    clearRmoFilter()
+    return
+  } else {
+    activeRmoMoods = []
+    renderRmoMoodTags([])
+    document.getElementById('rmo-clear-btn').style.display = value ? '' : 'none'
+  }
+  filterTracks(document.getElementById('catalog-search')?.value || '')
+}
+
+function renderRmoMoodTags(moods) {
+  const container = document.getElementById('rmo-mood-tags')
+  if (!container) return
+  container.innerHTML = ''
+  moods.forEach(m => {
+    const tag = document.createElement('span')
+    tag.textContent = m
+    tag.style.cssText = 'background:var(--bg3);border:0.5px solid var(--border2);border-radius:10px;padding:2px 7px;font-size:10px;color:var(--text2)'
+    container.appendChild(tag)
+  })
+}
+
+function clearRmoFilter() {
+  const input = document.getElementById('catalog-rmo-filter')
+  if (input) input.value = ''
+  activeRmoMoods = []
+  renderRmoMoodTags([])
+  document.getElementById('rmo-clear-btn').style.display = 'none'
+  filterTracks(document.getElementById('catalog-search')?.value || '')
 }
 
 function toggleAltsFilter() {
@@ -2545,6 +2642,7 @@ function filterTracks(q) {
     const genre = document.getElementById('catalog-genre-filter')?.value || ''
     const key   = document.getElementById('catalog-key-filter')?.value || ''
     const mood  = document.getElementById('catalog-mood-filter')?.value || ''
+    const ksl   = document.getElementById('catalog-ksl-filter')?.value || ''
     const lq    = q ? q.toLowerCase() : ''
 
     let filtered = allTracks
@@ -2552,6 +2650,18 @@ function filterTracks(q) {
     if (genre) filtered = filtered.filter(t => t.primaryGenre === genre)
     if (key)   filtered = filtered.filter(t => t.key === key)
     if (mood)  filtered = filtered.filter(t => t.mood1 === mood || t.mood2?.split(',').map(x=>x.trim()).includes(mood))
+    if (ksl)   filtered = filtered.filter(t => t.ksl?.split(',').map(x=>x.trim()).includes(ksl))
+    // RMO triangulation: filter tracks that have ANY mood from the RMO's mood profile
+    if (activeRmoMoods.length) {
+      const rmoMoodSet = new Set(activeRmoMoods)
+      filtered = filtered.filter(t => {
+        const trackMoods = [
+          ...(t.mood1 ? [t.mood1] : []),
+          ...(t.mood2 ? t.mood2.split(',').map(x => x.trim()) : [])
+        ]
+        return trackMoods.some(m => rmoMoodSet.has(m))
+      })
+    }
     if (lq)    filtered = filtered.filter(t =>
       t.title.toLowerCase().includes(lq) ||
       (t.composerID || '').toLowerCase().includes(lq) ||
@@ -2662,11 +2772,11 @@ let _intakeGenres = [], _intakeMoods = [], _intakeMood1 = [], _intakeSubGenres =
 async function loadIntakeMetadata() {
   if (!pgConnected) return
   if (!_intakeGenres.length) {
-    const g = await pgQ('SELECT primary_genre_id, primary_genre_name FROM primary_genres ORDER BY primary_genre_name')
+    const g = await pgQ('SELECT DISTINCT ON (primary_genre_name) primary_genre_id, primary_genre_name FROM primary_genres ORDER BY primary_genre_name')
     _intakeGenres = g || []
   }
   if (!Object.keys(_intakeSubGenres).length) {
-    const sg = await pgQ('SELECT sg.secondary_genre_id, sg.primary_genre_id, sg.secondary_genre_name FROM secondary_genres sg ORDER BY sg.secondary_genre_name')
+    const sg = await pgQ('SELECT DISTINCT ON (sg.primary_genre_id, sg.secondary_genre_name) sg.secondary_genre_id, sg.primary_genre_id, sg.secondary_genre_name FROM secondary_genres sg ORDER BY sg.primary_genre_id, sg.secondary_genre_name')
     if (sg) {
       for (const row of sg) {
         if (!_intakeSubGenres[row.primary_genre_id]) _intakeSubGenres[row.primary_genre_id] = []
