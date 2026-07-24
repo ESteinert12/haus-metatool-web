@@ -31,6 +31,14 @@ app.use(session({
   cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days
 }))
 
+// Disable caching for all files
+app.use((req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  res.setHeader('Pragma', 'no-cache')
+  res.setHeader('Expires', '0')
+  next()
+})
+
 // Never cache index.html or haus-api.js so changes are always picked up
 app.get('/', (req, res) => {
   res.setHeader('Cache-Control', 'no-store')
