@@ -2,7 +2,7 @@
 const { Pool } = require('pg')
 
 const LOCAL = 'postgresql://postgres:postgres123@localhost:5432/haus_music'
-const NEON  = 'postgresql://neondb_owner:npg_jP9W8hvVAoGn@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+const NEON  = 'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
 
 const src = new Pool({ connectionString: LOCAL })
 const dst = new Pool({ connectionString: NEON, ssl: { rejectUnauthorized: false } })

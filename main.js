@@ -24,6 +24,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       webviewTag: true,
+      webSecurity: false,          // allow file:// audio/video from local paths
       preload: path.join(__dirname, 'preload.js')
     }
   })
@@ -306,6 +307,7 @@ ipcMain.handle('b2-authorize', async (_, keyId, appKey) => {
     if (result.status === 200) {
       const b = result.body
       b2Auth = {
+        accountId: b.accountId,
         authorizationToken: b.authorizationToken,
         apiUrl: b.apiInfo?.storageApi?.apiUrl || b.apiUrl,
         downloadUrl: b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
@@ -316,22 +318,30 @@ ipcMain.handle('b2-authorize', async (_, keyId, appKey) => {
   } catch (e) { return { ok: false, error: e.message } }
 })
 
-ipcMain.handle('b2-list-buckets', async () => {
+ipcMain.handle('b2-list-buckets', async (_, bucketName) => {
   if (!b2Auth) return { ok: false, error: 'Not authorized' }
   try {
     const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
+    const payload = { accountId: b2Auth.accountId }
+    if (bucketName) payload.bucketName = bucketName
+    const body = JSON.stringify(payload)
     const result = await new Promise((resolve, reject) => {
       const req = https.request({
         hostname: apiHost,
         path: '/b2api/v3/b2_list_buckets',
-        method: 'GET',
-        headers: { 'Authorization': b2Auth.authorizationToken }
+        method: 'POST',
+        headers: {
+          'Authorization': b2Auth.authorizationToken,
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(body)
+        }
       }, res => {
         let data = ''
         res.on('data', c => data += c)
         res.on('end', () => resolve({ status: res.statusCode, body: JSON.parse(data) }))
       })
       req.on('error', reject)
+      req.write(body)
       req.end()
     })
     if (result.status === 200) return { ok: true, buckets: result.body.buckets || [] }

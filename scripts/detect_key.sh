@@ -10,21 +10,13 @@ for RC in "$HOME/.zprofile" "$HOME/.zshrc" "$HOME/.bash_profile" "$HOME/.bashrc"
   [ -f "$RC" ] && source "$RC" 2>/dev/null || true
 done
 
-# On Apple Silicon, Electron runs arm64. Force Python to also run arm64
-# so it loads the arm64 numpy. Using an array avoids word-splitting bugs.
-MACHINE="$(uname -m)"
-if [ "$MACHINE" = "arm64" ] && command -v arch >/dev/null 2>&1; then
-  ARCH=(arch -arm64)
-else
-  ARCH=()
-fi
-
-# Try known Python locations in order of preference
+# Try each Python in its native architecture — no arch forcing.
+# This works whether Python is arm64 (Homebrew) or x86_64 (Python.framework via Rosetta).
 for PY in \
+  /opt/homebrew/bin/python3 \
   /Library/Frameworks/Python.framework/Versions/3.14/bin/python3 \
   /Library/Frameworks/Python.framework/Versions/3.13/bin/python3 \
   /Library/Frameworks/Python.framework/Versions/3.12/bin/python3 \
-  /opt/homebrew/bin/python3 \
   /usr/local/bin/python3 \
   /usr/bin/python3 \
   "$HOME/.pyenv/shims/python3" \
@@ -33,19 +25,21 @@ for PY in \
   "$HOME/Library/Python/3.10/bin/python3" \
   python3; do
   if [ -f "$PY" ] || command -v "$PY" >/dev/null 2>&1; then
-    if "${ARCH[@]}" "$PY" -c "import numpy; numpy.array([1.0])" >/dev/null 2>&1; then
-      exec "${ARCH[@]}" "$PY" "$SCRIPT_DIR/detect_key.py" "$@"
+    if "$PY" -c "import numpy; numpy.array([1.0])" >/dev/null 2>&1; then
+      exec "$PY" "$SCRIPT_DIR/detect_key.py" "$@"
     fi
   fi
 done
 
-# Try installing numpy automatically — respects ARCH array
+# Try installing numpy automatically, then re-test before exec
 for PY in /opt/homebrew/bin/python3 /usr/local/bin/python3 /usr/bin/python3 python3; do
   if [ -f "$PY" ] || command -v "$PY" >/dev/null 2>&1; then
-    "${ARCH[@]}" "$PY" -m pip install numpy --break-system-packages -q 2>&1 && \
-      exec "${ARCH[@]}" "$PY" "$SCRIPT_DIR/detect_key.py" "$@"
+    "$PY" -m pip install --force-reinstall numpy --break-system-packages -q 2>/dev/null
+    if "$PY" -c "import numpy; numpy.array([1.0])" >/dev/null 2>&1; then
+      exec "$PY" "$SCRIPT_DIR/detect_key.py" "$@"
+    fi
   fi
 done
 
-echo '{"error":"No python3 with numpy found. Run: arch -arm64 pip3 install numpy --break-system-packages"}'
+echo '{"error":"No python3 with numpy found. Run: pip3 install numpy --break-system-packages"}'
 exit 1

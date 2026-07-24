@@ -98,7 +98,9 @@
   // Returns a URL the browser can use directly in <audio src="">
   // instead of reading the file from disk.
   function audioUrl(filePath) {
-    return `/api/audio/stream?path=${encodeURIComponent(filePath)}`
+    // Hex-encode the path — only 0-9a-f, nothing Cloudflare WAF or query parsers can touch
+    const hex = Array.from(new TextEncoder().encode(filePath), b => b.toString(16).padStart(2, '0')).join('')
+    return `/api/audio/stream?h=${hex}&_=${Date.now()}`
   }
 
   // ── Expose as window.haus ───────────────────────────────────────────────

@@ -1201,7 +1201,7 @@ const DEFAULT_CFG = {
   slack:   'https://app.slack.com',
   name:    'Boss',
   // PostgreSQL
-  pgConn:  'postgresql://neondb_owner:npg_jP9W8hvVAoGn@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require',
+  pgConn:  'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require',
   // FileMaker Data API
   fmHost:          '',
   fmDatabase:      '',
@@ -10632,6 +10632,9 @@ async function loadChildrenForProject(id) {
       style="display:flex;align-items:center;gap:6px;padding:5px 10px 5px 24px;cursor:pointer;border-radius:4px;margin:0 4px;font-size:12px">
       <i class="ti ti-list" style="font-size:11px;opacity:0.45;flex-shrink:0"></i>
       <span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;pointer-events:none">${pl.name}</span>
+      <i class="pl-arrow-btn" data-plid="${pl.id}" data-projid="${id}" style="display:none;font-size:12px;color:var(--text3);cursor:pointer;flex-shrink:0" title="Open in Collection">
+        <i class="ti ti-arrow-right" style="font-size:12px;opacity:0.6"></i>
+      </i>
       <span class="pl-menu-btn" data-plid="${pl.id}" data-name="${pl.name.replace(/"/g,'&quot;')}" data-projid="${id}"
         style="display:none;padding:0 2px;cursor:pointer;color:var(--text3);font-size:12px;flex-shrink:0">•••</span>
     </div>
@@ -10657,9 +10660,11 @@ async function loadChildrenForProject(id) {
   // Wire playlist rows
   container.querySelectorAll('.playlist-item').forEach(row => {
     const menuBtn = row.querySelector('.pl-menu-btn')
-    row.addEventListener('mouseenter', () => { if(menuBtn) menuBtn.style.display='' })
-    row.addEventListener('mouseleave', () => { if(menuBtn) menuBtn.style.display='none' })
+    const arrowBtn = row.querySelector('.pl-arrow-btn')
+    row.addEventListener('mouseenter', () => { if(menuBtn) menuBtn.style.display=''; if(arrowBtn) arrowBtn.style.display='' })
+    row.addEventListener('mouseleave', () => { if(menuBtn) menuBtn.style.display='none'; if(arrowBtn) arrowBtn.style.display='none' })
     row.addEventListener('click', () => selectPlaylist(row.dataset.plid))
+    if (arrowBtn) arrowBtn.addEventListener('click', e => { e.stopPropagation(); openPlaylistFromClient(parseInt(arrowBtn.dataset.projid), arrowBtn.dataset.plid) })
     if (menuBtn) menuBtn.addEventListener('click', e => { e.stopPropagation(); showPlaylistMenu(e, menuBtn.dataset.plid, menuBtn.dataset.name, parseInt(menuBtn.dataset.projid)) })
   })
 
@@ -10671,6 +10676,11 @@ async function loadChildrenForProject(id) {
 
 // Keep old name as alias so existing callers (showPlaylistMenu → loadPlaylistsForProject) still work
 async function loadPlaylistsForProject(id) { return loadChildrenForProject(id) }
+
+async function openPlaylistFromClient(projectId, playlistId) {
+  currentPlaylistId = playlistId
+  await goAddTracksInCollection()
+}
 
 async function createProject() {
   hausPrompt('Project name:', async name => {

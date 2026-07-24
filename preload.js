@@ -2,6 +2,17 @@ const { contextBridge, ipcRenderer } = require('electron')
 
 contextBridge.exposeInMainWorld('haus', {
 
+  // ─── Local file URL (for audio/video elements) ───────────
+  // Converts an absolute filesystem path to a properly encoded file:// URL.
+  audioUrl: (p) => {
+    const ext = p.split('.').pop().toLowerCase()
+    if (ext === 'aif' || ext === 'aiff') {
+      const hex = Buffer.from(p).toString('hex')
+      return `http://localhost:3001/api/audio/stream?h=${hex}`
+    }
+    return 'file://' + p.split('/').map(s => encodeURIComponent(s)).join('/')
+  },
+
   // ─── Filesystem ──────────────────────────────────────────
   fs: {
     readDir:     (p)       => ipcRenderer.invoke('read-dir', p),
@@ -54,7 +65,7 @@ contextBridge.exposeInMainWorld('haus', {
   b2: {
     authorize:    (keyId, appKey)                              => ipcRenderer.invoke('b2-authorize', keyId, appKey),
     status:       ()                                           => ipcRenderer.invoke('b2-status'),
-    listBuckets:  ()                                           => ipcRenderer.invoke('b2-list-buckets'),
+    listBuckets:  (bucketName)                                 => ipcRenderer.invoke('b2-list-buckets', bucketName),
     listFiles:    (bucketId, prefix, maxCount)                 => ipcRenderer.invoke('b2-list-files', bucketId, prefix, maxCount),
     getDownloadToken: ()                                              => ipcRenderer.invoke('b2-get-download-token'),
     getUploadUrl: (bucketId)                                   => ipcRenderer.invoke('b2-get-upload-url', bucketId),
