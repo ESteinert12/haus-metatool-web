@@ -18,7 +18,7 @@ const { Pool }   = require('pg')
 const multer     = require('multer')
 
 const app    = express()
-const PORT   = process.env.PORT || 3001
+const PORT   = process.env.PORT || 9999 
 const upload = multer({ dest: os.tmpdir() })
 
 // ─── Middleware ────────────────────────────────────────────────────────────
@@ -125,7 +125,7 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+const DEFAULT_NEON = 'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -268,6 +268,27 @@ app.post('/api/pg/connect', async (req, res) => {
     })
     const client = await pgPool.connect()
     client.release()
+    // Run schema migrations - create tables if they don't exist
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS playlists (
+        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+        project_id UUID NOT NULL,
+        name TEXT NOT NULL,
+        client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `).catch(() => {})
+    await pgPool.query(`
+      CREATE TABLE IF NOT EXISTS playlist_tracks (
+        playlist_id UUID NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+        sku_root TEXT NOT NULL,
+        position INTEGER DEFAULT 1,
+        PRIMARY KEY (playlist_id, sku_root)
+      )
+    `).catch(() => {})
+    await pgPool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
+    await pgPool.query(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
+    await pgPool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
     startNeonKeepAlive()
     // Persist the connection string for auto-connect on restart
     const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
@@ -1202,6 +1223,57 @@ app.post('/api/cfg/server-paths', async (req, res, next) => {
   // handled by original route below — we just hook to restart watcher
   res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
   next()
+})
+
+// ─── Clients import ────────────────────────────────────────────────────────
+app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.file) return res.json({ ok: false, error: 'No file provided' })
+
+  try {
+    // Ensure fm_pk has a unique constraint
+    await pgPool.query(`ALTER TABLE clients ADD CONSTRAINT clients_fm_pk_unique UNIQUE (fm_pk)`).catch(() => {})
+
+    const csv = fs.readFileSync(req.file.path, 'utf8')
+    const lines = csv.trim().split('\n')
+    const headers = lines[0].split(',').map(h => h.trim())
+
+    let inserted = 0
+    for (let i = 1; i < lines.length; i++) {
+      const parts = lines[i].split(',')
+      const obj = {}
+      headers.forEach((h, idx) => { obj[h] = (parts[idx] || '').trim() })
+
+      const { PK, CLIENT, CITY, State, Country, Contact } = obj
+      if (!PK || !CLIENT) continue
+
+      await pgPool.query(
+        `INSERT INTO clients (fm_pk, name, city, state, country, contact, active)
+         VALUES ($1, $2, $3, $4, $5, $6, true)
+         ON CONFLICT (fm_pk) DO NOTHING`,
+        [PK, CLIENT, CITY || null, State || null, Country || null, Contact || null]
+      )
+      inserted++
+    }
+
+    fs.unlinkSync(req.file.path)
+    res.json({ ok: true, count: inserted })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ─── Schema migration: Add client_id to playlists, lots, projects ──────────
+app.post('/api/db/migrate-client-ids', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    await pgPool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`)
+    await pgPool.query(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`)
+    await pgPool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`)
+    res.json({ ok: true, message: 'Schema updated' })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
 })
 
 // ─── Start ─────────────────────────────────────────────────────────────────
