@@ -447,6 +447,42 @@ webview{flex:1;border:none}
           </div>
         </div>
       </div>
+      <div class="grid-3" style="margin-top:14px;gap:14px">
+        <div class="card">
+          <div class="card-title">Weekly Goals</div>
+          <div id="weekly-goals" style="display:flex;flex-direction:column;gap:12px">
+            <div>
+              <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Lots This Week</div>
+              <div style="background:var(--bg2);border-radius:4px;height:24px;overflow:hidden">
+                <div id="goal-lots-bar" style="height:100%;background:#8FAF9B;width:0%;transition:width 0.2s"></div>
+              </div>
+              <div style="font-size:10px;color:var(--text3);margin-top:3px" id="goal-lots-text">0 / 3</div>
+            </div>
+            <div>
+              <div style="font-size:11px;color:var(--text3);margin-bottom:4px">Metadata Queue</div>
+              <div style="background:var(--bg2);border-radius:4px;height:24px;overflow:hidden">
+                <div id="goal-metadata-bar" style="height:100%;background:#C17A5E;width:100%;transition:width 0.2s"></div>
+              </div>
+              <div style="font-size:10px;color:var(--text3);margin-top:3px" id="goal-metadata-text">0 tracks</div>
+            </div>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">To-Do</div>
+          <div id="todos-container" style="display:flex;flex-direction:column;gap:8px;max-height:250px;overflow-y:auto">
+            <div style="font-size:12px;color:var(--text3);text-align:center;padding:20px 10px">No tasks</div>
+          </div>
+          <div style="margin-top:10px;display:flex;gap:6px">
+            <input id="todo-input" type="text" placeholder="Add a task…" style="flex:1;height:28px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);padding:0 8px;font-size:12px">
+            <button class="btn" onclick="addTodoItem()" style="white-space:nowrap"><i class="ti ti-plus"></i> Add</button>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-title">Registrations</div>
+          <div style="font-size:12px;color:var(--text3);padding:20px 0;text-align:center">PRO registration data coming soon</div>
+        </div>
+      </div>
+
       <div class="card" style="margin-top:14px">
         <div class="card-title">Ops</div>
         <div style="display:flex;flex-direction:column;gap:8px">
@@ -2907,7 +2943,8 @@ document.querySelectorAll('.nav-item[data-section]').forEach(el => {
 function onSectionEnter(id) {
   document.getElementById('topbar-sub').textContent = ''
   document.getElementById('topbar-actions').innerHTML = ''
-  if (id === 'today')    { renderTopbarDate(); loadLibraryStats(); loadDayliteToday(); loadTodayPlaylists() }
+  if (id === 'today')    { renderTopbarDate(); loadLibraryStats(); loadDayliteToday(); loadTodayPlaylists(); loadTodayGoals(); loadTodos(); startTodayRefresh() }
+  else stopTodayRefresh()
   if (id === 'inbox')    initWebview('inbox-inner', cfg.gmail || 'https://mail.google.com', 'email')
   if (id === 'slack')    initWebview('slack-inner', cfg.slack || 'https://app.slack.com', 'slack')
   if (id === 'schedule') { renderSchedule(); loadDayliteSchedule() }
@@ -12360,6 +12397,154 @@ wb.save(sys.argv[2])
     console.error('Export error:', err)
     if (goBtn)     { goBtn.disabled = false; goBtn.textContent = 'Retry' }
     if (cancelBtn)   cancelBtn.disabled = false
+  }
+}
+
+// ─── Weekly Goals & TODO List (TODAY page) ────────────────────────────────────
+
+let _todosTableReady = false
+let _todayRefreshInterval = null
+const GOALS = { lotsPerWeek: 3, metadataPerWeek: 30 }
+
+async function _ensureTodosTable() {
+  if (_todosTableReady) return
+  await pgQ(`
+    CREATE TABLE IF NOT EXISTS todos (
+      id           SERIAL PRIMARY KEY,
+      text         TEXT NOT NULL,
+      owner        TEXT NOT NULL DEFAULT 'kyle',
+      added_by     TEXT NOT NULL DEFAULT 'kyle',
+      done         BOOLEAN NOT NULL DEFAULT false,
+      tag          TEXT,
+      is_urgent    BOOLEAN NOT NULL DEFAULT false,
+      is_important BOOLEAN NOT NULL DEFAULT false,
+      created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+    )
+  `).catch(e => console.warn('[todos table]:', e.message))
+  _todosTableReady = true
+}
+
+function _todoPriority(t) {
+  if (t.is_important && t.is_urgent)   return { color:'#e5484d', label:'Hot',  title:'Important + Urgent' }
+  if (t.is_important && !t.is_urgent)  return { color:'#f59e0b', label:'Warm', title:'Important, not urgent' }
+  return { color:'#94a3b8', label:'Cold', title:'Low priority' }
+}
+
+async function loadTodayGoals() {
+  try {
+    // Count open lots this week (created after Monday of this week)
+    const mondate = new Date()
+    mondate.setDate(mondate.getDate() - (mondate.getDay() || 7) + 1)
+    mondate.setHours(0,0,0,0)
+
+    const lotsRes = await pgQ(`
+      SELECT COUNT(*) as cnt FROM lots
+      WHERE created_at >= $1 AND sent_date IS NULL
+    `, [mondate.toISOString()])
+    const lotsCount = lotsRes?.[0]?.cnt || 0
+    const lotsPercent = Math.min(100, Math.round((lotsCount / GOALS.lotsPerWeek) * 100))
+
+    document.getElementById('goal-lots-bar').style.width = lotsPercent + '%'
+    document.getElementById('goal-lots-text').textContent = `${lotsCount} / ${GOALS.lotsPerWeek}`
+
+    // Count tracks missing metadata
+    const metaRes = await pgQ(`
+      SELECT COUNT(*) as cnt FROM titles
+      WHERE (description IS NULL OR description = '')
+        OR (mood_1_id IS NULL)
+        OR (ksl_ids IS NULL OR ksl_ids = '')
+    `)
+    const metaCount = metaRes?.[0]?.cnt || 0
+    const metaPercent = metaCount > 0 ? Math.round((Math.max(0, GOALS.metadataPerWeek - metaCount) / GOALS.metadataPerWeek) * 100) : 0
+
+    document.getElementById('goal-metadata-bar').style.width = Math.max(0, metaPercent) + '%'
+    document.getElementById('goal-metadata-text').textContent = `${metaCount} track${metaCount !== 1 ? 's' : ''}`
+  } catch (e) {
+    console.error('[loadTodayGoals]:', e.message)
+  }
+}
+
+async function loadTodos() {
+  try {
+    await _ensureTodosTable()
+    const todos = await pgQ(`
+      SELECT id, text, owner, added_by, done, is_urgent, is_important, created_at
+      FROM todos
+      ORDER BY done ASC,
+               CASE WHEN is_important AND is_urgent THEN 0
+                    WHEN is_important THEN 1
+                    ELSE 2 END,
+               created_at DESC
+    `)
+
+    const container = document.getElementById('todos-container')
+    if (!todos || todos.length === 0) {
+      container.innerHTML = '<div style="font-size:12px;color:var(--text3);text-align:center;padding:20px 10px">No tasks</div>'
+      return
+    }
+
+    container.innerHTML = todos.map(t => {
+      const pri = _todoPriority(t)
+      return `
+        <div style="padding:8px;background:var(--bg2);border-left:3px solid ${pri.color};border-radius:3px;font-size:11px;display:flex;align-items:center;gap:8px;opacity:${t.done ? 0.5 : 1}">
+          <input type="checkbox" ${t.done ? 'checked' : ''} onchange="toggleTodo(${t.id}, this.checked)" style="cursor:pointer">
+          <div style="flex:1;${t.done ? 'text-decoration:line-through' : ''}">${t.text}${t.added_by !== 'kyle' ? ` <span style="font-size:10px;color:var(--text3)">(from ${t.added_by})</span>` : ''}</div>
+          <button class="btn" onclick="deleteTodo(${t.id})" style="padding:2px 6px;font-size:10px;background:rgba(200,0,0,0.1);color:#c00;border:none"><i class="ti ti-trash"></i></button>
+        </div>
+      `
+    }).join('')
+  } catch (e) {
+    console.error('[loadTodos]:', e.message)
+  }
+}
+
+async function addTodoItem() {
+  const input = document.getElementById('todo-input')
+  const text = (input?.value || '').trim()
+  if (!text) return
+
+  await pgQ(`INSERT INTO todos (text, owner, added_by) VALUES ($1, $2, $3)`,
+    [text, 'kyle', currentUser?.username || 'kyle'])
+  input.value = ''
+  await loadTodos()
+}
+
+async function toggleTodo(id, done) {
+  await pgQ('UPDATE todos SET done=$1 WHERE id=$2', [done, id])
+  await loadTodos()
+}
+
+async function deleteTodo(id) {
+  await pgQ('DELETE FROM todos WHERE id=$1', [id])
+  await loadTodos()
+}
+
+async function cycleTodoPriority(id, t) {
+  const isImp = t.is_important, isUrg = t.is_urgent
+  let newImp = isImp, newUrg = isUrg
+  if (isImp && isUrg) {
+    newImp = true; newUrg = false   // Hot → Warm
+  } else if (isImp) {
+    newImp = false; newUrg = false  // Warm → Cold
+  } else {
+    newImp = true; newUrg = true    // Cold → Hot
+  }
+  await pgQ('UPDATE todos SET is_important=$1, is_urgent=$2 WHERE id=$3', [newImp, newUrg, id])
+  await loadTodos()
+}
+
+function startTodayRefresh() {
+  if (_todayRefreshInterval) return
+  _todayRefreshInterval = setInterval(async () => {
+    await loadTodayGoals()
+    await loadTodos()
+  }, 60000)
+}
+
+function stopTodayRefresh() {
+  if (_todayRefreshInterval) {
+    clearInterval(_todayRefreshInterval)
+    _todayRefreshInterval = null
   }
 }
 
