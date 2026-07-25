@@ -3428,10 +3428,12 @@ async function selectClientPlaylist(playlistId, playlistName) {
   try {
     window._currentPlaylistId = playlistId  // Track current playlist for refresh after add
     const trackData = await pgQ(`
-      SELECT t.sku_root, t.title, t.key, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, t.genre, t.sub_genre
+      SELECT t.sku_root, t.title, t.key, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
       FROM playlist_tracks pt
       JOIN titles t ON t.sku_root = pt.sku_root
-      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR LENGTH(t.composer_id)-1)
+      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
       WHERE pt.playlist_id = $1
       ORDER BY t.title
     `, [playlistId]).catch(e => { console.error('Query error:', e); return [] })
@@ -3451,9 +3453,9 @@ async function selectClientPlaylist(playlistId, playlistName) {
           ${tracks && tracks.length > 0 ? tracks.map((t, i) => `
             <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px">
               <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${t.title}</div>
-              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || t.composer_id || '—'}</div>
+              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || '—'}</div>
               <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Key:</strong> ${t.key || '—'}</div>
-              <div style="font-size:11px;color:#333"><strong>Genre:</strong> ${t.genre || '—'}${t.sub_genre ? ` / ${t.sub_genre}` : ''}</div>
+              <div style="font-size:11px;color:#333"><strong>Genre:</strong> ${t.primary_genre_name || '—'}${t.secondary_genre_name ? ` / ${t.secondary_genre_name}` : ''}</div>
             </div>
           `).join('') : '<div style="font-size:12px;color:var(--text3);padding:16px;text-align:center;background:#E0EEEA;border-radius:6px">No tracks in this playlist</div>'}
         </div>
@@ -3493,10 +3495,12 @@ async function selectClientPlaylist(playlistId, playlistName) {
 async function selectClientLot(lotId, lotName) {
   try {
     const trackData = await pgQ(`
-      SELECT t.sku_root, t.title, t.key, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, t.genre, t.sub_genre
+      SELECT t.sku_root, t.title, t.key, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
       FROM lot_titles lt
       JOIN titles t ON t.sku_root = lt.sku_root
-      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR LENGTH(t.composer_id)-1)
+      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
       WHERE lt.lot_id = $1
       ORDER BY t.title
     `, [lotId]).catch(e => { console.error('Query error:', e); return [] })
@@ -3513,9 +3517,9 @@ async function selectClientLot(lotId, lotName) {
           ${tracks && tracks.length > 0 ? tracks.map((t, i) => `
             <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px">
               <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${t.title}</div>
-              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || t.composer_id || '—'}</div>
+              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || '—'}</div>
               <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Key:</strong> ${t.key || '—'}</div>
-              <div style="font-size:11px;color:#333"><strong>Genre:</strong> ${t.genre || '—'}${t.sub_genre ? ` / ${t.sub_genre}` : ''}</div>
+              <div style="font-size:11px;color:#333"><strong>Genre:</strong> ${t.primary_genre_name || '—'}${t.secondary_genre_name ? ` / ${t.secondary_genre_name}` : ''}</div>
             </div>
           `).join('') : '<div style="font-size:12px;color:var(--text3);padding:16px;text-align:center;background:#E0EEEA;border-radius:6px">No tracks in this lot</div>'}
         </div>
