@@ -8591,7 +8591,9 @@ function fqSelect(skuRoot) {
 
       <div style="display:flex;gap:8px">
         <button id="fq-save-btn" onclick="fqSave('${esc(skuRoot)}')"
-          style="flex:1;height:38px;background:var(--accent);color:#fff;border:none;border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer">
+          style="flex:1;height:38px;background:#C17A5E;color:#fff;border:none;border-radius:var(--radius);font-size:13px;font-weight:600;cursor:pointer;transition:background 0.2s"
+          onmouseover="this.style.background='#E0EEEA';this.style.color='#333'"
+          onmouseout="this.style.background='#C17A5E';this.style.color='#fff'">
           Save &amp; Next →
         </button>
         <button onclick="fqSkip('${esc(skuRoot)}')"
