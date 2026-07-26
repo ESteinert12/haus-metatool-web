@@ -8402,18 +8402,19 @@ async function loadFinishQueue() {
     const skuRoot = folder.name.split('_')[0]
     if (!skuRoot) continue
     const dbRows = await pgQ(`
-      SELECT t.sku_root, t.title, t.composer_id, t.key, t.bpm, t.description, t.mmw, t.ksl_ids, t.plot_arc,
+      SELECT t.sku_root, t.title, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, t.key, t.bpm, t.description, t.mmw, t.ksl_ids, t.plot_arc,
              pg.primary_genre_name, sg.secondary_genre_name,
              m1.mood_1_name,
              COALESCE(string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name), '') AS mood2_names
       FROM titles t
+      LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
       LEFT JOIN primary_genres   pg ON pg.primary_genre_id   = t.primary_genre_id
       LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
       LEFT JOIN mood_1           m1 ON m1.mood_1_id          = t.mood_1_id
       LEFT JOIN title_moods      tm ON tm.sku_root           = t.sku_root
       LEFT JOIN moods            mo ON mo.mood_id            = tm.mood_id
       WHERE t.sku_root = $1
-      GROUP BY t.sku_root, t.title, t.composer_id, t.key, t.bpm, t.description, t.mmw, t.ksl_ids, t.plot_arc,
+      GROUP BY t.sku_root, t.title, t.composer_id, c.full_name, t.key, t.bpm, t.description, t.mmw, t.ksl_ids, t.plot_arc,
                pg.primary_genre_name, sg.secondary_genre_name, m1.mood_1_name
       LIMIT 1`, [skuRoot])
     const t = dbRows?.[0]
@@ -8430,7 +8431,7 @@ async function loadFinishQueue() {
           <div class="fq-row" data-sku="${esc(r.skuRoot)}" onclick="fqSelect('${esc(r.skuRoot)}')"
                style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border2)">
             <div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(r.title)}</div>
-            <div style="font-size:11px;color:var(--text3);margin-top:2px">${esc(r.skuRoot)} · ${esc(r.composer_id||'')}</div>
+            <div style="font-size:11px;color:#6F927E;margin-top:2px">${esc(r.skuRoot)} · ${esc(r.composer_name||'')}</div>
             <div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">
               <span class="fq-audio-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:#9ca3af;flex-shrink:0" title="Checking audio…"></span>
               ${(!r.description) ? '<span style="font-size:10px;background:#e55;color:#fff;padding:1px 6px;border-radius:10px">no desc</span>' : ''}
@@ -8504,7 +8505,7 @@ function fqSelect(skuRoot) {
   document.getElementById('fq-form').innerHTML = `
     <div style="max-width:560px;width:100%">
       <div style="font-size:18px;font-weight:600;margin-bottom:4px">${esc(t.title)}</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:12px">${esc(t.skuRoot)} · ${esc(t.composer_id||'')}${t.key ? ' · ' + esc(t.key) : ''}${t.bpm ? ' · ' + t.bpm + ' BPM' : ''}</div>
+      <div style="font-size:12px;color:#6F927E;margin-bottom:12px">${esc(t.skuRoot)} · ${esc(t.composer_name||'')}${t.key ? ' · ' + esc(t.key) : ''}${t.bpm ? ' · ' + t.bpm + ' BPM' : ''}</div>
       <audio id="fq-audio" controls preload="auto" style="width:100%;height:36px;margin-bottom:16px;accent-color:#6F9276"></audio>
 
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
@@ -8586,7 +8587,7 @@ function fqSelect(skuRoot) {
         <input id="fq-mmw-custom" placeholder="Add individual phrase…"
           onkeydown="if(event.key==='Enter'){event.preventDefault();fqAddMmwPhrase()}"
           style="flex:1;height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:13px">
-        <button onclick="fqAddMmwPhrase()" style="height:34px;padding:0 14px;border:none;background:var(--bg2);border-radius:var(--radius);cursor:pointer;font-size:18px;color:var(--text2)" title="Add phrase">+</button>
+        <button onclick="fqAddMmwPhrase()" style="height:34px;padding:0 14px;border:none;background:#6F927E;border-radius:var(--radius);cursor:pointer;font-size:18px;color:#fff;transition:background 0.2s" onmouseover="this.style.background='#E0EEEA';this.style.color='#333'" onmouseout="this.style.background='#6F927E';this.style.color='#fff'" title="Add phrase">+</button>
       </div>
 
       <div style="display:flex;gap:8px">
@@ -8597,7 +8598,9 @@ function fqSelect(skuRoot) {
           Save &amp; Next →
         </button>
         <button onclick="fqSkip('${esc(skuRoot)}')"
-          style="height:38px;padding:0 18px;background:var(--bg2);color:var(--text2);border:none;border-radius:var(--radius);font-size:13px;cursor:pointer">
+          style="height:38px;padding:0 18px;background:#6F927E;color:#fff;border:none;border-radius:var(--radius);font-size:13px;cursor:pointer;transition:background 0.2s"
+          onmouseover="this.style.background='#E0EEEA';this.style.color='#333'"
+          onmouseout="this.style.background='#6F927E';this.style.color='#fff'">
           Skip
         </button>
       </div>
