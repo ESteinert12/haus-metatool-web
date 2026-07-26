@@ -8509,17 +8509,17 @@ function fqSelect(skuRoot) {
 
       <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:8px">
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:4px">Key</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Key</label>
           <input id="fq-key" value="${esc(t.key||'')}" placeholder="e.g. Gm, F#m, C"
             style="width:100%;height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:13px;box-sizing:border-box">
         </div>
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:4px">BPM</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">BPM</label>
           <input id="fq-bpm" type="number" value="${t.bpm||''}" placeholder="e.g. 120"
             style="width:100%;height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:13px;box-sizing:border-box">
         </div>
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:4px">Vocals</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Vocals</label>
           <select id="fq-vocals" style="width:100%;height:34px;padding:0 8px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:13px">
             <option value="no_vocals"${(t.vocals||'no_vocals')==='no_vocals'?' selected':''}>No Vocals</option>
             <option value="male_vocals"${t.vocals==='male_vocals'?' selected':''}>Male Vocals</option>
@@ -8530,7 +8530,7 @@ function fqSelect(skuRoot) {
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">Genre</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Genre</label>
           <select id="fq-primary-genre" onchange="fqUpdateSubGenres()"
             style="width:100%;height:34px;padding:0 8px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px">
             <option value="">—</option>
@@ -8538,7 +8538,7 @@ function fqSelect(skuRoot) {
           </select>
         </div>
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">Sub-Genre</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Sub-Genre</label>
           <select id="fq-secondary-genre"
             style="width:100%;height:34px;padding:0 8px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px">
             <option value="">—</option>
@@ -8547,7 +8547,7 @@ function fqSelect(skuRoot) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:20px">
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">Mood</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Mood</label>
           <select id="fq-mood"
             style="width:100%;height:34px;padding:0 8px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px">
             <option value="">—</option>
@@ -8555,22 +8555,22 @@ function fqSelect(skuRoot) {
           </select>
         </div>
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">KSL</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">KSL</label>
           <input id="fq-ksl" value="${esc(t.ksl_ids||'')}" placeholder="e.g. Tension,Action"
             style="width:100%;height:34px;padding:0 10px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px;box-sizing:border-box">
         </div>
       </div>
 
-      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:6px">Plot Arc</label>
+      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:6px">Plot Arc</label>
       <input id="fq-plot-arc" type="text" maxlength="100" value="${esc(t.plot_arc||'')}" placeholder="e.g. Confrontation, Celebration, Reveal…"
         style="width:100%;height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--bg3);color:var(--text);box-sizing:border-box;margin-bottom:20px">
 
-      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:6px">Description</label>
+      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:6px">Description</label>
       <textarea id="fq-description" rows="3" maxlength="300" placeholder="Short description (1–2 sentences)…"
         style="width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--bg3);color:var(--text);resize:vertical;font-family:inherit;box-sizing:border-box">${esc(t.description||'')}</textarea>
       <div style="text-align:right;font-size:11px;color:var(--text3);margin-top:2px">max 300 chars</div>
 
-      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin:20px 0 6px">MMW — Makes Me Wanna</label>
+      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin:20px 0 6px">MMW — Makes Me Wanna</label>
       <div id="fq-mmw-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:28px">
         ${existingTags.map(phrase => `
           <span data-tag="${esc(phrase)}" style="display:inline-flex;align-items:center;gap:4px;background:var(--accent);color:#fff;padding:3px 10px;border-radius:20px;font-size:12px">
@@ -8905,7 +8905,7 @@ function lrSelectTrack(skuRoot) {
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">Genre</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Genre</label>
           <select id="lr-primary-genre" onchange="lrUpdateSubGenres()"
             style="width:100%;height:34px;padding:0 8px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px">
             <option value="">—</option>
@@ -8913,7 +8913,7 @@ function lrSelectTrack(skuRoot) {
           </select>
         </div>
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">Sub-Genre</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Sub-Genre</label>
           <select id="lr-secondary-genre"
             style="width:100%;height:34px;padding:0 8px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px">
             <option value="">—</option>
@@ -8922,7 +8922,7 @@ function lrSelectTrack(skuRoot) {
       </div>
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:20px">
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">Mood</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Mood</label>
           <select id="lr-mood"
             style="width:100%;height:34px;padding:0 8px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px">
             <option value="">—</option>
@@ -8930,22 +8930,22 @@ function lrSelectTrack(skuRoot) {
           </select>
         </div>
         <div>
-          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6b8fb5;display:block;margin-bottom:4px">KSL</label>
+          <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">KSL</label>
           <input id="lr-ksl" value="${esc(t.ksl_ids||'')}" placeholder="e.g. Tension,Action"
             style="width:100%;height:34px;padding:0 10px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px;box-sizing:border-box">
         </div>
       </div>
 
-      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:6px">Plot Arc</label>
+      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:6px">Plot Arc</label>
       <input id="lr-plot-arc" type="text" maxlength="100" value="${esc(t.plot_arc||'')}" placeholder="e.g. Confrontation, Celebration, Reveal…"
         style="width:100%;height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--bg3);color:var(--text);box-sizing:border-box;margin-bottom:20px">
 
-      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin-bottom:6px">Description</label>
+      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:6px">Description</label>
       <textarea id="lr-description" rows="3" maxlength="300" placeholder="Short description (1–2 sentences)…"
         style="width:100%;padding:8px 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--bg3);color:var(--text);resize:vertical;font-family:inherit;box-sizing:border-box">${esc(t.description||'')}</textarea>
       <div style="text-align:right;font-size:11px;color:var(--text3);margin-top:2px">max 300 chars</div>
 
-      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);display:block;margin:20px 0 6px">MMW — Makes Me Wanna</label>
+      <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin:20px 0 6px">MMW — Makes Me Wanna</label>
       <div id="lr-mmw-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:8px;min-height:28px">
         ${existingTags.map(phrase => `
           <span data-tag="${esc(phrase)}" style="display:inline-flex;align-items:center;gap:4px;background:var(--accent);color:#fff;padding:3px 10px;border-radius:20px;font-size:12px">
