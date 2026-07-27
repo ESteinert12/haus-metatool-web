@@ -2346,11 +2346,16 @@ async function submitCreateLot(linkToProjectId) {
 async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) {
   const modal = document.getElementById('create-lot-modal')
   if (modal) modal.remove()
+
+  console.log('[createLot] Creating lot:', { clientName, name, limit, linkToProjectId })
   const rows = await pgQ(
     `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client) VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
     [name, limit, linkToProjectId, clientName]
   )
+  console.log('[createLot] Insert result:', rows)
+
   if (rows?.[0]?.lot_id) {
+    console.log('[createLot] Lot created:', rows[0].lot_id)
     // Refresh all lot pickers
     await loadLotsSection()
     await loadLotPortalPicker()
@@ -2360,11 +2365,16 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     // Refresh intake lot picker modal if open
     const intakeModal = document.getElementById('intake-lot-picker-modal')
     if (intakeModal) {
+      console.log('[createLot] Refreshing intake modal')
       await showIntakeLotPicker()  // Re-open to show new lot
     }
 
     // Navigate to the client's page to show the new lot
+    console.log('[createLot] Navigating to client:', clientName)
     await selectClient(clientName)
+  } else {
+    console.error('[createLot] Failed to create lot:', rows)
+    alert('Failed to create lot')
   }
 }
 
