@@ -2363,9 +2363,6 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     await loadLotReview()
     if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
 
-    // Set intakeClient so lot picker knows which client to filter by
-    intakeClient = clientName
-
     // Refresh intake lot picker modal if open
     const intakeModal = document.getElementById('intake-lot-picker-modal')
     if (intakeModal) {
@@ -9630,7 +9627,10 @@ async function showIntakeLotPicker() {
             ${esc(l.lot_name)}
           </button>`).join('')}
       </div>
-      <button class="btn" onclick="document.getElementById('intake-lot-picker-modal').remove()">Cancel</button>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="document.getElementById('intake-lot-picker-modal').remove();showCreateLotModal()" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500"><i class="ti ti-plus"></i> New Lot</button>
+        <button class="btn" onclick="document.getElementById('intake-lot-picker-modal').remove()">Cancel</button>
+      </div>
     </div>
   `
   modal._allLots = lots
