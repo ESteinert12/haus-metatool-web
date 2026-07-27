@@ -2363,6 +2363,9 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     await loadLotReview()
     if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
 
+    // Set intakeClient so lot picker knows which client to filter by
+    intakeClient = clientName
+
     // Refresh intake lot picker modal if open
     const intakeModal = document.getElementById('intake-lot-picker-modal')
     if (intakeModal) {
