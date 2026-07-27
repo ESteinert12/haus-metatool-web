@@ -2354,6 +2354,8 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     await loadLotsSection()
     await loadLotPortalPicker()
     if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
+    // Refresh lot review dropdown if open
+    await loadLotReview()
     // Navigate to the client's page to show the new lot
     await selectClient(clientName)
   }
