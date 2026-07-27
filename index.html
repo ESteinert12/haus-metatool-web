@@ -2279,8 +2279,8 @@ async function showCreateLotModal(linkToProjectId) {
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
 
   // Fetch active clients
-  const clients = await pgQ(`SELECT DISTINCT client_name FROM clients WHERE status='active' ORDER BY client_name`)
-  const clientOpts = (clients || []).map(c => `<option value="${esc(c.client_name)}">${esc(c.client_name)}</option>`).join('')
+  const clients = await pgQ(`SELECT id, name FROM clients WHERE active=true ORDER BY name`)
+  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')
 
   modal.innerHTML = `
     <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:340px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
