@@ -9610,7 +9610,7 @@ async function createAndPickLot() {
 async function showIntakeLotPicker() {
   const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
   const lots = await pgQ(
-    `SELECT lot_id, lot_name, lot_type FROM lots WHERE status='active' ${clientArg ? "AND client=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
+    `SELECT lot_id, lot_name, lot_type FROM lots ${clientArg ? "WHERE client=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
     clientArg ? [clientArg] : []
   ) || []
 
