@@ -8843,21 +8843,21 @@ async function loadLotReview() {
   if (!sel) return
   sel.innerHTML = '<option value="">Loading…</option>'
   const lots = await pgQ(`
-    SELECT l.lot_id, l.lot_name, l.client,
+    SELECT l.lot_id, l.lot_name, l.client_name,
            COUNT(t.sku_root) AS track_count,
            COUNT(CASE WHEN (t.plot_arc IS NULL OR t.plot_arc = '')
                        OR (t.description IS NULL OR t.description = '')
                       THEN 1 END) AS missing_count
     FROM lots l
     LEFT JOIN titles t ON t.lot_id = l.lot_id
-    GROUP BY l.lot_id, l.lot_name, l.client
-    HAVING COUNT(t.sku_root) > 0
-    ORDER BY l.client, l.lot_name DESC
+    WHERE l.status = 'active' AND l.sent_date IS NULL
+    GROUP BY l.lot_id, l.lot_name, l.client_name
+    ORDER BY l.client_name, l.lot_name DESC
   `)
   _lrLots = lots || []
   const byClient = {}
   for (const lot of _lrLots) {
-    const client = lot.client || 'Unknown'
+    const client = lot.client_name || 'Unknown'
     if (!byClient[client]) byClient[client] = []
     byClient[client].push(lot)
   }
@@ -8868,7 +8868,7 @@ async function loadLotReview() {
     for (const lot of clLots) {
       const opt = document.createElement('option')
       opt.value = lot.lot_id
-      const flag = Number(lot.missing_count) > 0 ? '⚠ ' : ''
+      const flag = Number(lot.track_count) === 0 ? '(empty) ' : (Number(lot.missing_count) > 0 ? '⚠ ' : '')
       opt.textContent = `${flag}${lot.lot_name} (${lot.track_count})`
       grp.appendChild(opt)
     }
