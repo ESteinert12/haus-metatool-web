@@ -2272,19 +2272,31 @@ async function removeTrackFromLot(lotId, skuRoot) {
   await loadLotsSection()
 }
 
-function showCreateLotModal(linkToProjectId) {
+async function showCreateLotModal(linkToProjectId) {
   const modal = document.createElement('div')
   modal.id = 'create-lot-modal'
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
+
+  // Fetch active clients
+  const clients = await pgQ(`SELECT DISTINCT client_name FROM clients WHERE status='active' ORDER BY client_name`)
+  const clientOpts = (clients || []).map(c => `<option value="${esc(c.client_name)}">${esc(c.client_name)}</option>`).join('')
+
   modal.innerHTML = `
     <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:340px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
       <div style="font-size:14px;font-weight:700">New Lot</div>
       <div>
-        <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lot Name</div>
+        <div style="font-size:10px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Client</div>
+        <select class="form-input" id="new-lot-client-input" style="width:100%">
+          <option value="">Select a client…</option>
+          ${clientOpts}
+        </select>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lot Name</div>
         <input class="form-input" id="new-lot-name-input" style="width:100%" placeholder="e.g. 260701_Texas Wives_1" autocomplete="off">
       </div>
       <div>
-        <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Track Limit <span style="font-weight:400;text-transform:none">(auto-closes lot when reached)</span></div>
+        <div style="font-size:10px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Track Limit <span style="font-weight:400;text-transform:none">(auto-closes lot when reached)</span></div>
         <input class="form-input" id="new-lot-limit-input" type="number" min="1" max="500" style="width:100%" value="30">
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -2293,13 +2305,15 @@ function showCreateLotModal(linkToProjectId) {
       </div>
     </div>`
   document.body.appendChild(modal)
-  modal.querySelector('#new-lot-name-input').focus()
+  setTimeout(() => modal.querySelector('#new-lot-client-input')?.focus(), 50)
   modal.querySelector('#new-lot-name-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitCreateLot(linkToProjectId||null) })
 }
 
 async function submitCreateLot(linkToProjectId) {
+  const clientName = document.getElementById('new-lot-client-input')?.value.trim()
   const name  = document.getElementById('new-lot-name-input')?.value.trim()
   const limit = parseInt(document.getElementById('new-lot-limit-input')?.value) || null
+  if (!clientName) { alert('Please select a client'); document.getElementById('new-lot-client-input')?.focus(); return }
   if (!name) { document.getElementById('new-lot-name-input')?.focus(); return }
 
   // Replace modal content with confirmation screen
@@ -2309,6 +2323,10 @@ async function submitCreateLot(linkToProjectId) {
     innerDiv.innerHTML = `
       <div style="font-size:14px;font-weight:700;margin-bottom:16px">Confirm New Lot</div>
       <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:16px;display:flex;flex-direction:column;gap:8px">
+        <div style="display:flex;justify-content:space-between;font-size:13px">
+          <span style="color:var(--text3)">Client</span>
+          <span style="font-weight:600">${esc(clientName)}</span>
+        </div>
         <div style="display:flex;justify-content:space-between;font-size:13px">
           <span style="color:var(--text3)">Lot Name</span>
           <span style="font-weight:600">${esc(name)}</span>
@@ -2320,23 +2338,24 @@ async function submitCreateLot(linkToProjectId) {
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
         <button class="btn" onclick="document.getElementById('create-lot-modal').remove();showCreateLotModal(${linkToProjectId||'null'})">Back</button>
-        <button class="btn primary" onclick="confirmCreateLotSubmit('${name}', ${limit}, ${linkToProjectId || 'null'})"><i class="ti ti-plus"></i> Create Lot</button>
+        <button class="btn primary" onclick="confirmCreateLotSubmit('${esc(clientName)}', '${esc(name)}', ${limit}, ${linkToProjectId || 'null'})"><i class="ti ti-plus"></i> Create Lot</button>
       </div>`
   }
 }
 
-async function confirmCreateLotSubmit(name, limit, linkToProjectId) {
+async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) {
   const modal = document.getElementById('create-lot-modal')
   if (modal) modal.remove()
   const rows = await pgQ(
-    `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id) VALUES ($1, 'client', 'active', $2, $3) RETURNING lot_id`,
-    [name, limit, linkToProjectId]
+    `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client_name) VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
+    [name, limit, linkToProjectId, clientName]
   )
   if (rows?.[0]?.lot_id) {
     await loadLotsSection()
     await loadLotPortalPicker()
     if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
-    selectLot(rows[0].lot_id)
+    // Navigate to the client's page to show the new lot
+    await selectClient(clientName)
   }
 }
 
