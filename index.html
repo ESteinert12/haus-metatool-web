@@ -8850,7 +8850,7 @@ async function loadLotReview() {
                       THEN 1 END) AS missing_count
     FROM lots l
     LEFT JOIN titles t ON t.lot_id = l.lot_id
-    WHERE l.status = 'active' AND l.sent_date IS NULL
+    WHERE l.status = 'active'
     GROUP BY l.lot_id, l.lot_name, l.client
     ORDER BY l.client, l.lot_name DESC
   `)
@@ -9579,7 +9579,7 @@ async function createAndPickLot() {
 async function showIntakeLotPicker() {
   const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
   const lots = await pgQ(
-    `SELECT lot_id, lot_name, lot_type FROM lots WHERE status='active' AND sent_date IS NULL ${clientArg ? "AND client=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
+    `SELECT lot_id, lot_name, lot_type FROM lots WHERE status='active' ${clientArg ? "AND client=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
     clientArg ? [clientArg] : []
   ) || []
 
