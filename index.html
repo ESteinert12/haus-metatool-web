@@ -2347,7 +2347,7 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
   const modal = document.getElementById('create-lot-modal')
   if (modal) modal.remove()
   const rows = await pgQ(
-    `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client_name) VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
+    `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client) VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
     [name, limit, linkToProjectId, clientName]
   )
   if (rows?.[0]?.lot_id) {
@@ -8843,7 +8843,7 @@ async function loadLotReview() {
   if (!sel) return
   sel.innerHTML = '<option value="">Loading…</option>'
   const lots = await pgQ(`
-    SELECT l.lot_id, l.lot_name, l.client_name,
+    SELECT l.lot_id, l.lot_name, l.client,
            COUNT(t.sku_root) AS track_count,
            COUNT(CASE WHEN (t.plot_arc IS NULL OR t.plot_arc = '')
                        OR (t.description IS NULL OR t.description = '')
@@ -8851,13 +8851,13 @@ async function loadLotReview() {
     FROM lots l
     LEFT JOIN titles t ON t.lot_id = l.lot_id
     WHERE l.status = 'active' AND l.sent_date IS NULL
-    GROUP BY l.lot_id, l.lot_name, l.client_name
-    ORDER BY l.client_name, l.lot_name DESC
+    GROUP BY l.lot_id, l.lot_name, l.client
+    ORDER BY l.client, l.lot_name DESC
   `)
   _lrLots = lots || []
   const byClient = {}
   for (const lot of _lrLots) {
-    const client = lot.client_name || 'Unknown'
+    const client = lot.client || 'Unknown'
     if (!byClient[client]) byClient[client] = []
     byClient[client].push(lot)
   }
@@ -9579,7 +9579,7 @@ async function createAndPickLot() {
 async function showIntakeLotPicker() {
   const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
   const lots = await pgQ(
-    `SELECT lot_id, lot_name, lot_type FROM lots WHERE status='active' AND sent_date IS NULL ${clientArg ? "AND client_name=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
+    `SELECT lot_id, lot_name, lot_type FROM lots WHERE status='active' AND sent_date IS NULL ${clientArg ? "AND client=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
     clientArg ? [clientArg] : []
   ) || []
 
