@@ -2274,6 +2274,7 @@ async function removeTrackFromLot(lotId, skuRoot) {
 
 function showCreateLotModal(linkToProjectId) {
   const modal = document.createElement('div')
+  modal.id = 'create-lot-modal'
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
   modal.innerHTML = `
     <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:340px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
@@ -2287,7 +2288,7 @@ function showCreateLotModal(linkToProjectId) {
         <input class="form-input" id="new-lot-limit-input" type="number" min="1" max="500" style="width:100%" value="30">
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn" onclick="this.closest('[style*=fixed]').remove()">Cancel</button>
+        <button class="btn" onclick="document.getElementById('create-lot-modal').remove()">Cancel</button>
         <button class="btn primary" onclick="submitCreateLot(${linkToProjectId||'null'})"><i class="ti ti-plus"></i> Create</button>
       </div>
     </div>`
@@ -2302,9 +2303,10 @@ async function submitCreateLot(linkToProjectId) {
   if (!name) { document.getElementById('new-lot-name-input')?.focus(); return }
 
   // Replace modal content with confirmation screen
-  const modal = document.querySelector('[style*="position:fixed"][style*="z-index:9999"]')
+  const modal = document.getElementById('create-lot-modal')
   if (modal) {
-    modal.querySelector('div').innerHTML = `
+    const innerDiv = modal.querySelector('div')
+    innerDiv.innerHTML = `
       <div style="font-size:14px;font-weight:700;margin-bottom:16px">Confirm New Lot</div>
       <div style="background:var(--bg2);border-radius:8px;padding:14px;margin-bottom:16px;display:flex;flex-direction:column;gap:8px">
         <div style="display:flex;justify-content:space-between;font-size:13px">
@@ -2317,22 +2319,24 @@ async function submitCreateLot(linkToProjectId) {
         </div>
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn" onclick="this.closest('[style*=fixed]').remove();showCreateLotModal(${linkToProjectId||''})">Back</button>
-        <button class="btn primary" id="confirm-create-lot-btn"><i class="ti ti-plus"></i> Create Lot</button>
+        <button class="btn" onclick="document.getElementById('create-lot-modal').remove();showCreateLotModal(${linkToProjectId||'null'})">Back</button>
+        <button class="btn primary" onclick="confirmCreateLotSubmit('${name}', ${limit}, ${linkToProjectId || 'null'})"><i class="ti ti-plus"></i> Create Lot</button>
       </div>`
-    document.getElementById('confirm-create-lot-btn').onclick = async () => {
-      modal.remove()
-      const rows = await pgQ(
-        `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id) VALUES ($1, 'client', 'active', $2, $3) RETURNING lot_id`,
-        [name, limit, linkToProjectId || null]
-      )
-      if (rows?.[0]?.lot_id) {
-        await loadLotsSection()
-        await loadLotPortalPicker()
-        if (linkToProjectId) loadChildrenForProject(linkToProjectId)
-        selectLot(rows[0].lot_id)
-      }
-    }
+  }
+}
+
+async function confirmCreateLotSubmit(name, limit, linkToProjectId) {
+  const modal = document.getElementById('create-lot-modal')
+  if (modal) modal.remove()
+  const rows = await pgQ(
+    `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id) VALUES ($1, 'client', 'active', $2, $3) RETURNING lot_id`,
+    [name, limit, linkToProjectId]
+  )
+  if (rows?.[0]?.lot_id) {
+    await loadLotsSection()
+    await loadLotPortalPicker()
+    if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
+    selectLot(rows[0].lot_id)
   }
 }
 
