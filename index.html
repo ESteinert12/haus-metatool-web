@@ -2351,11 +2351,18 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     [name, limit, linkToProjectId, clientName]
   )
   if (rows?.[0]?.lot_id) {
+    // Refresh all lot pickers
     await loadLotsSection()
     await loadLotPortalPicker()
-    if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
-    // Refresh lot review dropdown if open
     await loadLotReview()
+    if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
+
+    // Refresh intake lot picker modal if open
+    const intakeModal = document.getElementById('intake-lot-picker-modal')
+    if (intakeModal) {
+      await showIntakeLotPicker()  // Re-open to show new lot
+    }
+
     // Navigate to the client's page to show the new lot
     await selectClient(clientName)
   }
