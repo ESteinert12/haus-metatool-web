@@ -2173,6 +2173,7 @@ async function selectLot(lotId) {
       <div style="display:flex;gap:8px;margin-bottom:16px">
         <button onclick="saveLotMeta(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-check"></i> Save</button>
         <button onclick="showAddTrackToLotModal(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-plus"></i> Add Track</button>
+        <button onclick="deleteLot(${lotId}, '${esc(lot.lot_name)}')" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-trash"></i> Delete</button>
       </div>
       <div style="display:flex;gap:8px;margin-bottom:28px">
         <button onclick="exportAvidComments(${lotId}, '${esc(lot.lot_name)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-download"></i> AVID Comments</button>
@@ -2387,6 +2388,16 @@ async function showAddTrackToLotModal(lotId) {
       [lotId, sku.trim().toUpperCase()])
     selectLot(lotId)
   })
+}
+
+async function deleteLot(lotId, lotName) {
+  if (!confirm(`Delete lot "${lotName}"? This cannot be undone.`)) return
+  const result = await pgQ(`DELETE FROM lot_titles WHERE lot_id=$1`, [lotId])
+  if (result !== false) {
+    await pgQ(`DELETE FROM lots WHERE lot_id=$1`, [lotId])
+    await loadLotsSection()
+    document.getElementById('lots-detail').innerHTML = '<div style="color:var(--text3);padding:40px;text-align:center">Lot deleted. Select a lot to continue.</div>'
+  }
 }
 
 // Derive the full filesystem path for a track's files from DB data.
