@@ -50,11 +50,16 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 /* Main content */
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
 .topbar{display:flex;align-items:center;gap:10px;padding:0 20px;height:48px;border-bottom:0.5px solid var(--border);background:#C0C9CD;flex-shrink:0}
-.topbar h1{font-size:15px;font-weight:600;color:#1a2226}
+.topbar h1{font-size:15px;font-weight:600;color:#0b2a5b}
 .topbar-sub{font-size:12px;color:#3a4f56;margin-left:2px}
 .topbar-right{margin-left:auto;display:flex;gap:6px;align-items:center}
 .btn{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;font-size:12px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;transition:background 0.1s;font-family:inherit}
 .btn:hover{background:var(--bg2)}
+.lot-input{transition:background 0.2s!important}
+.lot-input:hover{background:#6F927E!important;color:#fff!important}
+.track-row{transition:background 0.2s}
+.track-row:hover{background:#6F927E!important;color:#fff!important}
+.track-row:hover *{color:#fff!important}
 .intake-tr{cursor:pointer;padding:9px 10px;border-radius:6px;margin-bottom:3px;transition:background 0.12s}
 .intake-tr:not(.active):not(.uploading):not(.error):not(.done):hover{background:#6F9276;color:white}
 .intake-tr.active{background:#E7F0EA;color:#1a1a1a}
@@ -194,7 +199,7 @@ webview{flex:1;border:none}
 .track-meta{font-size:11px;color:#6F9276;font-weight:600;margin-top:1px}
 .track-desc{font-size:11px;color:var(--text3);margin-top:2px;opacity:0.7;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;width:100%;font-style:italic}
 .track-key{font-size:11px;font-weight:600;color:var(--blue-text);background:var(--blue-bg);padding:2px 6px;border-radius:4px;flex-shrink:0}
-.track-detail{background:#C0C9CD;border:0.5px solid rgba(0,0,0,0.1);border-radius:var(--radius);padding:20px;overflow-y:auto}
+.track-detail{background:#C0C9CD;border:0.5px solid rgba(0,0,0,0.1);border-radius:var(--radius);padding:20px;overflow-y:auto;max-height:calc(100vh - 100px);flex:1}
 .track-detail-title{font-size:18px;font-weight:600;color:#0b2a5b;margin-bottom:4px}
 .track-detail-sub{font-size:13px;color:#3a4f56;margin-bottom:16px}
 .detail-row{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:0.5px solid rgba(0,0,0,0.1);font-size:13px}
@@ -262,6 +267,8 @@ webview{flex:1;border:none}
   if (typeof window.haus === 'undefined') {
     document.write('<script src="/haus-api.js"><\/script>')
   }
+  // Load shared rename validation module
+  document.write('<script src="/rename-validation.js"><\/script>')
 </script>
 </head>
 <body>
@@ -297,7 +304,6 @@ webview{flex:1;border:none}
 </div>
 
 <div id="drag">
-  <img src="assets/atmosphere-logo.svg" id="drag-title" alt="Atmosphere" style="height:28px;opacity:0.85;pointer-events:none;" />
 </div>
 
 
@@ -362,7 +368,7 @@ webview{flex:1;border:none}
   <div class="nav-item" data-section="assignments"><i class="ti ti-checklist"></i> Assignments</div>
 
   <div class="nav-section">Business</div>
-  <div class="nav-item" data-section="clients"><i class="ti ti-building-community"></i> Clients</div>
+  <div class="nav-item" data-section="clients"><i class="ti ti-building-community"></i> CLIENTS</div>
   <div class="nav-item" data-section="contacts"><i class="ti ti-users"></i> Contacts</div>
   <div class="nav-item" data-section="deals"><i class="ti ti-writing"></i> Deals</div>
   <div class="nav-item" data-section="finances"><i class="ti ti-report-money"></i> Finances</div>
@@ -676,7 +682,11 @@ webview{flex:1;border:none}
       <!-- Sidebar: lot list -->
       <div style="width:300px;flex-shrink:0;border-right:0.5px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:#C0C9CD">
         <div style="padding:10px 12px;border-bottom:0.5px solid rgba(0,0,0,0.1);flex-shrink:0;background:#C0C9CD">
-          <input id="lots-search" class="form-input" placeholder="Search lots…" oninput="filterLotsList()" style="width:100%;font-size:12px;background:#fff;border-color:rgba(0,0,0,0.15)">
+          <input id="lots-search" class="form-input" placeholder="Search lots…" oninput="filterLotsList()" style="width:100%;font-size:12px;background:#fff;border-color:rgba(0,0,0,0.15);margin-bottom:8px">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;cursor:pointer;color:var(--text)">
+            <input type="checkbox" id="lots-show-inactive" onchange="filterLotsList()" style="cursor:pointer">
+            <span>Show inactive</span>
+          </label>
         </div>
         <div id="lots-sidebar-list" style="flex:1;overflow-y:auto"></div>
       </div>
@@ -720,20 +730,15 @@ webview{flex:1;border:none}
 
   <!-- CLIENTS -->
   <div class="section" id="section-clients" style="height:100%;overflow:hidden;padding:0">
-    <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:#C0C9CD">
-      <span style="font-size:15px;font-weight:600;color:#1a2226">Clients</span>
-      <button onclick="document.getElementById('import-clients-input').click()" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-upload"></i> Import CSV</button>
-      <input type="file" id="import-clients-input" accept=".csv" style="display:none" onchange="importClientsCSV(this)">
-      <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;cursor:pointer">
-        <input type="checkbox" id="clients-show-inactive" checked onchange="renderClientsSection()">
-        <span style="color:#1a2226">Hide Inactive</span>
-      </label>
-    </div>
     <div style="display:flex;flex:1;overflow:hidden;min-height:0">
       <!-- Sidebar: clients list -->
       <div style="width:300px;flex-shrink:0;border-right:0.5px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:#C0C9CD">
-        <div style="padding:10px 12px;border-bottom:0.5px solid rgba(0,0,0,0.1);flex-shrink:0;background:#C0C9CD">
-          <input id="clients-search" class="form-input" placeholder="Search clients…" oninput="filterClientsList()" style="width:100%;font-size:12px;background:#fff;border-color:rgba(0,0,0,0.15)">
+        <div style="padding:10px 12px;border-bottom:0.5px solid rgba(0,0,0,0.1);flex-shrink:0;background:#C0C9CD;display:flex;align-items:center;gap:6px">
+          <input id="clients-search" class="form-input" placeholder="Search clients…" oninput="filterClientsList()" style="flex:1;font-size:12px;background:#fff;border-color:rgba(0,0,0,0.15)">
+          <label style="display:flex;align-items:center;gap:6px;font-size:12px;margin:0;cursor:pointer;flex-shrink:0">
+            <input type="checkbox" id="clients-show-inactive" checked onchange="renderClientsSection()" style="accent-color:#C17A5E">
+            <span style="color:#1a2226;white-space:nowrap">Hide</span>
+          </label>
         </div>
         <div id="clients-sidebar-list" style="flex:1;overflow-y:auto"></div>
       </div>
@@ -1283,7 +1288,7 @@ const DEFAULT_CFG = {
   slack:   'https://app.slack.com',
   name:    'Boss',
   // PostgreSQL
-  pgConn:  'postgresql://neondb_owner:npg_FGSU13AbJlZj@ep-polished-cloud-adsex56o-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require',
+  pgConn:  'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen.c-10.us-east-1.aws.neon.tech/neondb?sslmode=prefer',
   // FileMaker Data API
   fmHost:          '',
   fmDatabase:      '',
@@ -1307,20 +1312,23 @@ const DEFAULT_CFG = {
 let cfg = { ...DEFAULT_CFG }
 let pgConnected = false
 let currentUser  = null  // { user_id, username, display_name }
+let hasUnsavedChanges = false  // Set to true when editing, false after save
 
-function loadCfg() {
+async function loadCfg() {
   try { const s = localStorage.getItem('haus-cfg'); if (s) cfg = { ...DEFAULT_CFG, ...JSON.parse(s) } } catch {}
   // Merge server-side canonical paths — overrides local cfg so all users share the same folders
-  fetch('/api/cfg/server-paths').then(r => r.json()).then(serverPaths => {
+  try {
+    const r = await fetch('/api/cfg/server-paths')
+    const serverPaths = await r.json()
     if (serverPaths && typeof serverPaths === 'object') {
       Object.assign(cfg, serverPaths)
-      // Update Settings fields to reflect merged values
-      const fieldMap = { intake:'cfg-intake', hausjup:'cfg-hausjup', staging:'cfg-staging', finish:'cfg-finish', gmail:'cfg-gmail' }
-      for (const [k, id] of Object.entries(fieldMap)) {
-        const el = document.getElementById(id); if (el && cfg[k]) el.value = cfg[k]
-      }
     }
-  }).catch(() => {})
+  } catch {}
+  // Update Settings fields to reflect merged values
+  const fieldMap = { intake:'cfg-intake', hausjup:'cfg-hausjup', staging:'cfg-staging', finish:'cfg-finish', gmail:'cfg-gmail' }
+  for (const [k, id] of Object.entries(fieldMap)) {
+    const el = document.getElementById(id); if (el && cfg[k]) el.value = cfg[k]
+  }
   document.getElementById('cfg-intake').value       = cfg.intake
   document.getElementById('cfg-hausjup').value      = cfg.hausjup
   document.getElementById('cfg-staging').value      = cfg.staging
@@ -1344,7 +1352,7 @@ function loadCfg() {
   document.getElementById('cfg-fm-genre').value     = cfg.fmGenreField    || 'Genre'
   applyName()
   autoFillDropboxPaths()
-  pgAutoConnect()
+  await pgAutoConnect()
   b2AutoConnect()
   // Login screen Enter key
   ;['login-username','login-password'].forEach(id => {
@@ -1353,6 +1361,11 @@ function loadCfg() {
   })
   document.getElementById('login-username')?.focus()
 }
+
+// ─── Unsaved changes tracking ──────────────────────────────────────────────
+function markUnsavedChanges() { hasUnsavedChanges = true }
+function clearUnsavedChanges() { hasUnsavedChanges = false }
+
 function saveSettings() {
   cfg.intake          = document.getElementById('cfg-intake').value.trim()
   cfg.hausjup         = document.getElementById('cfg-hausjup').value.trim()
@@ -1379,6 +1392,7 @@ function saveSettings() {
   applyName()
   loadLibraryStats()
   alert('Settings saved.')
+  clearUnsavedChanges()
 }
 
 // ─── PostgreSQL connection ──────────────────────────────────
@@ -1666,12 +1680,12 @@ async function runMigrations() {
   // cowriter_id FK on team_writers (best-effort — needs cowriters PK)
   await pgQ(`ALTER TABLE team_writers ADD COLUMN IF NOT EXISTS cowriter_id INTEGER REFERENCES cowriters(cowriter_id) ON DELETE SET NULL`).catch(() => {})
 
-  await seedCowriters()
+  await seedCowriters().catch(e => console.warn('[seedCowriters]', e?.message))
 
   // Ensure teams.team_id has a unique constraint so ON CONFLICT (team_id) works
   await pgQ(`ALTER TABLE teams ADD PRIMARY KEY (team_id)`).catch(() => {})
   await pgQ(`ALTER TABLE teams ADD CONSTRAINT teams_team_id_unique UNIQUE (team_id)`).catch(() => {})
-  await seedTeams()
+  await seedTeams().catch(e => console.warn('[seedTeams]', e?.message))
 
   // ── Lots: extend schema + join table ─────────────────────────────────────
   await pgQ(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS sent_date DATE`).catch(() => {})
@@ -1903,20 +1917,49 @@ async function b2ComposerFolder(composerId, albumOverride) {
 }
 
 async function b2UploadFile(localPath, b2Name) {
-  if (!b2Connected || !b2BucketId) return null
+  if (!b2Connected || !b2BucketId) {
+    console.error('[b2UploadFile] NOT CONNECTED — b2Connected:', b2Connected, 'b2BucketId:', b2BucketId)
+    return null
+  }
   const mime = localPath.endsWith('.mp3') ? 'audio/mpeg' : localPath.endsWith('.wav') ? 'audio/wav' : 'application/octet-stream'
   const up = await window.haus.b2.getUploadUrl(b2BucketId)
-  if (!up.ok) return null
+  if (!up.ok) {
+    console.error('[b2UploadFile] getUploadUrl FAILED:', up.error || up)
+    return null
+  }
   const r = await window.haus.b2.uploadFile(up.uploadUrl, up.uploadAuthToken, localPath, b2Name, mime)
-  return r.ok ? r.downloadUrl : null
+  if (!r.ok) {
+    console.error('[b2UploadFile] uploadFile FAILED:', r.error || r)
+    return null
+  }
+  return r.downloadUrl
 }
 
 // ─── PostgreSQL helpers ─────────────────────────────────────
-async function pgQ(sql, params) {
+async function pgQ(sql, params, retries = 2) {
   if (!pgConnected) return null
-  const r = await window.haus.pg.query(sql, params)
-  if (!r.ok) { console.error('pg error:', r.error); return null }
-  return r.rows
+  for (let i = 0; i <= retries; i++) {
+    try {
+      const r = await window.haus.pg.query(sql, params)
+      if (!r.ok) {
+        if (i < retries && (r.error?.includes('ECONNRESET') || r.error?.includes('terminated'))) {
+          await new Promise(resolve => setTimeout(resolve, 500))  // Wait 500ms before retry
+          continue
+        }
+        console.error('pg error:', r.error)
+        return null
+      }
+      return r.rows
+    } catch (e) {
+      if (i < retries && (e.message?.includes('ECONNRESET') || e.message?.includes('terminated'))) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+        continue
+      }
+      console.error('pg error:', e.message)
+      return null
+    }
+  }
+  return null
 }
 
 async function loadLots(lotType, clientName) {
@@ -2068,16 +2111,35 @@ async function loadLotsSection() {
   const sidebar = document.getElementById('lots-sidebar-list')
   if (!sidebar) return
   sidebar.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:12px;text-align:center">Loading…</div>'
+  // Lightweight query — no GROUP BY
   const rows = await pgQ(`
-    SELECT l.lot_id, l.lot_name, l.client, l.sent_date, l.avid_bin, l.notes, l.status, l.lot_type,
-           COUNT(lt.sku_root) AS track_count
+    SELECT l.lot_id, l.lot_name, l.client, l.sent_date, l.avid_bin, l.notes, l.status, l.lot_type, l.active, l.created_at
     FROM lots l
-    LEFT JOIN lot_titles lt ON lt.lot_id = l.lot_id
-    GROUP BY l.lot_id, l.lot_name, l.client, l.sent_date, l.avid_bin, l.notes, l.status, l.lot_type, l.created_at
     ORDER BY l.created_at DESC NULLS LAST
   `)
   _allLots = rows || []
+
+  // Load track counts asynchronously in background
+  loadLotTrackCounts(_allLots).catch(() => {})
+
   renderLotsSidebar(_allLots)
+}
+
+async function loadLotTrackCounts(lots) {
+  if (!lots.length) return
+  const lotIds = lots.map(l => l.lot_id)
+  const result = await pgQ(`
+    SELECT lot_id, COUNT(sku_root) AS track_count
+    FROM lot_titles
+    WHERE lot_id = ANY($1)
+    GROUP BY lot_id
+  `, [lotIds])
+
+  if (result) {
+    const countMap = Object.fromEntries(result.map(r => [r.lot_id, r.track_count]))
+    lots.forEach(l => { l.track_count = countMap[l.lot_id] || 0 })
+    renderLotsSidebar(lots)
+  }
 }
 
 function renderLotsSidebar(lots) {
@@ -2109,11 +2171,25 @@ function renderLotsSidebar(lots) {
 
 function filterLotsList() {
   const q = document.getElementById('lots-search')?.value.toLowerCase() || ''
-  renderLotsSidebar(q ? _allLots.filter(l =>
-    (l.lot_name||'').toLowerCase().includes(q) ||
-    (l.client||'').toLowerCase().includes(q) ||
-    (l.avid_bin||'').toLowerCase().includes(q)
-  ) : _allLots)
+  const showInactive = document.getElementById('lots-show-inactive')?.checked ?? true
+
+  let filtered = _allLots
+
+  // Filter by search query
+  if (q) {
+    filtered = filtered.filter(l =>
+      (l.lot_name||'').toLowerCase().includes(q) ||
+      (l.client||'').toLowerCase().includes(q) ||
+      (l.avid_bin||'').toLowerCase().includes(q)
+    )
+  }
+
+  // Filter by active status
+  if (!showInactive) {
+    filtered = filtered.filter(l => l.active !== false)
+  }
+
+  renderLotsSidebar(filtered)
 }
 
 async function selectLot(lotId) {
@@ -2128,51 +2204,74 @@ async function selectLot(lotId) {
   const detail = document.getElementById('lots-detail')
   detail.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px">Loading…</div>'
 
-  const [metaRows, trackRows] = await Promise.all([
+  const [metaRows, trackRows, clientRows, projectRows] = await Promise.all([
     pgQ(`SELECT * FROM lots WHERE lot_id=$1`, [lotId]),
     pgQ(`
-      SELECT t.sku_root, t.title, t.key, t.bpm
+      SELECT t.sku_root, t.title, t.key, t.vocals, t.bpm, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
       FROM lot_titles lt
       JOIN titles t ON t.sku_root = lt.sku_root
         OR (length(lt.sku_root) = 7 AND t.sku_root LIKE lt.sku_root || '_')
+      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
       WHERE lt.lot_id = $1
       ORDER BY lt.added_at DESC
-    `, [lotId])
+    `, [lotId]),
+    pgQ(`SELECT * FROM clients WHERE active = true ORDER BY name`),
+    pgQ(`SELECT id, client_id, name FROM projects ORDER BY name`)
   ])
   const lot = metaRows?.[0]
+  const activeClients = clientRows || []
+  const allProjects = projectRows || []
   if (!lot) { detail.innerHTML = '<div style="color:var(--text3)">Lot not found.</div>'; return }
 
   const tracks = trackRows || []
   detail.innerHTML = `
     <div style="max-width:680px">
-      <div style="font-size:20px;font-weight:700;margin-bottom:4px">${esc(lot.lot_name)}</div>
-      <div style="font-size:12px;color:var(--text3);margin-bottom:24px">${lot.lot_type || 'client'} lot · ${tracks.length} track${tracks.length !== 1 ? 's' : ''}</div>
+      <div style="background:#C0C9CD;padding:16px;border-radius:8px;margin-bottom:20px">
+        <div style="font-size:20px;font-weight:700;margin-bottom:4px;color:#1a2226">${esc(lot.lot_name)}</div>
+        <div style="font-size:12px;color:#3a4f56;margin-bottom:12px">${lot.lot_type || 'client'} lot · ${tracks.length} track${tracks.length !== 1 ? 's' : ''}</div>
+        <button class="btn" onclick="toggleLotActive(${lot.lot_id})" style="font-size:12px;padding:8px 16px;${lot.active ? 'background:#8FAF9B;color:#fff;border-color:#8FAF9B' : 'background:#C17A5E;color:#fff;border-color:#C17A5E'}">
+          ${lot.active ? '✓ Active' : '○ Inactive'}
+        </button>
+      </div>
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
         <div>
           <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">CLIENT</div>
-          <input class="form-input" id="lot-edit-client" value="${esc(lot.client||'')}" placeholder="Client name" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          <select id="lot-edit-client" class="lot-input" onchange="updateLotProjectList()" style="width:100%;background:#E7F0EA;color:#1a2226;border:1px solid rgba(0,0,0,0.12);border-radius:var(--radius-sm);padding:6px 8px;font-size:12px;font-family:inherit;cursor:pointer">
+            <option value="" style="color:#999">Select a client</option>
+            ${activeClients.map(c => `<option value="${esc(c.name)}" data-client-id="${c.id}" ${lot.client === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">PROJECT</div>
+          <select id="lot-edit-project" class="lot-input" style="width:100%;background:#E7F0EA;color:#1a2226;border:1px solid rgba(0,0,0,0.12);border-radius:var(--radius-sm);padding:6px 8px;font-size:12px;font-family:inherit;cursor:pointer">
+            <option value="" style="color:#999">Select a project</option>
+            ${allProjects.map(p => `<option value="${p.id}" data-client-id="${p.client_id}" ${lot.project_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+          </select>
         </div>
         <div>
           <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">DATE SENT</div>
-          <input class="form-input" id="lot-edit-date" type="date" value="${lot.sent_date ? new Date(lot.sent_date).toISOString().slice(0,10) : ''}" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          <input class="form-input lot-input" id="lot-edit-date" type="date" value="${lot.sent_date ? new Date(lot.sent_date).toISOString().slice(0,10) : ''}" style="width:100%;background:#E7F0EA;color:#1a2226;border-color:rgba(0,0,0,0.12)">
         </div>
         <div>
           <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">AVID BIN #</div>
-          <input class="form-input" id="lot-edit-avid" value="${esc(lot.avid_bin||'')}" placeholder="Bin reference" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          <input class="form-input lot-input" id="lot-edit-avid" value="${esc(lot.avid_bin||'')}" placeholder="Bin reference" style="width:100%;background:#E7F0EA;color:#1a2226;border-color:rgba(0,0,0,0.12)">
         </div>
         <div>
           <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">NOTES</div>
-          <input class="form-input" id="lot-edit-notes" value="${esc(lot.notes||lot.brief||'')}" placeholder="Notes" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          <input class="form-input lot-input" id="lot-edit-notes" value="${esc(lot.notes||lot.brief||'')}" placeholder="Notes" style="width:100%;background:#E7F0EA;color:#1a2226;border-color:rgba(0,0,0,0.12)">
         </div>
         <div>
           <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">TRACK LIMIT</div>
-          <input class="form-input" id="lot-edit-limit" type="number" min="1" max="500" value="${lot.track_limit||''}" placeholder="No limit" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          <input class="form-input lot-input" id="lot-edit-limit" type="number" min="1" max="500" value="${lot.track_limit||''}" placeholder="No limit" style="width:100%;background:#E7F0EA;color:#1a2226;border-color:rgba(0,0,0,0.12)">
         </div>
       </div>
       <div style="display:flex;gap:8px;margin-bottom:16px">
-        <button onclick="saveLotMeta(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-check"></i> Save</button>
-        <button onclick="showAddTrackToLotModal(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-plus"></i> Add Track</button>
+        <button onclick="saveLotMeta(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-check"></i> Save</button>
+        <button onclick="showAddTrackToLotModal(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-plus"></i> Add Track</button>
+        <button onclick="downloadForAVID(${lotId}, '${esc(lot.lot_name)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-download"></i> Download for AVID</button>
         <button onclick="deleteLot(${lotId}, '${esc(lot.lot_name)}')" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-trash"></i> Delete</button>
       </div>
       <div style="display:flex;gap:8px;margin-bottom:28px">
@@ -2184,19 +2283,21 @@ async function selectLot(lotId) {
       <div style="font-size:13px;font-weight:600;color:#6F927E;margin-bottom:10px;padding-bottom:6px;border-bottom:0.5px solid rgba(111,146,126,0.3)">Tracks in this lot</div>
       ${tracks.length === 0
         ? '<div style="color:var(--text3);font-size:12px;padding:12px 0">No tracks yet</div>'
-        : `<div style="display:flex;flex-direction:column;gap:4px">
+        : `<div style="display:flex;flex-direction:column;gap:4px;max-height:500px;overflow-y:auto;padding-right:8px">
             ${tracks.map(t => `
-              <div style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#C0C9CD;border-radius:var(--radius-sm);font-size:12px">
+              <div class="track-row" style="display:flex;align-items:center;gap:10px;padding:8px 10px;background:#E7F0EA;border-radius:var(--radius-sm);font-size:12px;cursor:pointer" onclick="openMetadataEditor('${esc(t.sku_root)}')" title="Click to edit">
                 <span style="font-family:monospace;color:var(--text3);font-size:11px;flex-shrink:0">${esc(t.sku_root)}</span>
-                <span style="flex:1;font-weight:500">${esc(t.title)}</span>
-                <span style="color:var(--text3)">${t.key||''}${t.bpm ? ' · ' + t.bpm + ' bpm' : ''}</span>
-                <button class="btn" style="padding:2px 6px;font-size:11px" onclick="showLotTrackDetail('${esc(t.sku_root)}')" title="View track details"><i class="ti ti-search"></i></button>
+                <span style="flex:1"><span style="font-weight:500">${esc(t.title)}</span>${t.composer_name ? '<span style="color:#6F927E;font-weight:400"> · ' + esc(t.composer_name) + '</span>' : ''}</span>
+                <span style="color:var(--text3)">${t.key||''}${t.vocals ? ' · ' + t.vocals : ''}${t.bpm ? ' · ' + t.bpm + ' bpm' : ''}</span>
               </div>
             `).join('')}
            </div>`
       }
     </div>
   `
+
+  // Initialize project list filtering
+  setTimeout(() => updateLotProjectList(), 0)
 }
 
 async function exportAvidComments(lotId, lotName) {
@@ -2206,6 +2307,7 @@ async function exportAvidComments(lotId, lotName) {
       t.title,
       t.key,
       t.bpm,
+      t.vocals,
       pg.primary_genre_name   AS genre1,
       sg.secondary_genre_name AS genre2,
       m1.mood_1_name          AS mood1,
@@ -2237,7 +2339,15 @@ async function exportAvidComments(lotId, lotName) {
       r.ksl1,
       r.key
     ].filter(Boolean)
-    const comments = parts.join(' - ')
+    let comments = parts.join(' - ')
+
+    // Append vocals if present
+    if (r.vocals === 'male_vocals') {
+      comments += ' - MALE VOCALS'
+    } else if (r.vocals === 'female_vocals') {
+      comments += ' - FEMALE VOCALS'
+    }
+
     csvRows.push([r.sku_root, r.title, comments])
   }
 
@@ -2254,16 +2364,55 @@ async function exportAvidComments(lotId, lotName) {
   URL.revokeObjectURL(url)
 }
 
+function updateLotProjectList() {
+  const clientSelect = document.getElementById('lot-edit-client')
+  const projectSelect = document.getElementById('lot-edit-project')
+  if (!clientSelect || !projectSelect) return
+
+  const selectedOption = clientSelect.options[clientSelect.selectedIndex]
+  const clientId = selectedOption.dataset.clientId
+
+  // Show/hide project options based on selected client
+  Array.from(projectSelect.options).forEach(opt => {
+    if (opt.value === '') {
+      opt.style.display = 'block'
+    } else if (opt.dataset.clientId) {
+      opt.style.display = String(opt.dataset.clientId) === String(clientId) ? 'block' : 'none'
+    }
+  })
+}
+
 async function saveLotMeta(lotId) {
-  const client     = document.getElementById('lot-edit-client')?.value.trim() || null
+  const clientName = document.getElementById('lot-edit-client')?.value.trim() || null
+  const projectId  = parseInt(document.getElementById('lot-edit-project')?.value) || null
   const sentDate   = document.getElementById('lot-edit-date')?.value || null
   const avidBin    = document.getElementById('lot-edit-avid')?.value.trim() || null
   const notes      = document.getElementById('lot-edit-notes')?.value.trim() || null
   const trackLimit = parseInt(document.getElementById('lot-edit-limit')?.value) || null
-  await pgQ(`UPDATE lots SET client=$1, sent_date=$2, avid_bin=$3, notes=$4, track_limit=$5 WHERE lot_id=$6`,
-    [client, sentDate, avidBin, notes, trackLimit, lotId])
+
+  // Look up client_id from client name
+  let clientId = null
+  if (clientName) {
+    const clientResult = await pgQ(`SELECT id FROM clients WHERE name=$1`, [clientName]).catch(() => [])
+    if (clientResult && clientResult.length) clientId = clientResult[0].id
+  }
+
+  await pgQ(`UPDATE lots SET client=$1, client_id=$2, project_id=$3, sent_date=$4, avid_bin=$5, notes=$6, track_limit=$7 WHERE lot_id=$8`,
+    [clientName, clientId, projectId, sentDate, avidBin, notes, trackLimit, lotId])
   await loadLotsSection()
+  // Refresh current client's view if one is selected
+  if (currentClientId) {
+    await selectClient(currentClientId)
+  }
   selectLot(lotId)
+}
+
+async function savePlaylistMeta(playlistId) {
+  const sentDate = document.getElementById('pl-edit-date')?.value || null
+  const avidBin  = document.getElementById('pl-edit-avid')?.value.trim() || null
+  const notes    = document.getElementById('pl-edit-notes')?.value.trim() || null
+  await pgQ(`UPDATE playlists SET sent_date=$1, avid_bin=$2, notes=$3 WHERE playlist_id=$4`,
+    [sentDate, avidBin, notes, playlistId])
 }
 
 async function removeTrackFromLot(lotId, skuRoot) {
@@ -2273,14 +2422,17 @@ async function removeTrackFromLot(lotId, skuRoot) {
   await loadLotsSection()
 }
 
-async function showCreateLotModal(linkToProjectId) {
+async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeIndexCtx=null) {
   const modal = document.createElement('div')
   modal.id = 'create-lot-modal'
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
 
+  // Store context for when lot is created
+  window._createLotContext = { intakeIndexCtx, preSelectClient }
+
   // Fetch active clients
   const clients = await pgQ(`SELECT id, name FROM clients WHERE active=true ORDER BY name`)
-  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}">${esc(c.name)}</option>`).join('')
+  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}"${preSelectClient && c.name === preSelectClient ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
 
   modal.innerHTML = `
     <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:340px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
@@ -2348,34 +2500,71 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
   const modal = document.getElementById('create-lot-modal')
   if (modal) modal.remove()
 
-  console.log('[createLot] Creating lot:', { clientName, name, limit, linkToProjectId })
-  const rows = await pgQ(
-    `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client) VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
-    [name, limit, linkToProjectId, clientName]
-  )
-  console.log('[createLot] Insert result:', rows)
+  const ctx = window._createLotContext || {}
+  const intakeIndexCtx = ctx.intakeIndexCtx
+  const preSelectClientCtx = ctx.preSelectClient
+
+  console.log('[createLot] Creating lot:', { clientName, name, limit, linkToProjectId, intakeIndexCtx, preSelectClientCtx })
+
+  try {
+    const response = await fetch('/api/lot/create', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lotName: name, limit, projectId: linkToProjectId, clientName })
+    })
+    const result = await response.json()
+    console.log('[createLot] Create result:', result)
+
+    if (!result.ok) {
+      alert('Error creating lot: ' + (result.error || 'Unknown error'))
+      return
+    }
+
+    // Log folder creation info
+    console.log('[createLot] Folder creation info:', { folderCreated: result.folderCreated, folderPath: result.folderPath, folderError: result.folderError })
+    if (!result.folderCreated && result.folderError) {
+      console.warn('[createLot] Folder was not created:', result.folderError)
+    }
+
+    const rows = [{ lot_id: result.lotId }]
 
   if (rows?.[0]?.lot_id) {
-    console.log('[createLot] Lot created:', rows[0].lot_id)
+    const newLotId = rows[0].lot_id
+    console.log('[createLot] Lot created:', newLotId)
     // Refresh all lot pickers
     await loadLotsSection()
     await loadLotPortalPicker()
     await loadLotReview()
     if (linkToProjectId) await loadChildrenForProject(linkToProjectId)
 
-    // Refresh intake lot picker modal if open
-    const intakeModal = document.getElementById('intake-lot-picker-modal')
-    if (intakeModal) {
-      console.log('[createLot] Refreshing intake modal')
-      await showIntakeLotPicker()  // Re-open to show new lot
+    console.log('[createLot] Checking intake context:', { intakeIndexCtx, preSelectClientCtx, clientName })
+    // If called from intake lot picker, auto-assign to current track
+    if (intakeIndexCtx !== null && intakeIndexCtx >= 0) {
+      console.log('[createLot] Auto-assigning lot to track', intakeIndexCtx)
+      intakeLotId = newLotId
+      intakeLotName = name
+      intakeLotType = 'client'
+      intakeClient = clientName  // Update intake client if they selected a different one
+      // Close the lot picker modal
+      const pickerModal = document.getElementById('intake-lot-picker-modal')
+      console.log('[createLot] Picker modal exists?', !!pickerModal)
+      if (pickerModal) pickerModal.remove()
+      // Show the track form with the new lot assigned
+      console.log('[createLot] Loading intake track form')
+      loadIntakeTrackForm(intakeIndexCtx)
+    } else {
+      console.log('[createLot] Not auto-assigning - navigating to client instead')
+      // Navigate to the client's page to show the new lot
+      console.log('[createLot] Navigating to client:', clientName)
+      await selectClient(clientName)
     }
-
-    // Navigate to the client's page to show the new lot
-    console.log('[createLot] Navigating to client:', clientName)
-    await selectClient(clientName)
   } else {
     console.error('[createLot] Failed to create lot:', rows)
     alert('Failed to create lot')
+  }
+  } catch (e) {
+    console.error('[createLot] Error:', e)
+    alert('Error creating lot: ' + e.message)
   }
 }
 
@@ -2397,6 +2586,34 @@ async function deleteLot(lotId, lotName) {
     await pgQ(`DELETE FROM lots WHERE lot_id=$1`, [lotId])
     await loadLotsSection()
     document.getElementById('lots-detail').innerHTML = '<div style="color:var(--text3);padding:40px;text-align:center">Lot deleted. Select a lot to continue.</div>'
+  }
+}
+
+async function downloadForAVID(lotId, lotName) {
+  try {
+    // Create AVID folder name (sanitize for filesystem)
+    const safeName = lotName.replace(/[^a-zA-Z0-9_\-]/g, '_')
+
+    // Call server to copy WAV files from shipping folder
+    const result = await fetch('/api/lot/download-avid-wavs', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lotId, lotName, safeName })
+    }).then(r => r.json())
+
+    if (result.ok) {
+      // Open folder in Finder
+      if (window.haus?.shell?.showInFinder) {
+        window.haus.shell.showInFinder(result.folder)
+      } else {
+        alert(`Downloaded ${result.count} WAV files to ${result.folder}`)
+      }
+    } else {
+      alert('Error: ' + (result.error || 'Failed to download files'))
+    }
+  } catch (e) {
+    console.error('AVID download error:', e)
+    alert('Error downloading files: ' + e.message)
   }
 }
 
@@ -2972,7 +3189,7 @@ const SECTION_TITLES = {
   today:'Today', inbox:'Email', slack:'Slack', schedule:'Schedule',
   catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', projects:'Projects', files:'Files',
   assignments:'Assignments',
-  contacts:'Contacts', deals:'Deals', finances:'Finances', settings:'Settings'
+  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', settings:'Settings'
 }
 let currentSection = 'today'
 
@@ -3014,11 +3231,19 @@ function onSectionEnter(id) {
   if (id === 'deals')    loadDeals()
   if (id === 'finances') renderFinances()
   if (id === 'settings') {
-    loadCfg()
+    loadCfg().catch(() => {})
     const nameEl = document.getElementById('settings-account-name')
     const userEl = document.getElementById('settings-account-username')
     if (nameEl) nameEl.textContent = currentUser?.display_name || currentUser?.username || '—'
     if (userEl) userEl.textContent = currentUser?.username ? `@${currentUser.username}` : ''
+    // Track changes to settings inputs
+    const settingsPanel = document.getElementById('settings-panel')
+    if (settingsPanel) {
+      settingsPanel.querySelectorAll('input, select, textarea').forEach(el => {
+        el.addEventListener('change', markUnsavedChanges)
+        el.addEventListener('input', markUnsavedChanges)
+      })
+    }
   }
 }
 
@@ -3412,7 +3637,7 @@ function renderClientDetail(client, projects = [], playlists = [], lots = []) {
 
       <div style="display:grid;grid-template-columns:1fr 1fr;gap:20px;margin-bottom:24px">
         <div>
-          <div style="color:var(--text3);font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Contact</div>
+          <div style="color:#8FAF9B;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:0.05em;margin-bottom:6px">Contact</div>
           <div style="font-size:14px;font-weight:500">${client.contact || '—'}</div>
         </div>
         <div>
@@ -3429,8 +3654,8 @@ function renderClientDetail(client, projects = [], playlists = [], lots = []) {
         </div>
       </div>
 
-      <button class="btn" onclick="toggleClientActive(${client.id})" style="font-size:12px;padding:8px 16px;margin-bottom:28px;${client.active ? 'background:#8FAF9B;color:#fff;border-color:#8FAF9B' : 'background:#ff4d4f;color:#fff;border-color:#ff4d4f'}">
-        ${client.active ? '✓ Active' : '○ Mark Inactive'}
+      <button class="btn" onclick="toggleClientActive(${client.id})" style="font-size:12px;padding:8px 16px;margin-bottom:28px;${client.active ? 'background:#8FAF9B;color:#fff;border-color:#8FAF9B' : 'background:#C17A5E;color:#fff;border-color:#C17A5E'}">
+        ${client.active ? '✓ Active' : '○ Inactive'}
       </button>
 
       <div style="margin-bottom:24px">
@@ -3441,9 +3666,9 @@ function renderClientDetail(client, projects = [], playlists = [], lots = []) {
         <div style="display:flex;flex-direction:column;gap:6px">
           ${projects.length > 0 ? projects.map(p => `
             <div onclick="selectClientProject(${p.id}, '${p.name.replace(/"/g, '&quot;')}')"
-                 style="cursor:pointer;font-size:13px;padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;transition:all 0.15s"
+                 style="cursor:pointer;font-size:13px;padding:10px 12px;background:#C0C9CD;border-radius:6px;border:0.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;transition:all 0.15s"
                  onmouseover="this.style.background='#8FAF9B';this.style.color='#fff'"
-                 onmouseout="this.style.background='var(--bg2)';this.style.color=''">
+                 onmouseout="this.style.background='#C0C9CD';this.style.color=''">
               <span>${p.name}</span>
               <i class="ti ti-chevron-right" style="font-size:12px;opacity:0.6"></i>
             </div>
@@ -3466,6 +3691,26 @@ async function toggleClientActive(clientId) {
     renderClientsSection()
   } catch (e) {
     console.error('Error toggling client active status:', e)
+    alert('Error: ' + e.message)
+  }
+}
+
+async function toggleLotActive(lotId) {
+  const lot = _allLots.find(l => l.lot_id === lotId)
+  if (!lot) {
+    console.warn('[toggleLotActive] Lot not found:', lotId)
+    return
+  }
+
+  try {
+    const newActive = !lot.active
+    console.log('[toggleLotActive] Toggling lot', lotId, 'to', newActive)
+    await pgQ('UPDATE lots SET active = $1 WHERE lot_id = $2', [newActive, lotId])
+    lot.active = newActive
+    filterLotsList() // Re-render sidebar with new filter
+    selectLot(lotId) // Refresh detail view
+  } catch (e) {
+    console.error('Error toggling lot active status:', e)
     alert('Error: ' + e.message)
   }
 }
@@ -3514,38 +3759,142 @@ async function createPlaylistForProject(projectId) {
   })
 }
 
+// Global audio player for playlist tracks
+let currentAudioPlayer = null
+let currentPlayingButton = null
+
+async function togglePlayTrack(skuRoot, buttonEl) {
+  // If clicking the same button that's playing, stop it
+  if (currentPlayingButton === buttonEl && currentAudioPlayer) {
+    currentAudioPlayer.pause()
+    currentAudioPlayer.currentTime = 0
+    currentAudioPlayer = null
+    currentPlayingButton = null
+    buttonEl.innerHTML = '<i class="ti ti-player-play"></i>'
+    return
+  }
+
+  // Stop any currently playing track
+  if (currentAudioPlayer) {
+    currentAudioPlayer.pause()
+    currentAudioPlayer.currentTime = 0
+    currentAudioPlayer = null
+  }
+  if (currentPlayingButton) {
+    currentPlayingButton.innerHTML = '<i class="ti ti-player-play"></i>'
+    currentPlayingButton = null
+  }
+
+  try {
+    // Fetch B2 key from mix_stems — FULL stems only
+    const result = await pgQ(`SELECT b2_key FROM mix_stems WHERE sku_root=$1 AND (upper(stem_name)='FULL' OR lower(filename) LIKE '%_full.%') AND b2_key IS NOT NULL ORDER BY upper(stem_name)='FULL' DESC LIMIT 1`, [skuRoot])
+    if (!result || !result.length || !result[0].b2_key) {
+      alert('Audio not found for this track')
+      return
+    }
+
+    const b2Key = result[0].b2_key
+    console.log('B2 Key:', b2Key)
+    const audioUrl = `/api/b2/stream?key=${encodeURIComponent(b2Key)}`
+    console.log('Audio URL:', audioUrl)
+
+    // Create audio element
+    const audio = new Audio(audioUrl)
+
+    audio.onerror = () => {
+      console.error('Audio error:', audio.error)
+      buttonEl.innerHTML = '<i class="ti ti-player-play"></i>'
+      currentAudioPlayer = null
+      currentPlayingButton = null
+    }
+
+    audio.onended = () => {
+      buttonEl.innerHTML = '<i class="ti ti-player-play"></i>'
+      currentAudioPlayer = null
+      currentPlayingButton = null
+    }
+
+    currentAudioPlayer = audio
+    currentPlayingButton = buttonEl
+    buttonEl.innerHTML = '<i class="ti ti-player-pause"></i>'
+
+    // Play with error handling
+    const playPromise = audio.play()
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
+        console.error('Play error:', err)
+        buttonEl.innerHTML = '<i class="ti ti-player-play"></i>'
+        currentAudioPlayer = null
+        currentPlayingButton = null
+      })
+    }
+  } catch (e) {
+    console.error('Error playing track:', e)
+    alert('Error playing track: ' + e.message)
+  }
+}
+
 async function selectClientPlaylist(playlistId, playlistName) {
   try {
     window._currentPlaylistId = playlistId  // Track current playlist for refresh after add
-    const trackData = await pgQ(`
-      SELECT t.sku_root, t.title, t.key, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
-      FROM playlist_tracks pt
-      JOIN titles t ON t.sku_root = pt.sku_root
-      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
-      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-      WHERE pt.playlist_id = $1
-      ORDER BY t.title
-    `, [playlistId]).catch(e => { console.error('Query error:', e); return [] })
+    const [playlistMeta, trackData] = await Promise.all([
+      pgQ(`SELECT * FROM playlists WHERE playlist_id=$1`, [playlistId]).catch(() => []),
+      pgQ(`
+        SELECT t.sku_root, t.title, t.key, t.vocals, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
+        FROM playlist_tracks pt
+        JOIN titles t ON t.sku_root = pt.sku_root
+        LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
+        LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+        LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+        WHERE pt.playlist_id = $1
+        ORDER BY t.title
+      `, [playlistId]).catch(e => { console.error('Query error:', e); return [] })
+    ])
 
+    const playlist = playlistMeta?.[0]
     const tracks = trackData || []
     const detail = document.getElementById('clients-detail')
     detail.innerHTML = `
       <div style="max-width:700px">
         <div style="display:flex;align-items:center;gap:10px;margin-bottom:20px">
-          <button id="back-btn" style="padding:6px 14px;font-size:12px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:500">← Back</button>
+          <button id="back-btn" style="padding:6px 14px;font-size:12px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'">← Back</button>
           <h2 style="font-size:24px;font-weight:700;margin:0;flex:1">${playlistName}</h2>
-          <button id="add-songs-btn" style="padding:8px 16px;font-size:12px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:500"><i class="ti ti-plus"></i> Add Songs</button>
+          <button id="add-songs-btn" style="padding:8px 16px;font-size:12px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-plus"></i> Add Songs</button>
         </div>
-        <div style="font-size:12px;color:#C17A5E;margin-bottom:20px">${tracks.length} track${tracks.length !== 1 ? 's' : ''}</div>
+        <div style="font-size:12px;color:#C17A5E;margin-bottom:24px">${tracks.length} track${tracks.length !== 1 ? 's' : ''}</div>
 
-        <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">DATE SENT</div>
+            <input class="form-input" id="pl-edit-date" type="date" value="${playlist?.sent_date ? new Date(playlist.sent_date).toISOString().slice(0,10) : ''}" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">AVID BIN #</div>
+            <input class="form-input" id="pl-edit-avid" value="${esc(playlist?.avid_bin||'')}" placeholder="Bin reference" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+          <div style="grid-column:1/-1">
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">NOTES</div>
+            <input class="form-input" id="pl-edit-notes" value="${esc(playlist?.notes||'')}" placeholder="Notes" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:20px">
+          <button onclick="savePlaylistMeta(${playlistId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-check"></i> Save</button>
+          <button onclick="downloadForAVID(${playlistId}, '${esc(playlistName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-download"></i> Download for AVID</button>
+          <button onclick="exportAvidComments(${playlistId}, '${esc(playlistName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-download"></i> AVID Comments</button>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:500px;overflow-y:auto;padding-right:8px">
           ${tracks && tracks.length > 0 ? tracks.map((t, i) => `
-            <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px">
-              <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${t.title}</div>
-              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || '—'}</div>
-              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Key:</strong> ${t.key || '—'}</div>
-              <div style="font-size:11px;color:#333"><strong>Genre:</strong> ${t.primary_genre_name || '—'}${t.secondary_genre_name ? ` / ${t.secondary_genre_name}` : ''}</div>
+            <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px;display:flex;align-items:flex-start;gap:8px">
+              <button onclick="togglePlayTrack('${esc(t.sku_root)}', this)" style="flex-shrink:0;background:none;border:none;cursor:pointer;font-size:32px;color:#6F927E;padding:0;margin-top:2px;width:40px;height:40px;display:flex;align-items:center;justify-content:center;transition:color 0.2s"><i class="ti ti-player-play"></i></button>
+              <div style="flex:1">
+                <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${esc(t.title)}</div>
+                <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || '—'}</div>
+                <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Key:</strong> ${t.key || '—'}</div>
+                <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Genre:</strong> ${t.primary_genre_name || '—'}${t.secondary_genre_name ? ` / ${t.secondary_genre_name}` : ''}</div>
+                <div style="font-size:11px;color:#333"><strong>Vocals:</strong> ${t.vocals || '—'}</div>
+              </div>
             </div>
           `).join('') : '<div style="font-size:12px;color:var(--text3);padding:16px;text-align:center;background:#E0EEEA;border-radius:6px">No tracks in this playlist</div>'}
         </div>
@@ -3584,32 +3933,83 @@ async function selectClientPlaylist(playlistId, playlistName) {
 
 async function selectClientLot(lotId, lotName) {
   try {
-    const trackData = await pgQ(`
-      SELECT t.sku_root, t.title, t.key, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
-      FROM lot_titles lt
-      JOIN titles t ON t.sku_root = lt.sku_root
-      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
-      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-      WHERE lt.lot_id = $1
-      ORDER BY t.title
-    `, [lotId]).catch(e => { console.error('Query error:', e); return [] })
+    const [lotMetaRows, trackData, clientRows, projectRows] = await Promise.all([
+      pgQ(`SELECT * FROM lots WHERE lot_id=$1`, [lotId]),
+      pgQ(`
+        SELECT t.sku_root, t.title, t.key, t.vocals, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
+        FROM lot_titles lt
+        JOIN titles t ON t.sku_root = lt.sku_root
+        LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
+        LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+        LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+        WHERE lt.lot_id = $1
+        ORDER BY t.title
+      `, [lotId]).catch(e => { console.error('Query error:', e); return [] }),
+      pgQ(`SELECT * FROM clients WHERE active = true ORDER BY name`),
+      pgQ(`SELECT id, client_id, name FROM projects ORDER BY name`)
+    ])
 
+    const lot = lotMetaRows?.[0]
     const tracks = trackData || []
+    const activeClients = clientRows || []
+    const allProjects = projectRows || []
     const detail = document.getElementById('clients-detail')
+
     detail.innerHTML = `
       <div style="max-width:700px">
-        <button id="back-btn" style="margin-bottom:16px;padding:6px 14px;font-size:12px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:500">← Back</button>
-        <h2 style="font-size:24px;font-weight:700;margin:0 0 20px 0">${lotName}</h2>
-        <div style="font-size:12px;color:#C17A5E;margin-bottom:20px">${tracks.length} track${tracks.length !== 1 ? 's' : ''}</div>
+        <button id="back-btn" style="margin-bottom:16px;padding:6px 14px;font-size:12px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'">← Back</button>
+        <h2 style="font-size:24px;font-weight:700;margin:0 0 4px 0">${esc(lotName)}</h2>
+        <div style="font-size:12px;color:var(--text3);margin-bottom:24px">${lot?.lot_type || 'client'} lot · ${tracks.length} track${tracks.length !== 1 ? 's' : ''}</div>
 
-        <div style="display:flex;flex-direction:column;gap:8px">
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:20px">
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">CLIENT</div>
+            <select id="lot-edit-client" onchange="updateLotProjectList()" style="width:100%;background:#E7F0EA;color:#1a2226;border:1px solid rgba(0,0,0,0.12);border-radius:var(--radius-sm);padding:6px 8px;font-size:12px;font-family:inherit">
+              <option value="" style="color:#999">Select a client</option>
+              ${activeClients.map(c => `<option value="${esc(c.name)}" data-client-id="${c.id}" ${lot?.client === c.name ? 'selected' : ''}>${esc(c.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">PROJECT</div>
+            <select id="lot-edit-project" style="width:100%;background:#E7F0EA;color:#1a2226;border:1px solid rgba(0,0,0,0.12);border-radius:var(--radius-sm);padding:6px 8px;font-size:12px;font-family:inherit">
+              <option value="" style="color:#999">Select a project</option>
+              ${allProjects.map(p => `<option value="${p.id}" data-client-id="${p.client_id}" ${lot?.project_id === p.id ? 'selected' : ''}>${esc(p.name)}</option>`).join('')}
+            </select>
+          </div>
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">DATE SENT</div>
+            <input class="form-input" id="lot-edit-date" type="date" value="${lot?.sent_date ? new Date(lot.sent_date).toISOString().slice(0,10) : ''}" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">AVID BIN #</div>
+            <input class="form-input" id="lot-edit-avid" value="${esc(lot?.avid_bin||'')}" placeholder="Bin reference" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">NOTES</div>
+            <input class="form-input" id="lot-edit-notes" value="${esc(lot?.notes||'')}" placeholder="Notes" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+          <div>
+            <div style="font-size:11px;color:#6F927E;font-weight:600;margin-bottom:4px">TRACK LIMIT</div>
+            <input class="form-input" id="lot-edit-limit" type="number" min="1" max="500" value="${lot?.track_limit||''}" placeholder="No limit" style="width:100%;background:#C0C9CD;color:#1a2226;border-color:rgba(0,0,0,0.12)">
+          </div>
+        </div>
+
+        <div style="display:flex;gap:8px;margin-bottom:20px">
+          <button onclick="saveLotMeta(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-check"></i> Save</button>
+          <button onclick="showAddTrackToLotModal(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-plus"></i> Add Track</button>
+          <button onclick="downloadForAVID(${lotId}, '${esc(lotName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-download"></i> Download for AVID</button>
+          <button onclick="exportAvidComments(${lotId}, '${esc(lotName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-download"></i> AVID Comments</button>
+          <button onclick="deleteLot(${lotId}, '${esc(lotName)}')" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-trash"></i> Delete</button>
+        </div>
+
+        <div style="display:flex;flex-direction:column;gap:8px;max-height:500px;overflow-y:auto;padding-right:8px">
           ${tracks && tracks.length > 0 ? tracks.map((t, i) => `
             <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px">
-              <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${t.title}</div>
+              <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${esc(t.title)}</div>
               <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || '—'}</div>
               <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Key:</strong> ${t.key || '—'}</div>
-              <div style="font-size:11px;color:#333"><strong>Genre:</strong> ${t.primary_genre_name || '—'}${t.secondary_genre_name ? ` / ${t.secondary_genre_name}` : ''}</div>
+              <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Genre:</strong> ${t.primary_genre_name || '—'}${t.secondary_genre_name ? ` / ${t.secondary_genre_name}` : ''}</div>
+              <div style="font-size:11px;color:#333"><strong>Vocals:</strong> ${t.vocals || '—'}</div>
             </div>
           `).join('') : '<div style="font-size:12px;color:var(--text3);padding:16px;text-align:center;background:#E0EEEA;border-radius:6px">No tracks in this lot</div>'}
         </div>
@@ -3623,6 +4023,9 @@ async function selectClientLot(lotId, lotName) {
         selectClient(currentClientId)
       })
     }
+
+    // Initialize project list filtering
+    setTimeout(() => updateLotProjectList(), 0)
   } catch (e) {
     console.error('Error loading lot:', e)
     document.getElementById('clients-detail').innerHTML = `<div style="color:red;padding:20px">Error loading lot: ${e.message}</div>`
@@ -4341,6 +4744,10 @@ async function removeTeamWriter(writerId, composerId) {
 
 
 async function seedTeams() {
+  // Skip if teams already exist
+  const count = await pgQ('SELECT COUNT(*) as c FROM teams')
+  if (count && count[0]?.c > 0) { console.log('[seedTeams] skipped, teams already exist'); return }
+
   const teams = [{"t":"TM1200","p":"R04","f":"R04b","j":false,"c":true},{"t":"TM1202","p":"R04","f":"R04c","j":false,"c":false},{"t":"TM1204","p":"R08","f":"R08a","j":false,"c":false},{"t":"TM1206","p":"R09","f":"R09a","j":false,"c":false},{"t":"TM1207","p":"R09","f":"R09b","j":false,"c":true},{"t":"TM1208","p":"R11","f":"R11a","j":false,"c":false},{"t":"TM1209","p":"R11","f":"R11b","j":false,"c":false},{"t":"TM1210","p":"R12","f":"R12a","j":false,"c":false},{"t":"TM1211","p":"R13","f":"R13a","j":false,"c":false},{"t":"TM1212","p":"R13","f":"R13b","j":false,"c":false},{"t":"TM1213","p":"R14","f":"R14a","j":false,"c":false},{"t":"TM1214","p":"R15","f":"R15a","j":false,"c":false},{"t":"TM1215","p":"R16","f":"R16a","j":false,"c":false},{"t":"TM1216","p":"R17","f":"R17a","j":false,"c":true},{"t":"TM1217","p":"R17","f":"R17b","j":false,"c":true},{"t":"TM1218","p":"R17","f":"R17c","j":false,"c":true},{"t":"TM1219","p":"R17","f":"R17d","j":false,"c":true},{"t":"TM1220","p":"R17","f":"R17h","j":false,"c":true},{"t":"TM1221","p":"R17","f":"R17i","j":false,"c":true},{"t":"TM1222","p":"R17","f":"R17j","j":false,"c":true},{"t":"TM1223","p":"R17","f":"R17k","j":false,"c":true},{"t":"TM1224","p":"R17","f":"R17m","j":false,"c":true},{"t":"TM1225","p":"R87","f":"R87a","j":false,"c":false},{"t":"TM1226","p":"R87","f":"R87b","j":false,"c":true},{"t":"TM1227","p":"R87","f":"R87c","j":false,"c":true},{"t":"TM1228","p":"R18","f":"R18a","j":false,"c":false},{"t":"TM1229","p":"R19","f":"R19a","j":false,"c":false},{"t":"TM1230","p":"R19","f":"R19b","j":false,"c":true},{"t":"TM1231","p":"R19","f":"R19c","j":false,"c":true},{"t":"TM1232","p":"R19","f":"R19d","j":false,"c":true},{"t":"TM1233","p":"R21","f":"R21a","j":false,"c":false},{"t":"TM1234","p":"R23","f":"R23a","j":false,"c":false},{"t":"TM1235","p":"R24","f":"R24a","j":false,"c":false},{"t":"TM1236","p":"R25","f":"R25a","j":false,"c":false},{"t":"TM1237","p":"R25","f":"R25b","j":false,"c":true},{"t":"TM1238","p":"R25","f":"R25c","j":false,"c":true},{"t":"TM1239","p":"R26","f":"R26a","j":false,"c":false},{"t":"TM1240","p":"R27","f":"R27a","j":false,"c":false},{"t":"TM1241","p":"R27","f":"R27b","j":false,"c":false},{"t":"TM1242","p":"R28","f":"R28a","j":false,"c":true},{"t":"TM1243","p":"R29","f":"R29a","j":false,"c":false},{"t":"TM1244","p":"R30","f":"R30a","j":false,"c":false},{"t":"TM1245","p":"R31","f":"R31a","j":false,"c":false},{"t":"TM1246","p":"R32","f":"R32a","j":false,"c":false},{"t":"TM1247","p":"R33","f":"R33a","j":false,"c":false},{"t":"TM1248","p":"R34","f":"R34a","j":false,"c":false},{"t":"TM1249","p":"R35","f":"R35a","j":false,"c":false},{"t":"TM1250","p":"R36","f":"R36a","j":false,"c":false},{"t":"TM1251","p":"R37","f":"R37a","j":false,"c":false},{"t":"TM1252","p":"R38","f":"R38a","j":false,"c":false},{"t":"TM1253","p":"R38","f":"R38b","j":false,"c":true},{"t":"TM1254","p":"R38","f":"R38c","j":false,"c":true},{"t":"TM1255","p":"R39","f":"R39a","j":false,"c":false},{"t":"TM1256","p":"R39","f":"R39b","j":false,"c":true},{"t":"TM1257","p":"R39","f":"R39c","j":false,"c":true},{"t":"TM1258","p":"R39","f":"R39d","j":false,"c":true},{"t":"TM1259","p":"R40","f":"R40a","j":false,"c":false},{"t":"TM1260","p":"R41","f":"R41a","j":false,"c":false},{"t":"TM1261","p":"R42","f":"R42a","j":false,"c":false},{"t":"TM1262","p":"R43","f":"R43a","j":false,"c":false},{"t":"TM1263","p":"R44","f":"R44a","j":false,"c":false},{"t":"TM1264","p":"R44","f":"R44b","j":false,"c":true},{"t":"TM1265","p":"R44","f":"R44c","j":false,"c":true},{"t":"TM1266","p":"R45","f":"R45a","j":false,"c":false},{"t":"TM1267","p":"R87","f":"R87d","j":false,"c":true},{"t":"TM1268","p":"R46","f":"R46a","j":false,"c":false},{"t":"TM1269","p":"R47","f":"R47a","j":false,"c":false},{"t":"TM1270","p":"R47","f":"R47b","j":false,"c":true},{"t":"TM1271","p":"R48","f":"R48a","j":false,"c":false},{"t":"TM1272","p":"R48","f":"R48b","j":false,"c":true},{"t":"TM1273","p":"R48","f":"R48d","j":false,"c":true},{"t":"TM1274","p":"R49","f":"R49a","j":false,"c":false},{"t":"TM1275","p":"R50","f":"R50a","j":false,"c":false},{"t":"TM1276","p":"R51","f":"R51a","j":false,"c":true},{"t":"TM1277","p":"R51","f":"R51b","j":false,"c":false},{"t":"TM1278","p":"R51","f":"R51c","j":false,"c":true},{"t":"TM1279","p":"R52","f":"R52a","j":false,"c":false},{"t":"TM1280","p":"R53","f":"R53a","j":false,"c":false},{"t":"TM1281","p":"R54","f":"R54a","j":false,"c":false},{"t":"TM1282","p":"R55","f":"R55a","j":false,"c":true},{"t":"TM1283","p":"R56","f":"R56a","j":false,"c":false},{"t":"TM1284","p":"R57","f":"R57a","j":false,"c":false},{"t":"TM1285","p":"R58","f":"R58a","j":false,"c":false},{"t":"TM1286","p":"R59","f":"R59a","j":false,"c":false},{"t":"TM1287","p":"R59","f":"R59b","j":false,"c":true},{"t":"TM1288","p":"R60","f":"R60a","j":false,"c":false},{"t":"TM1289","p":"R61","f":"R61a","j":false,"c":false},{"t":"TM1290","p":"R62","f":"R62a","j":false,"c":false},{"t":"TM1291","p":"R63","f":"R63a","j":false,"c":false},{"t":"TM1292","p":"R64","f":"R64a","j":false,"c":false},{"t":"TM1293","p":"R65","f":"R65a","j":false,"c":false},{"t":"TM1294","p":"R66","f":"R66a","j":false,"c":false},{"t":"TM1295","p":"R66","f":"R66b","j":false,"c":true},{"t":"TM1296","p":"R67","f":"R67a","j":false,"c":false},{"t":"TM1297","p":"R68","f":"R68a","j":false,"c":false},{"t":"TM1298","p":"R69","f":"R69a","j":false,"c":false},{"t":"TM1299","p":"R69","f":"R69b","j":false,"c":true},{"t":"TM1300","p":"R70","f":"R70a","j":false,"c":false},{"t":"TM1301","p":"R70","f":"R70b","j":false,"c":true},{"t":"TM1302","p":"R70","f":"R70c","j":false,"c":true},{"t":"TM1303","p":"R71","f":"R71a","j":false,"c":false},{"t":"TM1304","p":"R72","f":"R72a","j":false,"c":false},{"t":"TM1305","p":"R73","f":"R73a","j":false,"c":false},{"t":"TM1306","p":"R74","f":"R74a","j":false,"c":false},{"t":"TM1307","p":"R75","f":"R75a","j":false,"c":false},{"t":"TM1308","p":"R75","f":"R75b","j":false,"c":true},{"t":"TM1309","p":"R76","f":"R76a","j":false,"c":false},{"t":"TM1310","p":"R76","f":"R76b","j":false,"c":true},{"t":"TM1311","p":"R77","f":"R77a","j":false,"c":false},{"t":"TM1312","p":"R78","f":"R78a","j":false,"c":false},{"t":"TM1313","p":"R78","f":"R78b","j":false,"c":true},{"t":"TM1314","p":"R78","f":"R78c","j":false,"c":true},{"t":"TM1315","p":"R78","f":"R78e","j":false,"c":true},{"t":"TM1316","p":"R78","f":"R78d","j":false,"c":true},{"t":"TM1317","p":"R79","f":"R79a","j":false,"c":false},{"t":"TM1318","p":"R79","f":"R79b","j":false,"c":true},{"t":"TM1319","p":"R80","f":"R80a","j":false,"c":false},{"t":"TM1320","p":"R81","f":"R81a","j":false,"c":false},{"t":"TM1321","p":"R81","f":"R81b","j":false,"c":true},{"t":"TM1322","p":"R82","f":"R82a","j":false,"c":false},{"t":"TM1324","p":"R83","f":"R83a","j":false,"c":false},{"t":"TM1325","p":"R84","f":"R84a","j":false,"c":false},{"t":"TM1326","p":"R85","f":"R85a","j":false,"c":false},{"t":"TM1327","p":"R85","f":"R85b","j":false,"c":false},{"t":"TM1328","p":"R86","f":"R86a","j":false,"c":false},{"t":"TM1329","p":"R88","f":"R88a","j":false,"c":false},{"t":"TM1330","p":"R89","f":"R89a","j":false,"c":false},{"t":"TM1331","p":"R90","f":"R90a","j":false,"c":false},{"t":"TM1332","p":"R90","f":"R90b","j":false,"c":true},{"t":"TM1333","p":"R90","f":"R90d","j":false,"c":true},{"t":"TM1334","p":"R90","f":"R90c","j":false,"c":true},{"t":"TM1335","p":"R90","f":"R90e","j":false,"c":true},{"t":"TM1336","p":"R90","f":"R90f","j":false,"c":true},{"t":"TM1337","p":"R90","f":"R90g","j":false,"c":true},{"t":"TM1338","p":"R90","f":"R90i","j":false,"c":true},{"t":"TM1339","p":"R90","f":"R90j","j":false,"c":true},{"t":"TM1340","p":"R90","f":"R90L","j":false,"c":true},{"t":"TM1341","p":"R90","f":"R90h","j":false,"c":true},{"t":"TM1342","p":"R91","f":"R91a","j":false,"c":false},{"t":"TM1343","p":"R91","f":"R91b","j":false,"c":false},{"t":"TM1344","p":"R92","f":"R92a","j":false,"c":false},{"t":"TM1345","p":"R93","f":"R93a","j":false,"c":false},{"t":"TM1346","p":"R94","f":"R94a","j":false,"c":false},{"t":"TM1347","p":"R95","f":"R95a","j":false,"c":false},{"t":"TM1348","p":"R95","f":"R95b","j":false,"c":true},{"t":"TM1349","p":"R96","f":"R96a","j":false,"c":false},{"t":"TM1350","p":"R97","f":"R97a","j":false,"c":false},{"t":"TM1351","p":"R98","f":"R98a","j":false,"c":false},{"t":"TM1352","p":"R99","f":"R99a","j":false,"c":false},{"t":"TM1353","p":"S18","f":"S18a","j":false,"c":false},{"t":"TM1354","p":"S19","f":"S19a","j":false,"c":false},{"t":"TM1355","p":"S19","f":"S19b","j":false,"c":false},{"t":"TM1356","p":"S20","f":"S20a","j":false,"c":false},{"t":"TM1357","p":"S20","f":"S20b","j":false,"c":true},{"t":"TM1358","p":"S21","f":"S21b","j":false,"c":true},{"t":"TM1359","p":"S21","f":"S21a","j":false,"c":false},{"t":"TM1360","p":"S22","f":"S22a","j":false,"c":false},{"t":"TM1361","p":"S23","f":"S23a","j":false,"c":false},{"t":"TM1362","p":"S24","f":"S24a","j":false,"c":false},{"t":"TM1363","p":"S24","f":"S24b","j":false,"c":true},{"t":"TM1364","p":"S24","f":"S24c","j":false,"c":true},{"t":"TM1365","p":"S26","f":"S26a","j":false,"c":false},{"t":"TM1366","p":"S27","f":"S27a","j":false,"c":false},{"t":"TM1367","p":"S28","f":"S28a","j":false,"c":false},{"t":"TM1368","p":"S29","f":"S29a","j":false,"c":false},{"t":"TM1369","p":"S30","f":"S30a","j":false,"c":false},{"t":"TM1370","p":"S31","f":"S31a","j":false,"c":false},{"t":"TM1371","p":"S32","f":"S32a","j":false,"c":false},{"t":"TM1372","p":"S33","f":"S33a","j":false,"c":false},{"t":"TM1373","p":"S34","f":"S34a","j":false,"c":false},{"t":"TM1375","p":"S36","f":"S36a","j":false,"c":false},{"t":"TM1376","p":"S37","f":"S37a","j":false,"c":false},{"t":"TM1377","p":"S38","f":"S38a","j":false,"c":false},{"t":"TM1378","p":"S39","f":"S39a","j":false,"c":false},{"t":"TM1379","p":"S40","f":"S40a","j":false,"c":false},{"t":"TM1380","p":"S41","f":"S41a","j":false,"c":false},{"t":"TM1381","p":"S42","f":"S42a","j":false,"c":false},{"t":"TM1382","p":"S43","f":"S43a","j":false,"c":false},{"t":"TM1383","p":"S44","f":"S44a","j":false,"c":false},{"t":"TM1384","p":"S45","f":"S45a","j":false,"c":false},{"t":"TM1385","p":"S47","f":"S47a","j":false,"c":false},{"t":"TM1386","p":"S48","f":"S48a","j":false,"c":false},{"t":"TM1387","p":"S49","f":"S49a","j":false,"c":false},{"t":"TM1388","p":"S50","f":"S50a","j":false,"c":false},{"t":"TM1389","p":"S51","f":"S51a","j":false,"c":false},{"t":"TM1390","p":"S52","f":"S52a","j":false,"c":false},{"t":"TM1391","p":"X59","f":"X59a","j":false,"c":false},{"t":"TM1392","p":"X76","f":"X76a","j":false,"c":false},{"t":"TM1393","p":"X77","f":"X77a","j":false,"c":false},{"t":"TM1394","p":"Z40","f":"Z40a","j":false,"c":false},{"t":"TM1395","p":"Z88","f":"Z88a","j":false,"c":false},{"t":"TM1399","p":"S46","f":"S46a","j":false,"c":false},{"t":"TM1404","p":"R25","f":"R25d","j":false,"c":false},{"t":"TM1405","p":"R04","f":"R04d","j":false,"c":true},{"t":"TM1408","p":"S54","f":"S54a","j":false,"c":false},{"t":"TM1409","p":"R17","f":"R17e","j":false,"c":true},{"t":"TM1410","p":"R86","f":"R86b","j":false,"c":true},{"t":"TM1411","p":"R79","f":"R79c","j":false,"c":true},{"t":"TM1412","p":"R28","f":"R28b","j":false,"c":true},{"t":"TM1413","p":"R87","f":"R87e","j":false,"c":true},{"t":"TM1414","p":"R39","f":"R39e","j":false,"c":false},{"t":"TM1415","p":"R78","f":"R78f","j":false,"c":true},{"t":"TM1416","p":"R86","f":"R86c","j":false,"c":true},{"t":"TM1417","p":"R90","f":"R90k","j":false,"c":true},{"t":"TM1418","p":"R17","f":"R17g","j":false,"c":false},{"t":"TM1419","p":"Z92","f":"Z92a","j":false,"c":false},{"t":"TM1420","p":"R37","f":"R37b","j":false,"c":false},{"t":"TM1421","p":"R05","f":"R05a","j":false,"c":false},{"t":"TM1422","p":"R46","f":"R46b","j":false,"c":false},{"t":"TM1423","p":"R20","f":"R20a","j":false,"c":false},{"t":"TM1425","p":"S55","f":"S55a","j":false,"c":false},{"t":"TM1438","p":"S56","f":"S56a","j":false,"c":false},{"t":"TM1440","p":"S56","f":"S56b","j":false,"c":true},{"t":"TM1441","p":"S57","f":"S57a","j":false,"c":false},{"t":"TM1443","p":"S58","f":"S58a","j":false,"c":false},{"t":"TM1444","p":"S59","f":"S59a","j":false,"c":false},{"t":"TM1445","p":"S21","f":"S21c","j":false,"c":true},{"t":"TM1446","p":"R73","f":"R73b","j":false,"c":false},{"t":"TM1447","p":"S60","f":"S60a","j":false,"c":false},{"t":"TM1448","p":"R11","f":"R11c","j":false,"c":false},{"t":"TM1449","p":"R46","f":"R46c","j":false,"c":false},{"t":"TM1450","p":"R17","f":"R17f","j":false,"c":true},{"t":"TM1451","p":"R23","f":"R23b","j":false,"c":false},{"t":"TM1452","p":"R75","f":"R75c","j":false,"c":false},{"t":"TM1453","p":"R04","f":"R04e","j":false,"c":false},{"t":"TM1455","p":"S52","f":"S52b","j":false,"c":true},{"t":"TM1456","p":"R41","f":"R41b","j":false,"c":false},{"t":"TM1457","p":"R94","f":"R94b","j":false,"c":false},{"t":"TM1458","p":"R20","f":"R20b","j":false,"c":false},{"t":"TM1459","p":"S33","f":"S33b","j":false,"c":false},{"t":"TM1460","p":"S58","f":"S58b","j":false,"c":false},{"t":"TM1462","p":"S61","f":"S61a","j":false,"c":false},{"t":"TM1463","p":"S62","f":"S62a","j":false,"c":false},{"t":"TM1464","p":"S63","f":"S63a","j":false,"c":false},{"t":"TM1465","p":"S64","f":"S64a","j":false,"c":false},{"t":"TM1466","p":"S65","f":"S65a","j":false,"c":false},{"t":"TM1467","p":"S66","f":"S66a","j":false,"c":false},{"t":"TM1468","p":"S67","f":"S67a","j":false,"c":false},{"t":"TM1469","p":"S62","f":"S62b","j":false,"c":true},{"t":"TM1471","p":"S68","f":"S68a","j":false,"c":false},{"t":"TM1472","p":"R63","f":"R63b","j":false,"c":true},{"t":"TM1474","p":"S62","f":"S62c","j":false,"c":true},{"t":"TM1475","p":"R74","f":"R74b","j":false,"c":true},{"t":"TM1476","p":"S21","f":"S21d","j":false,"c":true},{"t":"TM1477","p":"R27","f":"R27c","j":false,"c":true},{"t":"TM1478","p":"S69","f":"S69a","j":false,"c":false},{"t":"TM1479","p":"S70","f":"S70a","j":false,"c":false},{"t":"TM1480","p":"S71","f":"S71a","j":false,"c":false},{"t":"TM1483","p":"S72","f":"S72a","j":false,"c":false},{"t":"TM1484","p":"C27","f":"C27a","j":false,"c":false},{"t":"TM1485","p":"C28","f":"C28a","j":false,"c":false},{"t":"TM1486","p":"C29","f":"C29a","j":false,"c":false},{"t":"TM1487","p":"C30","f":"C30a","j":false,"c":false},{"t":"TM1488","p":"C31","f":"C31a","j":false,"c":false},{"t":"TM1489","p":"C32","f":"C32a","j":false,"c":false},{"t":"TM1490","p":"C33","f":"C33a","j":false,"c":false},{"t":"TM1491","p":"C34","f":"C34a","j":false,"c":false},{"t":"TM1492","p":"C47","f":"C47a","j":false,"c":false},{"t":"TM1493","p":"C35","f":"C35a","j":false,"c":false},{"t":"TM1494","p":"C36","f":"C36a","j":false,"c":false},{"t":"TM1495","p":"C37","f":"C37a","j":false,"c":false},{"t":"TM1496","p":"C38","f":"C38a","j":false,"c":false},{"t":"TM1497","p":"C39","f":"C39a","j":false,"c":false},{"t":"TM1498","p":"C40","f":"C40a","j":false,"c":false},{"t":"TM1499","p":"C41","f":"C41a","j":false,"c":false},{"t":"TM1500","p":"C42","f":"C42a","j":false,"c":false},{"t":"TM1501","p":"C43","f":"C43a","j":false,"c":false},{"t":"TM1502","p":"C44","f":"C44a","j":false,"c":false},{"t":"TM1503","p":"C45","f":"C45a","j":false,"c":false},{"t":"TM1504","p":"C46","f":"C46a","j":false,"c":false},{"t":"TM1508","p":"C32","f":"C32b","j":false,"c":true},{"t":"TM1510","p":"C48","f":"C48a","j":false,"c":false},{"t":"TM1511","p":"C49","f":"C49a","j":false,"c":false},{"t":"TM1515","p":"R68","f":"R68b","j":false,"c":true},{"t":"TM1516","p":"C43","f":"C43b","j":false,"c":true},{"t":"TM1519","p":"C50","f":"C50a","j":false,"c":false},{"t":"TM1520","p":"S45","f":"S45b","j":false,"c":true},{"t":"TM1521","p":"C51","f":"C51a","j":false,"c":false}]
   const SQL = `INSERT INTO teams (team_id, composer_prefix, composer_full_id, status, is_jup, has_cowriters)
     VALUES ($1,$2,$3,'COMPLETE',$4,$5)
@@ -4354,6 +4761,10 @@ async function seedTeams() {
 }
 
 async function seedCowriters() {
+  // Skip if cowriters already exist
+  const count = await pgQ('SELECT COUNT(*) as c FROM cowriters')
+  if (count && count[0]?.c > 0) { console.log('[seedCowriters] skipped, cowriters already exist'); return }
+
   const cws = [{"n":"Brandon Adams","f":"Brandon","l":"Adams","p":"BMI","i":"727060850"},{"n":"Gaelan Sebastian Aguado","f":"Gaelan","l":"Sebastian Aguado","p":"ASCAP","i":"645719814"},{"n":"Michael Aharon","f":"Michael","l":"Aharon","p":"SESAC","i":"243682268"},{"n":"Konstantine Aivaliotis","f":"Konstantine","l":"Aivaliotis","p":"SOCAN","i":"684988466"},{"n":"EL Hachani Ali","f":"EL","l":"Hachani Ali","p":"SACEM","i":"1029076-79"},{"n":"Jordan Allen","f":"Jordan","l":"Allen","p":"SOCAN","i":"587916392"},{"n":"Keith Joseph Anderson","f":"Keith","l":"Joseph Anderson","p":"BMI","i":"746479892"},{"n":"Christos Andreou","f":"Christos","l":"Andreou","p":"ASCAP","i":"605973336"},{"n":"Lacey Angerosa","f":"Lacey","l":"Angerosa","p":"ASCAP","i":"118758107"},{"n":"David Anson","f":"David","l":"Anson","p":"PRS","i":"702639751"},{"n":"Fernando Aponte","f":"Fernando","l":"Aponte","p":"ASCAP","i":"759851291"},{"n":"Melissa Arce","f":"Melissa","l":"Arce","p":"BMI","i":"672604737"},{"n":"Jake Atherton","f":"Jake","l":"Atherton","p":"ASCAP","i":"888010422"},{"n":"James Atin-Godden","f":"James","l":"Atin-Godden","p":"SOCAN","i":"683911616"},{"n":"Travis Bacon","f":"Travis","l":"Bacon","p":"BMI","i":"550141388"},{"n":"Christopher Bagnole","f":"Christopher","l":"Bagnole","p":"BMI","i":"352710876"},{"n":"Anthony George Balaskas","f":"Anthony","l":"George Balaskas","p":"ASCAP","i":"508596525"},{"n":"Ulrich Bannenberg","f":"Ulrich","l":"Bannenberg","p":"GEMA","i":"702091683"},{"n":"David Barenboim","f":"David","l":"Barenboim","p":"GEMA","i":"454864721"},{"n":"Andrew Barlow","f":"Andrew","l":"Barlow","p":"ASCAP","i":"422448966"},{"n":"Sara Barone","f":"Sara","l":"Barone","p":"ASCAP","i":"821027481"},{"n":"Tim Barr","f":"Tim","l":"Barr","p":"BMI","i":"515795039"},{"n":"Thomas Barth","f":"Thomas","l":"Barth","p":"BMI","i":"143989044"},{"n":"Jesse Baskin","f":"Jesse","l":"Baskin","p":"BMI","i":"767236022"},{"n":"Luigi Bayaert","f":"Luigi","l":"Bayaert","p":"SACEM","i":"1163198844"},{"n":"Shoshana Bean","f":"Shoshana","l":"Bean","p":"ASCAP","i":"560942249"},{"n":"David Ben-Porat","f":"David","l":"Ben-Porat","p":"ASCAP","i":"494088223"},{"n":"Romain Benabdelkader","f":"Romain","l":"Benabdelkader","p":"SACEM","i":"858126514"},{"n":"Anthony Bernardo","f":"Anthony","l":"Bernardo","p":"ASCAP","i":"485489201"},{"n":"Brendan Berry","f":"Brendan","l":"Berry","p":"ASCAP","i":"561004494"},{"n":"Brenden Berryn","f":"Brenden","l":"Berryn","p":"ASCAP","i":"561004494"},{"n":"Michi Besler","f":"Michi","l":"Besler","p":"GEMA","i":"281315580"},{"n":"Simon Bhatia","f":"Simon","l":"Bhatia","p":"ASCAP","i":"1220973865"},{"n":"Stephen Bigger","f":"Stephen","l":"Bigger","p":"ASCAP","i":"189798580"},{"n":"Maria Patricia Blyde","f":"Maria","l":"Patricia Blyde","p":"BMI","i":"1017914083"},{"n":"Pablo Andres Bodnar","f":"Pablo","l":"Andres Bodnar","p":"SADAIC","i":"873303929"},{"n":"Jeremy Bonarriba","f":"Jeremy","l":"Bonarriba","p":"BUMA","i":"447601459"},{"n":"Nathalie Bonin","f":"Nathalie","l":"Bonin","p":"SOCAN","i":"270312896"},{"n":"Jeremiah Bornfield","f":"Jeremiah","l":"Bornfield","p":"BMI","i":"550131128"},{"n":"Christopher Botta","f":"Christopher","l":"Botta","p":"BMI","i":"728308633"},{"n":"Marie-Christine Bourdon","f":"Marie-Christine","l":"Bourdon","p":"SOCAN","i":"796220617"},{"n":"JamesDustin Brayley","f":"JamesDustin","l":"Brayley","p":"SESAC","i":"768555489"},{"n":"Daniel Elias Brenner","f":"Daniel","l":"Elias Brenner","p":"GEMA","i":"573900050"},{"n":"Martin Briley","f":"Martin","l":"Briley","p":"ASCAP","i":"68299725"},{"n":"Olivia Broadfield","f":"Olivia","l":"Broadfield","p":"PRS","i":"511053509"},{"n":"Bob Brockmann","f":"Bob","l":"Brockmann","p":"ASCAP","i":"428961526"},{"n":"Brandon Brown","f":"Brandon","l":"Brown","p":"BMI","i":"459915409"},{"n":"Karlie Bruce","f":"Karlie","l":"Bruce","p":"SESAC","i":null},{"n":"Erin Brueggemann","f":"Erin","l":"Brueggemann","p":"ASCAP","i":"506747838"},{"n":"Andreas Bruhn","f":"Andreas","l":"Bruhn","p":"GEMA","i":"241583478"},{"n":"David Aaron Burger","f":"David","l":"Aaron Burger","p":"ASCAP","i":"339235752"},{"n":"Tobias Burger","f":"Tobias","l":"Burger","p":"GEMA","i":"265664048"},{"n":"Gail Bushy","f":"Gail","l":"Bushy","p":"BMI","i":"740333082"},{"n":"Ryan Byrne","f":"Ryan","l":"Byrne","p":"ASCAP","i":"782638995"},{"n":"Benedetto Caccavale","f":"Benedetto","l":"Caccavale","p":"ASCAP","i":"496970981"},{"n":"Yanni Caldas","f":"Yanni","l":"Caldas","p":"SOCAN","i":"820646452"},{"n":"Todd Caldwell","f":"Todd","l":"Caldwell","p":"BMI","i":"532412883"},{"n":"Sam Campoli","f":"Sam","l":"Campoli","p":"ASCAP","i":"1002917797"},{"n":"Emiko Carlin","f":"Emiko","l":"Carlin","p":"ASCAP","i":"289661607"},{"n":"Taylor Carson","f":"Taylor","l":"Carson","p":"ASCAP","i":"349228642"},{"n":"Steve Carter","f":"Steve","l":"Carter","p":"BMI","i":"613856835"},{"n":"Matthew Castelein","f":"Matthew","l":"Castelein","p":"ASCAP","i":"683486797"},{"n":"Franco Caviglia","f":"Franco","l":"Caviglia","p":"ASCAP","i":"667653403"},{"n":"Daniel Chait","f":"Daniel","l":"Chait","p":"ASCAP","i":"565207255"},{"n":"Spencer J. Charif","f":"Spencer","l":"J. Charif","p":"ASCAP","i":"530921183"},{"n":"Israel Charles","f":"Israel","l":"Charles","p":"BMI","i":"217945845"},{"n":"Konstantinos Chaveles","f":"Konstantinos","l":"Chaveles","p":"SOCAN","i":"815390736"},{"n":"Daniel Chen","f":"Daniel","l":"Chen","p":"ASCAP","i":"440872068"},{"n":"Kembo Cheng","f":"Kembo","l":"Cheng","p":"ASCAP","i":"778470001"},{"n":"Mohamad Noor Che\u2019ree","f":"Mohamad","l":"Noor Che\u2019ree","p":"ASCAP","i":"763756601"},{"n":"Mario Chow","f":"Mario","l":"Chow","p":"ASCAP","i":"778261995"},{"n":"Christopher Dale Chrisman","f":"Christopher","l":"Dale Chrisman","p":"ASCAP","i":"826271145"},{"n":"Christopher Chrisman","f":"Christopher","l":"Chrisman","p":"ASCAP","i":"826271145"},{"n":"Blake Christiana","f":"Blake","l":"Christiana","p":"BMI","i":"484362143"},{"n":"Julie Collings","f":"Julie","l":"Collings","p":"BMI","i":"489150035"},{"n":"Renee Cologne","f":"Renee","l":"Cologne","p":"ASCAP","i":"253824269"},{"n":"Kevin Comden","f":"Kevin","l":"Comden","p":"ASCAP","i":"601094590"},{"n":"Dario Comuzzi","f":"Dario","l":"Comuzzi","p":"BMI","i":"690243350"},{"n":"John Conte","f":"John","l":"Conte","p":"ASCAP","i":"1519265"},{"n":"Ian Cooney","f":"Ian","l":"Cooney","p":"ASCAP","i":"56517963"},{"n":"Garrett Thomas Corbran","f":"Garrett","l":"Thomas Corbran","p":"ASCAP","i":"849357689"},{"n":"Peter Cornell","f":"Peter","l":"Cornell","p":"ASCAP","i":"822478824"},{"n":"Robert Critchley","f":"Robert","l":"Critchley","p":"SOCAN","i":"135336196"},{"n":"Sean Croley","f":"Sean","l":"Croley","p":"SOCAN","i":"226013120"},{"n":"Matthew Cusson","f":"Matthew","l":"Cusson","p":"ASCAP","i":"548637807"},{"n":"Angie Dais","f":"Angie","l":"Dais","p":"ASCAP","i":"825312461"},{"n":"Geoff Deitch","f":"Geoff","l":"Deitch","p":"BMI","i":"760680140"},{"n":"Malia Delacruz","f":"Malia","l":"Delacruz","p":"ASCAP","i":"1186870025"},{"n":"Sean Dixon","f":"Sean","l":"Dixon","p":"BMI","i":"356114870"},{"n":"Stephen Doster","f":"Stephen","l":"Doster","p":"BMI","i":"240113137"},{"n":"Gregory Douglass","f":"Gregory","l":"Douglass","p":"BMI","i":"513578746"},{"n":"Linda Draper","f":"Linda","l":"Draper","p":"BMI","i":"402451602"},{"n":"Jonathan Drury","f":"Jonathan","l":"Drury","p":"ASCAP","i":"516078263"},{"n":"Brandon Duggins","f":"Brandon","l":"Duggins","p":"BMI","i":"532136486"},{"n":"Aaron Dunn","f":"Aaron","l":"Dunn","p":"SOCAN","i":"675164034"},{"n":"Philip D\u2019Agostino","f":"Philip","l":"D\u2019Agostino","p":"ASCAP","i":"572316456"},{"n":"Willie Eaglin","f":"Willie","l":"Eaglin","p":"BMI","i":"460689627"},{"n":"JonJoseph Ehlers","f":"JonJoseph","l":"Ehlers","p":"ASCAP","i":"775218421"},{"n":"Vitali Ehret","f":"Vitali","l":"Ehret","p":"GEMA","i":"806596611"},{"n":"William Eisele","f":"William","l":"Eisele","p":"BMI","i":"209327774"},{"n":"Karim Bachir Elezaar","f":"Karim","l":"Bachir Elezaar","p":"SACEM","i":"81457561"},{"n":"Austin Elkington","f":"Austin","l":"Elkington","p":"BMI","i":"753644917"},{"n":"Michael Ellery","f":"Michael","l":"Ellery","p":"APRA","i":"726160263"},{"n":"Sayuri Elsie","f":"Sayuri","l":"Elsie","p":"ASCAP","i":"626341462"},{"n":"Friday Famous Endurance","f":"Friday","l":"Famous Endurance","p":"BMI","i":"1153071591"},{"n":"Troy Engle","f":"Troy","l":"Engle","p":"BMI","i":"358693216"},{"n":"Fima Ephron","f":"Fima","l":"Ephron","p":"BMI","i":"244357274"},{"n":"Bryn-Troy Evans","f":"Bryn-Troy","l":"Evans","p":"APRA","i":"437473638"},{"n":"Tony Exford","f":"Tony","l":"Exford","p":"ASCAP","i":"516119181"},{"n":"Steven Faile","f":"Steven","l":"Faile","p":"ASCAP","i":"469623713"},{"n":"Steven Farella","f":"Steven","l":"Farella","p":"ASCAP","i":"344012800"},{"n":"Kevin Farrell","f":"Kevin","l":"Farrell","p":"ASCAP","i":"510471200"},{"n":"Koebi Faumui","f":"Koebi","l":"Faumui","p":"APRA","i":"01335268354"},{"n":"Philip Feit","f":"Philip","l":"Feit","p":"GEMA","i":"531194964"},{"n":"Daniel Alejandro Fernandez","f":"Daniel","l":"Alejandro Fernandez","p":"BMI","i":"834639710"},{"n":"Matthew Ferrone","f":"Matthew","l":"Ferrone","p":"ASCAP","i":"469609213"},{"n":"Lindsay Fialka","f":"Lindsay","l":"Fialka","p":"SOCAN","i":"1185882315"},{"n":"Matt Filler","f":"Matt","l":"Filler","p":"ASCAP","i":"510394092"},{"n":"Matthew Filler","f":"Matthew","l":"Filler","p":"ASCAP","i":"510394092"},{"n":"Achim Fischer","f":"Achim","l":"Fischer","p":"BMI","i":"247274556"},{"n":"Michael Sean Flannery","f":"Michael","l":"Sean Flannery","p":"ASCAP","i":"348685907"},{"n":"Ari Folman-Cohen","f":"Ari","l":"Folman-Cohen","p":"ASCAP","i":"542161384"},{"n":"Aron Forbes","f":"Aron","l":"Forbes","p":"ASCAP","i":"561507166"},{"n":"Colin Andrew Ford","f":"Colin","l":"Andrew Ford","p":"SOCAN","i":"97054181"},{"n":"David John Forlano","f":"David","l":"John Forlano","p":"BMI","i":"755642029"},{"n":"Ryan Foss","f":"Ryan","l":"Foss","p":"ASCAP","i":"777844284"},{"n":"Peter Russell Fox","f":"Peter","l":"Russell Fox","p":"BMI","i":"221883575"},{"n":"Jonathan Foy","f":"Jonathan","l":"Foy","p":"BMI","i":"631128972"},{"n":"Yohoshua Fruchter","f":"Yohoshua","l":"Fruchter","p":"ASCAP","i":"766584884"},{"n":"Yoshie Fruchter","f":"Yoshie","l":"Fruchter","p":"ASCAP","i":"766584884"},{"n":"Brian Fuller","f":"Brian","l":"Fuller","p":"BMI","i":"843899188"},{"n":"Frank Funaro","f":"Frank","l":"Funaro","p":"BMI","i":"247274556"},{"n":"Ingo Gabriel","f":"Ingo","l":"Gabriel","p":"GEMA","i":"869622883"},{"n":"Brent Gallant","f":"Brent","l":"Gallant","p":"SOCAN","i":"496540422"},{"n":"Elaine Gallant","f":"Elaine","l":"Gallant","p":"SOCAN","i":"836654215"},{"n":"Angelina Gargano","f":"Angelina","l":"Gargano","p":"ASCAP","i":"493999376"},{"n":"Devin Gati","f":"Devin","l":"Gati","p":"ASCAP","i":"504250696"},{"n":"Jonathan Gejtman","f":"Jonathan","l":"Gejtman","p":"SADAIC","i":"640084082"},{"n":"Philip Gibbs","f":"Philip","l":"Gibbs","p":"BMI","i":"355737241"},{"n":"Kory Leigh Glattman","f":"Kory","l":"Leigh Glattman","p":"BMI","i":"756811224"},{"n":"Jesse Glick","f":"Jesse","l":"Glick","p":"ASCAP","i":null},{"n":"Sean Goldman","f":"Sean","l":"Goldman","p":"SOCAN","i":"869200424"},{"n":"Lisette Gonzalez-Alea","f":"Lisette","l":"Gonzalez-Alea","p":"SACEM","i":"405475371"},{"n":"Jonathan Gordon","f":"Jonathan","l":"Gordon","p":"BMI","i":"57988318"},{"n":"Daniel Gray","f":"Daniel","l":"Gray","p":"ASCAP","i":"467297019"},{"n":"Danny Gray","f":"Danny","l":"Gray","p":"ASCAP","i":"467297019"},{"n":"Eddie Grey","f":"Eddie","l":"Grey","p":"ASCAP","i":"716903245"},{"n":"Alex Grinacoff","f":"Alex","l":"Grinacoff","p":"BMI","i":"1231726383"},{"n":"Gavi Grodsky","f":"Gavi","l":"Grodsky","p":"ASCAP","i":"639077912"},{"n":"Ulrich Guggenberger","f":"Ulrich","l":"Guggenberger","p":"ASCAP","i":"474680035"},{"n":"Sean Hagon","f":"Sean","l":"Hagon","p":"BMI","i":"550228693"},{"n":"Douglas W. Hall","f":"Douglas","l":"W. Hall","p":"SESAC","i":"380516"},{"n":"Medhat Hanbali","f":"Medhat","l":"Hanbali","p":"SOCAN","i":"683461523"},{"n":"Joanne Harris","f":"Joanne","l":"Harris","p":"ASCAP","i":"575913319"},{"n":"Jonathan Harter","f":"Jonathan","l":"Harter","p":"ASCAP","i":"516552558"},{"n":"Joshua Harter","f":"Joshua","l":"Harter","p":"ASCAP","i":"528694414"},{"n":"KeithAllen Harter","f":"KeithAllen","l":"Harter","p":"BMI","i":"186785020"},{"n":"Dane Hartsett","f":"Dane","l":"Hartsett","p":"SOCAN","i":"645303954"},{"n":"Chris Hartway","f":"Chris","l":"Hartway","p":"ASCAP","i":"507955432"},{"n":"Frederic Hau","f":"Frederic","l":"Hau","p":"GEMA","i":"456506154"},{"n":"Matthias Hauck","f":"Matthias","l":"Hauck","p":"GEMA","i":"496197303"},{"n":"Kyle Hauser","f":"Kyle","l":"Hauser","p":"ASCAP","i":"512070602"},{"n":"Evan Haymond","f":"Evan","l":"Haymond","p":"ASCAP","i":"731425860"},{"n":"Cosmos-Sunshine Heidtmann","f":"Cosmos-Sunshine","l":"Heidtmann","p":"BMI","i":"730879422"},{"n":"Nepomuk Heller","f":"Nepomuk","l":"Heller","p":"GEMA","i":"549787583"},{"n":"Matt Hendricks","f":"Matt","l":"Hendricks","p":"ASCAP","i":"747955979"},{"n":"Matthew Hendricks","f":"Matthew","l":"Hendricks","p":"ASCAP","i":"747955979"},{"n":"Lars Hesse","f":"Lars","l":"Hesse","p":"GEMA","i":"406448956"},{"n":"Simon Hesselein","f":"Simon","l":"Hesselein","p":"GEMA","i":"252362094"},{"n":"Braxton Raymond Hicks","f":"Braxton","l":"Raymond Hicks","p":"SOCAN","i":"858318799"},{"n":"Stewart Joseph Hidalgo","f":"Stewart","l":"Joseph Hidalgo","p":"BMI","i":"680267631"},{"n":"Lou Hill","f":"Lou","l":"Hill","p":"BMI","i":"503936657"},{"n":"Andrew Hind","f":"Andrew","l":"Hind","p":"ASCAP","i":"871578104"},{"n":"Stephen Hoevertsz","f":"Stephen","l":"Hoevertsz","p":"SESAC","i":"288542133"},{"n":"Michael Holland","f":"Michael","l":"Holland","p":"ASCAP","i":"602336685"},{"n":"Matthew Hollingsworth","f":"Matthew","l":"Hollingsworth","p":"ASCAP","i":"646597204"},{"n":"Daniel Hollman","f":"Daniel","l":"Hollman","p":"BMI","i":"218160984"},{"n":"Philip Horn","f":"Philip","l":"Horn","p":"BMI","i":"773529117"},{"n":"Chaun Horton","f":"Chaun","l":"Horton","p":"ASCAP","i":"698141607"},{"n":"Loren Humphrey","f":"Loren","l":"Humphrey","p":"ASCAP","i":"349365336"},{"n":"Adam Iorfida","f":"Adam","l":"Iorfida","p":"ASCAP","i":"858694862"},{"n":"Sinisa Itskovich","f":"Sinisa","l":"Itskovich","p":"GEMA","i":"282972431"},{"n":"Joanna Iwanowicz","f":"Joanna","l":"Iwanowicz","p":"ASCAP","i":"634874715"},{"n":"Benjamin Jacobs","f":"Benjamin","l":"Jacobs","p":"BMI","i":"587049707"},{"n":"David Janus","f":"David","l":"Janus","p":"GEMA","i":"611986928"},{"n":"Richard Jay","f":"Richard","l":"Jay","p":"ASCAP","i":"346555642"},{"n":"Bryan Jennings","f":"Bryan","l":"Jennings","p":"ASCAP","i":"503812780"},{"n":"Jan Jirasek","f":"Jan","l":"Jirasek","p":"GEMA","i":"201785784"},{"n":"Christopher Johanson","f":"Christopher","l":"Johanson","p":"BMI","i":"371276753"},{"n":"Irv Johnson","f":"Irv","l":"Johnson","p":"BMI","i":"223528881"},{"n":"Irvin Johnson","f":"Irvin","l":"Johnson","p":"BMI","i":"223528881"},{"n":"Jeremy Johnson","f":"Jeremy","l":"Johnson","p":"BMI","i":"496847193"},{"n":"Michael Glynn Johnson","f":"Michael","l":"Glynn Johnson","p":"SOCAN","i":"217180394"},{"n":"Steven Wayne Johnson","f":"Steven","l":"Wayne Johnson","p":"BMI","i":"816530450"},{"n":"Elyse J Jones","f":"Elyse","l":"J Jones","p":"ASCAP","i":"1077531258"},{"n":"Anthony Clint, Jr","f":"Anthony","l":"Clint, Jr","p":"SESAC","i":"564107462"},{"n":"Kenneth Lamont Washington Jr","f":"Kenneth","l":"Lamont Washington Jr","p":"BMI","i":"780454430"},{"n":"Diego Fernando Juantorena","f":"Diego","l":"Fernando Juantorena","p":"SADAIC","i":"1018633479"},{"n":"Tamara Kachelmeier","f":"Tamara","l":"Kachelmeier","p":"ASCAP","i":"677144030"},{"n":"Michael Kadelbach","f":"Michael","l":"Kadelbach","p":"GEMA","i":"271717757"},{"n":"Stylianos Michael Kalisperides","f":"Stylianos","l":"Michael Kalisperides","p":"ASCAP","i":"295973207"},{"n":"Katherine Rose Kaplan","f":"Katherine","l":"Rose Kaplan","p":"ASCAP","i":"689822287"},{"n":"Matt Kassell","f":"Matt","l":"Kassell","p":"PRS","i":"614319175"},{"n":"Tamera Katchelmeyer","f":"Tamera","l":"Katchelmeyer","p":"ASCAP","i":"677144030"},{"n":"Matt Keating","f":"Matt","l":"Keating","p":"ASCAP","i":"129175470"},{"n":"Christopher Keene","f":"Christopher","l":"Keene","p":"ASCAP","i":"530970460"},{"n":"Stephen Kellogg","f":"Stephen","l":"Kellogg","p":"ASCAP","i":"344682940"},{"n":"Dominic Kelly","f":"Dominic","l":"Kelly","p":"ASCAP","i":"338412667"},{"n":"Michael Kenny","f":"Michael","l":"Kenny","p":"BMI","i":"87221867"},{"n":"James Karl Kernick","f":"James","l":"Karl Kernick","p":"ASCAP","i":"348621257"},{"n":"James Kyle Kernick","f":"James","l":"Kyle Kernick","p":"ASCAP","i":"348621257"},{"n":"John Kewen","f":"John","l":"Kewen","p":"SUISA","i":"89946700"},{"n":"Florian Kiermaier","f":"Florian","l":"Kiermaier","p":"GEMA","i":"653754524"},{"n":"Derek Kintz","f":"Derek","l":"Kintz","p":"BMI","i":"753644819"},{"n":"James Klein","f":"James","l":"Klein","p":"ASCAP","i":"143375286"},{"n":"Adam Knobloch","f":"Adam","l":"Knobloch","p":"ASCAP","i":"1176815335"},{"n":"Michael Koch","f":"Michael","l":"Koch","p":"GEMA","i":"282791728"},{"n":"Jonas Krag","f":"Jonas","l":"Krag","p":"KODA","i":"2199469446"},{"n":"Jonathan Krimstock","f":"Jonathan","l":"Krimstock","p":"ASCAP","i":"339679018"},{"n":"Dan Krochmal","f":"Dan","l":"Krochmal","p":"APRA","i":"663839211"},{"n":"Phil Kullmann","f":"Phil","l":"Kullmann","p":"GEMA","i":"432915367"},{"n":"Mathias Kunzli","f":"Mathias","l":"Kunzli","p":"BMI","i":"505057287"},{"n":"Timothy Kvasnosky","f":"Timothy","l":"Kvasnosky","p":"ASCAP","i":"349729026"},{"n":"Michael LaMorte","f":"Michael","l":"LaMorte","p":"SESAC","i":"3392458465"},{"n":"Garrett Lamp","f":"Garrett","l":"Lamp","p":"ASCAP","i":"760707930"},{"n":"Blaise Lanzetta","f":"Blaise","l":"Lanzetta","p":"BMI","i":"550105585"},{"n":"Jacob Lawson","f":"Jacob","l":"Lawson","p":"BMI","i":"550319624"},{"n":"Ronnie Lawson","f":"Ronnie","l":"Lawson","p":"BMI","i":"246120400"},{"n":"Amy Marie Layou","f":"Amy","l":"Marie Layou","p":"ASCAP","i":"396038729"},{"n":"Mitch Lee","f":"Mitch","l":"Lee","p":"SOCAN","i":"459066725"},{"n":"Paul Levasseur","f":"Paul","l":"Levasseur","p":"SOCAN","i":"871163927"},{"n":"Daniel Levasseur","f":"Daniel","l":"Levasseur","p":"SOCAN","i":"1070647273"},{"n":"Michael Levine","f":"Michael","l":"Levine","p":"ASCAP","i":"336631762"},{"n":"Holden Lewis","f":"Holden","l":"Lewis","p":"ASCAP","i":"547034656"},{"n":"Lejon Lewis","f":"Lejon","l":"Lewis","p":"BMI","i":"768912886"},{"n":"Richard Lewis","f":"Richard","l":"Lewis","p":"PRS","i":"477553613"},{"n":"Dennis Lichtman","f":"Dennis","l":"Lichtman","p":"ASCAP","i":"468976580"},{"n":"Eric Liljestrand","f":"Eric","l":"Liljestrand","p":"BMI","i":"193960240"},{"n":"Arizona Lindsey","f":"Arizona","l":"Lindsey","p":"BMI","i":"550619524"},{"n":"Ralf Lippmann","f":"Ralf","l":"Lippmann","p":"GEMA","i":"557926406"},{"n":"Dong Liu","f":"Dong","l":"Liu","p":"ASCAP","i":"734055262"},{"n":"Peter Lobo","f":"Peter","l":"Lobo","p":"ASCAP","i":"476561817"},{"n":"Leon Lohmann","f":"Leon","l":"Lohmann","p":"BMI","i":"1061750972"},{"n":"Mario Lopez","f":"Mario","l":"Lopez","p":"BMI","i":"753644623"},{"n":"Ben Loshin","f":"Ben","l":"Loshin","p":"ASCAP","i":"777088296"},{"n":"Kolbrynn Vahn Lowdell","f":"Kolbrynn","l":"Vahn Lowdell","p":"BMI","i":"390222973"},{"n":"Bryant Lowry","f":"Bryant","l":"Lowry","p":"BMI","i":"756875093"},{"n":"Jonathan Luis","f":"Jonathan","l":"Luis","p":"BMI","i":"1147251376"},{"n":"Jon Madof","f":"Jon","l":"Madof","p":"BMI","i":"355676527"},{"n":"Jonathan Madof","f":"Jonathan","l":"Madof","p":"BMI","i":"355676527"},{"n":"Bill Maier","f":"Bill","l":"Maier","p":"ASCAP","i":"181950851"},{"n":"Robert Mangano","f":"Robert","l":"Mangano","p":"BMI","i":"572689502"},{"n":"Tim Mann","f":"Tim","l":"Mann","p":"SOCAN","i":"471114682"},{"n":"Scot Manwiller","f":"Scot","l":"Manwiller","p":"BMI","i":"182664550"},{"n":"Senne Van Marissing","f":"Senne","l":"Van Marissing","p":"BMI","i":"887864163"},{"n":"Mark Marshall","f":"Mark","l":"Marshall","p":"ASCAP","i":"553341859"},{"n":"Ariel Marx","f":"Ariel","l":"Marx","p":"ASCAP","i":"747263327"},{"n":"Juan Masotta","f":"Juan","l":"Masotta","p":"BMI","i":"492323455"},{"n":"Stefano Mastronardi","f":"Stefano","l":"Mastronardi","p":"BMI","i":"430488857"},{"n":"Kincheloe Jackson Matthew","f":"Kincheloe","l":"Jackson Matthew","p":"BMI","i":"756897079"},{"n":"Steve Mayone","f":"Steve","l":"Mayone","p":"SESAC","i":"291601378"},{"n":"Brooke Maytorena","f":"Brooke","l":"Maytorena","p":"BMI","i":"1080732868"},{"n":"Francisco Perez Mazon","f":"Francisco","l":"Perez Mazon","p":"AKM","i":"487232338"},{"n":"Raphael McGregor","f":"Raphael","l":"McGregor","p":"ASCAP","i":"549934994"},{"n":"Taylor McLam","f":"Taylor","l":"McLam","p":"ASCAP","i":"341161207"},{"n":"Hugo McLaughlin","f":"Hugo","l":"McLaughlin","p":"SOCAN","i":"296552820"},{"n":"Marvin Benjamin McMahon","f":"Marvin","l":"Benjamin McMahon","p":"PRS","i":"717630251"},{"n":"Sean McMillion","f":"Sean","l":"McMillion","p":"ASCAP","i":"446247451"},{"n":"Sean McMillon","f":"Sean","l":"McMillon","p":"ASCAP","i":"446247451"},{"n":"David McNally","f":"David","l":"McNally","p":"BMI","i":"592715915"},{"n":"Zach McNees","f":"Zach","l":"McNees","p":"ASCAP","i":"670838911"},{"n":"Jeff McQuilkin","f":"Jeff","l":"McQuilkin","p":"ASCAP","i":"424081979"},{"n":"Jeffrey McQuilkin","f":"Jeffrey","l":"McQuilkin","p":"ASCAP","i":"424081979"},{"n":"Kelley McRae","f":"Kelley","l":"McRae","p":"ASCAP","i":"680452248"},{"n":"Ethan Meixsell","f":"Ethan","l":"Meixsell","p":"BMI","i":"514451186"},{"n":"Justin Meli","f":"Justin","l":"Meli","p":"SOCAN","i":"637706038"},{"n":"Kevin Mello","f":"Kevin","l":"Mello","p":"BMI","i":"550404685"},{"n":"Jeremy Mendicino","f":"Jeremy","l":"Mendicino","p":"ASCAP","i":"565167040"},{"n":"Julian Menkin","f":"Julian","l":"Menkin","p":"ASCAP","i":"738413730"},{"n":"Danielle Merlis","f":"Danielle","l":"Merlis","p":"ASCAP","i":"751817922"},{"n":"Thierry Christophe Meyer","f":"Thierry","l":"Christophe Meyer","p":"SACEM","i":"150936966"},{"n":"Paul Micca","f":"Paul","l":"Micca","p":"ASCAP","i":"1128605176"},{"n":"Pietro Milanesi","f":"Pietro","l":"Milanesi","p":"ASCAP","i":"713867036"},{"n":"Olivier Militon","f":"Olivier","l":"Militon","p":"SACEM","i":"676016733"},{"n":"Braden Miller","f":"Braden","l":"Miller","p":"ASCAP","i":"502865169"},{"n":"Jeff Miller","f":"Jeff","l":"Miller","p":"ASCAP","i":"339529239"},{"n":"Robin Lewis Miller","f":"Robin","l":"Lewis Miller","p":"ASCAP","i":"417647642"},{"n":"Tamara R Miller","f":"Tamara","l":"R Miller","p":"SOCAN","i":"433229674"},{"n":"Peter Min","f":"Peter","l":"Min","p":"ASCAP","i":"335592844"},{"n":"Adam Daniel Minkoff","f":"Adam","l":"Daniel Minkoff","p":"ASCAP","i":"705942833"},{"n":"Paul Mitch","f":"Paul","l":"Mitch","p":"BMI","i":"495988273"},{"n":"John Moore","f":"John","l":"Moore","p":"ASCAP","i":"713296547"},{"n":"JohnJay Moore","f":"JohnJay","l":"Moore","p":"ASCAP","i":"713296547"},{"n":"Karl Moore","f":"Karl","l":"Moore","p":"BMI","i":"572525739"},{"n":"David Moreno","f":"David","l":"Moreno","p":"ASCAP","i":"772628905"},{"n":"Rod Morgenstein","f":"Rod","l":"Morgenstein","p":"BMI","i":"229408564"},{"n":"Stephan Moritz","f":"Stephan","l":"Moritz","p":"GEMA","i":"287516041"},{"n":"Jonathan Morrow","f":"Jonathan","l":"Morrow","p":"ASCAP","i":"444589328"},{"n":"Jason Mraz","f":"Jason","l":"Mraz","p":"ASCAP","i":"344456264"},{"n":"David Mueller","f":"David","l":"Mueller","p":"GEMA","i":"468052936"},{"n":"Florian Mueller","f":"Florian","l":"Mueller","p":"GEMA","i":"735229246"},{"n":"James Mulvale","f":"James","l":"Mulvale","p":"SOCAN","i":"67809909"},{"n":"Jennifer Mulvale","f":"Jennifer","l":"Mulvale","p":"SOCAN","i":"670386334"},{"n":"Jonathan Munoz","f":"Jonathan","l":"Munoz","p":"BMI","i":"550414722"},{"n":"Nate Myotte","f":"Nate","l":"Myotte","p":"BMI","i":"807242554"},{"n":"Ryan Nach","f":"Ryan","l":"Nach","p":"ASCAP","i":"621624770"},{"n":"Scott Neubert","f":"Scott","l":"Neubert","p":"ASCAP","i":"337352662"},{"n":"Oliver Nicholson","f":"Oliver","l":"Nicholson","p":"PRS","i":"1175517546"},{"n":"Derek Nievergelt","f":"Derek","l":"Nievergelt","p":"SESAC","i":"514607276"},{"n":"Antonio Nico Nieves","f":"Antonio","l":"Nico Nieves","p":"ASCAP","i":"834264341"},{"n":"Tjeerd Nijhof","f":"Tjeerd","l":"Nijhof","p":"BMI BUMA","i":"804373944"},{"n":"Eric Nolan","f":"Eric","l":"Nolan","p":"BMI","i":"744461635"},{"n":"Michael Norris","f":"Michael","l":"Norris","p":"ASCAP","i":"786469378"},{"n":"David Stepan Norris","f":"David","l":"Stepan Norris","p":"ASCAP","i":"760961620"},{"n":"Devin Stepan Norris","f":"Devin","l":"Stepan Norris","p":"ASCAP","i":"760961620"},{"n":"Christopher North","f":"Christopher","l":"North","p":"BMI","i":"183270572"},{"n":"Tim Nowack","f":"Tim","l":"Nowack","p":"GEMA","i":"254482167"},{"n":"Tim-Ryan O'Kane","f":"Tim-Ryan","l":"O'Kane","p":"ASCAP","i":"630951163"},{"n":"Emmett Claran O'Malley","f":"Emmett","l":"Claran O'Malley","p":"BMI","i":"289441429"},{"n":"Emmett O'Malley","f":"Emmett","l":"O'Malley","p":"BMI","i":"289441429"},{"n":"Oisin O'Malley","f":"Oisin","l":"O'Malley","p":"BMI","i":"457630051"},{"n":"Clark Oler","f":"Clark","l":"Oler","p":"BMI","i":"120775592"},{"n":"Clarke Kim Oler","f":"Clarke","l":"Kim Oler","p":"BMI","i":"120775592"},{"n":"Aren G. Olsen","f":"Aren","l":"G. Olsen","p":"ASCAP","i":"345512281"},{"n":"Seth Ondracek","f":"Seth","l":"Ondracek","p":"SESAC","i":"1057842348"},{"n":"Roy Oommen","f":"Roy","l":"Oommen","p":"SOCAN","i":"531236193"},{"n":"Andrew Osborn","f":"Andrew","l":"Osborn","p":"BMI","i":"506178755"},{"n":"Jonathan Ososki","f":"Jonathan","l":"Ososki","p":"ASCAP","i":"474468225"},{"n":"Aurore Ounjian","f":"Aurore","l":"Ounjian","p":"ASCAP","i":"583877296"},{"n":"Dylan Owens","f":"Dylan","l":"Owens","p":"SESAC","i":"684951499"},{"n":"Matt Owens","f":"Matt","l":"Owens","p":"PRS","i":"425162581"},{"n":"Matthew Owens","f":"Matthew","l":"Owens","p":"PRS","i":"425162581"},{"n":"Pete Palestina","f":"Pete","l":"Palestina","p":"BMI","i":"535605654"},{"n":"Steven Parry","f":"Steven","l":"Parry","p":"SUISA","i":"548456910"},{"n":"Ronald Passaro","f":"Ronald","l":"Passaro","p":"ASCAP","i":"340503407"},{"n":"Leah Paul","f":"Leah","l":"Paul","p":"BMI","i":"601921190"},{"n":"Christopher Paulson","f":"Christopher","l":"Paulson","p":"SOCAN","i":"716261066"},{"n":"Dennis Frank Pedula","f":"Dennis","l":"Frank Pedula","p":"ASCAP","i":"464375732"},{"n":"Remy Perrin","f":"Remy","l":"Perrin","p":"BMI","i":"566062642"},{"n":"Marco Pesci","f":"Marco","l":"Pesci","p":"BMI","i":"559673006"},{"n":"Aaron Di Piazza","f":"Aaron","l":"Di Piazza","p":"ASCAP","i":"732724058"},{"n":"Greg Pliska","f":"Greg","l":"Pliska","p":"ASCAP","i":"465967991"},{"n":"Gregory Pliska","f":"Gregory","l":"Pliska","p":"ASCAP","i":"465967991"},{"n":"Simon Poole","f":"Simon","l":"Poole","p":"SOCAN","i":"460154287"},{"n":"Wagner Previato","f":"Wagner","l":"Previato","p":"ASCAP","i":"507851449"},{"n":"Marc Pueschl","f":"Marc","l":"Pueschl","p":"GEMA","i":"364346945"},{"n":"Kyle Querec","f":"Kyle","l":"Querec","p":"ASCAP","i":"481294344"},{"n":"Ken Ramm","f":"Ken","l":"Ramm","p":"SOCAN","i":"3488962"},{"n":"Derek Randle","f":"Derek","l":"Randle","p":"BMI","i":"11567741648"},{"n":"Jason Reeves","f":"Jason","l":"Reeves","p":"ASCAP","i":"526741352"},{"n":"Michael Reinmueller","f":"Michael","l":"Reinmueller","p":"SOCAN","i":"45586363"},{"n":"James Richardson","f":"James","l":"Richardson","p":"SESAC","i":"612101222"},{"n":"Peter Riese","f":"Peter","l":"Riese","p":"GEMA","i":"225726179"},{"n":"Marcus Von Rittberg","f":"Marcus","l":"Von Rittberg","p":"ASCAP","i":"579405906"},{"n":"Jake Rivlin","f":"Jake","l":"Rivlin","p":"ASCAP","i":"643109272"},{"n":"Brent Robitaille","f":"Brent","l":"Robitaille","p":"SOCAN","i":"718453140"},{"n":"Rouvan Gus Roman","f":"Rouvan","l":"Gus Roman","p":"ASCAP","i":"488510331"},{"n":"Mark Roos","f":"Mark","l":"Roos","p":"ASCAP","i":"337948716"},{"n":"Daniel Roselle","f":"Daniel","l":"Roselle","p":"ASCAP","i":"581318645"},{"n":"Danny Roselle","f":"Danny","l":"Roselle","p":"ASCAP","i":"581318645"},{"n":"Justin Rosin","f":"Justin","l":"Rosin","p":"BMI","i":"635066257"},{"n":"Amber Rubarth","f":"Amber","l":"Rubarth","p":"ASCAP","i":"465956211"},{"n":"Mike Rubino","f":"Mike","l":"Rubino","p":"ASCAP","i":"346836926"},{"n":"Shawn Russell","f":"Shawn","l":"Russell","p":"ASCAP","i":"649719104"},{"n":"Elaine Ryan","f":"Elaine","l":"Ryan","p":"SOCAN","i":"529559904"},{"n":"Joshua SadlierBrown","f":"Joshua","l":"SadlierBrown","p":"ASCAP","i":"655963011"},{"n":"Ariel Salerno","f":"Ariel","l":"Salerno","p":"BMI","i":"1212866664"},{"n":"Aaron Saloman","f":"Aaron","l":"Saloman","p":"SOCAN","i":"290230885"},{"n":"Ramiro Alvarez Sanchez","f":"Ramiro","l":"Alvarez Sanchez","p":"SADAIC","i":"847849478"},{"n":"Sergio Perez Sanchez","f":"Sergio","l":"Perez Sanchez","p":"SGAE","i":"395971205"},{"n":"Darko Saric","f":"Darko","l":"Saric","p":"ASCAP","i":"421161213"},{"n":"Kelli Scarr","f":"Kelli","l":"Scarr","p":"ASCAP","i":"497055912"},{"n":"Stephan Schelens","f":"Stephan","l":"Schelens","p":"GEMA","i":"654670135"},{"n":"Jeffrey Schiller","f":"Jeffrey","l":"Schiller","p":"ASCAP","i":"453688227"},{"n":"Garett Schmidt","f":"Garett","l":"Schmidt","p":"SOCAN","i":"96964095"},{"n":"Frank Schwillewski","f":"Frank","l":"Schwillewski","p":"GEMA","i":"254975431"},{"n":"Daniel Scording","f":"Daniel","l":"Scording","p":"BMI","i":"522748061"},{"n":"Wolfgang Setik","f":"Wolfgang","l":"Setik","p":"GEMA","i":"245650764"},{"n":"Johannes Seywald","f":"Johannes","l":"Seywald","p":"AKM","i":"1024089"},{"n":"Michael Shaaf","f":"Michael","l":"Shaaf","p":"GEMA","i":"210926400"},{"n":"Rahul Shah","f":"Rahul","l":"Shah","p":"BMI","i":"774282417"},{"n":"Riza Azeer Shahid","f":"Riza","l":"Azeer Shahid","p":"ASCAP","i":"1049410185"},{"n":"Justin Shearn","f":"Justin","l":"Shearn","p":"PRS","i":"568403533"},{"n":"James Sheehan","f":"James","l":"Sheehan","p":"SOCAN","i":"609921534"},{"n":"Alexander Sherba","f":"Alexander","l":"Sherba","p":"ASCAP","i":"758129709"},{"n":"Anthony Shipman","f":"Anthony","l":"Shipman","p":"BMI","i":"358819906"},{"n":"Aldo Shllaku","f":"Aldo","l":"Shllaku","p":"BMI","i":"280316191"},{"n":"Kevin Shoemaker","f":"Kevin","l":"Shoemaker","p":"ASCAP","i":"776201538"},{"n":"Andrew Shoniker","f":"Andrew","l":"Shoniker","p":"SOCAN","i":"685689472"},{"n":"Khwezi Sifunda","f":"Khwezi","l":"Sifunda","p":"ASCAP","i":"891121445"},{"n":"Sergio Silva","f":"Sergio","l":"Silva","p":"ASCAP","i":"778469961"},{"n":"Rashod Singleton","f":"Rashod","l":"Singleton","p":"BMI","i":"621879823"},{"n":"Samuel Skinner","f":"Samuel","l":"Skinner","p":"BMI","i":"573759898"},{"n":"Stephen Skinner","f":"Stephen","l":"Skinner","p":"BMI","i":"144989430"},{"n":"Steve Skinner","f":"Steve","l":"Skinner","p":"BMI","i":"144989430"},{"n":"Darren Smith","f":"Darren","l":"Smith","p":"SESAC","i":"504069087"},{"n":"Armin Solo","f":"Armin","l":"Solo","p":"ASCAP","i":"779534095"},{"n":"Maya Solovey","f":"Maya","l":"Solovey","p":"SESAC","i":"479009824"},{"n":"Maya Solov\u00e9y","f":"Maya","l":"Solov\u00e9y","p":"SESAC","i":"479010063"},{"n":"Shane Spaulding","f":"Shane","l":"Spaulding","p":"ASCAP","i":"567355126"},{"n":"Alexander Bernhardt Spiegelman","f":"Alexander","l":"Bernhardt Spiegelman","p":"ASCAP","i":"600988249"},{"n":"Sebastian Arno Sprenger","f":"Sebastian","l":"Arno Sprenger","p":"GEMA","i":"785210144"},{"n":"Andrew Stamp","f":"Andrew","l":"Stamp","p":"PRS","i":"755933309"},{"n":"Andrew Stanton","f":"Andrew","l":"Stanton","p":"BMI","i":"584342045"},{"n":"Matthew Stein","f":"Matthew","l":"Stein","p":"BMI","i":"194213966"},{"n":"Erik Steinert","f":"Erik","l":"Steinert","p":"ASCAP","i":"129651955"},{"n":"Kari Steinert","f":"Kari","l":"Steinert","p":"BMI","i":"230978754"},{"n":"Benjamin William Sturley","f":"Benjamin","l":"William Sturley","p":"ASCAP","i":"748783781"},{"n":"Maurice Stute","f":"Maurice","l":"Stute","p":"GEMA","i":"906286426"},{"n":"William Sullivan","f":"William","l":"Sullivan","p":"ASCAP","i":"516587237"},{"n":"Henry Sullivant","f":"Henry","l":"Sullivant","p":"ASCAP","i":"476539903"},{"n":"Thomas Swindell","f":"Thomas","l":"Swindell","p":"PRS","i":"484093241"},{"n":"Thomas Swindells","f":"Thomas","l":"Swindells","p":"PRS","i":"484093241"},{"n":"Nicolas Sylvestre","f":"Nicolas","l":"Sylvestre","p":"SOCAN","i":"577555305"},{"n":"Marian Szymczk","f":"Marian","l":"Szymczk","p":"GEMA","i":"14657000"},{"n":"Kim Taylor","f":"Kim","l":"Taylor","p":"ASCAP","i":"478045140"},{"n":"Lizzi Taylor","f":"Lizzi","l":"Taylor","p":"PRS","i":"683955199"},{"n":"Mark Taylor","f":"Mark","l":"Taylor","p":"ASCAP","i":"337161083"},{"n":"Eduard Telik","f":"Eduard","l":"Telik","p":"GEMA","i":"708990703"},{"n":"Todd Thibaud","f":"Todd","l":"Thibaud","p":"ASCAP","i":"338420473"},{"n":"Theodore Thomas","f":"Theodore","l":"Thomas","p":"BMI","i":"496593001"},{"n":"Tayib Thomas","f":"Tayib","l":"Thomas","p":"GEMA","i":"01103920503"},{"n":"Scott Thompson","f":"Scott","l":"Thompson","p":"SOCAN","i":"737885489"},{"n":"Matt Thorne","f":"Matt","l":"Thorne","p":"ASCAP","i":"126052507"},{"n":"Christopher Toland","f":"Christopher","l":"Toland","p":"BMI","i":"196031374"},{"n":"Michael Toland","f":"Michael","l":"Toland","p":"ASCAP","i":"339072755"},{"n":"Roberto Joaquin Rodriguez Del Toro","f":"Roberto","l":"Joaquin Rodriguez Del Toro","p":"BMI","i":"846645996"},{"n":"Luis Ricardo Torres","f":"Luis","l":"Ricardo Torres","p":"SESAC","i":"612993535"},{"n":"Jordan Trabue","f":"Jordan","l":"Trabue","p":"SESAC","i":"692404831"},{"n":"Toshi Trebess","f":"Toshi","l":"Trebess","p":"GEMA","i":"242172006"},{"n":"Ryan Trebilcock","f":"Ryan","l":"Trebilcock","p":"PRS","i":"869040712"},{"n":"Matthew Trivigno","f":"Matthew","l":"Trivigno","p":"ASCAP","i":"643293543"},{"n":"Adonis Tsilimparis","f":"Adonis","l":"Tsilimparis","p":"ASCAP","i":"336947529"},{"n":"Jacob Turner","f":"Jacob","l":"Turner","p":"BMI","i":"674031066"},{"n":"Nicholas Jonathan Tyler","f":"Nicholas","l":"Jonathan Tyler","p":"ASCAP","i":"420236211"},{"n":"Natasha Tyrimos","f":"Natasha","l":"Tyrimos","p":"PRS","i":"745525040"},{"n":"Mathieu Vachon","f":"Mathieu","l":"Vachon","p":"SOCAN","i":"531252491"},{"n":"Lucas De Valdivia","f":"Lucas","l":"De Valdivia","p":"ASCAP","i":"871735903"},{"n":"Ken Vandevrie","f":"Ken","l":"Vandevrie","p":"SOCAN","i":"226456176"},{"n":"Kurtis Vandevrie","f":"Kurtis","l":"Vandevrie","p":"SOCAN","i":"1010577798"},{"n":"Quentin Vandevrie","f":"Quentin","l":"Vandevrie","p":"SOCAN","i":"1059924039"},{"n":"Russel Vandevrie","f":"Russel","l":"Vandevrie","p":"SOCAN","i":"384727034"},{"n":"Russell Vandevrie","f":"Russell","l":"Vandevrie","p":"SOCAN","i":"384727034"},{"n":"Eric Varnell","f":"Eric","l":"Varnell","p":"ASCAP","i":"602014123"},{"n":"Jonathan Vergara","f":"Jonathan","l":"Vergara","p":"ASCAP","i":"612227978"},{"n":"Jonathan Vieira","f":"Jonathan","l":"Vieira","p":"BMI","i":"523399836"},{"n":"Lucas Villemur","f":"Lucas","l":"Villemur","p":"BMI","i":"642269641"},{"n":"Tobias Vogel","f":"Tobias","l":"Vogel","p":"GEMA","i":"597251024"},{"n":"Marc VonMolnar","f":"Marc","l":"VonMolnar","p":"ASCAP","i":"335296847"},{"n":"Marcus VonRittberg","f":"Marcus","l":"VonRittberg","p":"ASCAP","i":"579405906"},{"n":"William Bradley Vosburg","f":"William","l":"Bradley Vosburg","p":"BMI","i":"187026560"},{"n":"Michail Votzaropoulos","f":"Michail","l":"Votzaropoulos","p":"PRS","i":"756468794"},{"n":"Lars Wallem","f":"Lars","l":"Wallem","p":"GEMA","i":"258984"},{"n":"Jake Warren","f":"Jake","l":"Warren","p":"PRS","i":"573174050"},{"n":"Bart Warshaw","f":"Bart","l":"Warshaw","p":"PRS","i":"648099505"},{"n":"Terrence Watkin","f":"Terrence","l":"Watkin","p":"ASCAP","i":"510468871"},{"n":"Richard Webster","f":"Richard","l":"Webster","p":"ASCAP","i":"464553540"},{"n":"Gabrielle Coral Weinberger","f":"Gabrielle","l":"Coral Weinberger","p":"BMI","i":"617492827"},{"n":"Heide Weisse","f":"Heide","l":"Weisse","p":"ASCAP","i":"385591322"},{"n":"Stacy Marie Werdin","f":"Stacy","l":"Marie Werdin","p":"BMI","i":"368252640"},{"n":"Alex Whalen","f":"Alex","l":"Whalen","p":"BMI","i":"819361819"},{"n":"Kevin Wideman","f":"Kevin","l":"Wideman","p":"SOCAN","i":"666148815"},{"n":"Jimmie Williams","f":"Jimmie","l":"Williams","p":"ASCAP","i":"341923964"},{"n":"Mark Williams","f":"Mark","l":"Williams","p":"ASCAP","i":"347476630"},{"n":"Mike Williams","f":"Mike","l":"Williams","p":"ASCAP","i":"338929225"},{"n":"Brandon Wilson","f":"Brandon","l":"Wilson","p":"BMI","i":"815957407"},{"n":"Tony Wilson","f":"Tony","l":"Wilson","p":"PRS","i":"225955846"},{"n":"Ta-Ri Charles Wendell Wilson","f":"Ta-Ri","l":"Charles Wendell Wilson","p":"BMI","i":"650559145"},{"n":"Alexander Wittkowski","f":"Alexander","l":"Wittkowski","p":"GEMA","i":"525597330"},{"n":"Kevin Won","f":"Kevin","l":"Won","p":"SOCAN","i":"804556737"},{"n":"Alex Wong","f":"Alex","l":"Wong","p":"ASCAP","i":"439767800"},{"n":"Walter Woods","f":"Walter","l":"Woods","p":"BMI","i":"513503397"},{"n":"Ross Geoffrey Woolridge","f":"Ross","l":"Geoffrey Woolridge","p":"SOCAN","i":"131932986"},{"n":"Erik Wormwood","f":"Erik","l":"Wormwood","p":"ASCAP","i":"591175829"},{"n":"Semih Kadir Yanyali","f":"Semih","l":"Kadir Yanyali","p":"ASCAP","i":"822432956"},{"n":"Sven Zumbrock","f":"Sven","l":"Zumbrock","p":"GEMA","i":"735650437"},{"n":"Ben Zwerin","f":"Ben","l":"Zwerin","p":"ASCAP","i":"451532478"},{"n":"Michael Scott kettner","f":"Michael","l":"Scott kettner","p":"ASCAP","i":"485843411"}]
   // Pass 1: update existing rows that are missing ipi/pro/names
   const UPD = `UPDATE cowriters
@@ -4996,31 +5407,15 @@ async function loadCatalogPG() {
             pg.primary_genre_name,
             sg.secondary_genre_name,
             m1.mood_1_name,
-            l.lot_name,
-            COALESCE(
-              string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name),
-            '') AS mood2_names,
-            COALESCE(
-              string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name),
-            '') AS ksl_names,
-            COALESCE(
-              string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name),
-            '') AS rmo_names
+            l.lot_name
      FROM titles t
      LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
      LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
      LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
      LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
-     LEFT JOIN lots             l   ON l.lot_id              = t.lot_id
-     LEFT JOIN title_moods      tm  ON tm.sku_root           = t.sku_root
-     LEFT JOIN moods            mo  ON mo.mood_id            = tm.mood_id
-     LEFT JOIN ksl              k   ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
-     LEFT JOIN title_rmo        tr  ON tr.sku_root           = t.sku_root
-     LEFT JOIN rmo              r   ON r.rmo_id              = tr.rmo_id
+     LEFT JOIN lot_titles       lt  ON lt.sku_root           = t.sku_root
+     LEFT JOIN lots             l   ON l.lot_id              = lt.lot_id
      WHERE COALESCE(t.status, 'active') = 'active'
-     GROUP BY t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.description,
-              t.release_date, c.full_name, pg.primary_genre_name, sg.secondary_genre_name,
-              m1.mood_1_name, l.lot_name
      ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
   )
   if (!rows) { if (countLabel) countLabel.textContent = 'DB error'; return }
@@ -5038,9 +5433,9 @@ async function loadCatalogPG() {
                         : r.primary_genre_name)
                     : '—',
     mood1:        r.mood_1_name           || '',
-    mood2:        r.mood2_names           || '',
-    ksl:          r.ksl_names             || '',
-    rmo:          r.rmo_names             || '',
+    mood2:        '',  // simplified query — no longer loaded from DB
+    ksl:          '',  // simplified query — no longer loaded from DB
+    rmo:          '',  // simplified query — no longer loaded from DB
     description:  r.description           || '',
     mmw:          '',
     sku:          r.sku_root              || '',
@@ -5052,6 +5447,10 @@ async function loadCatalogPG() {
   }))
   if (badge) badge.textContent = '● DB'
   if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
+
+  // Load secondary data (mood2, ksl, rmo) async in background
+  loadCollectionSecondaryData(rows)
+
   // Only update catalog UI if we're in the catalog section
   if (document.getElementById('track-count-label')) {
     // Snapshot current filter values before repopulating (so user selections survive a reload)
@@ -5146,8 +5545,68 @@ function cancelDescription(sku) {
 
 // ── Metadata Editor (catalog) ───────────────────────────────────────────────
 
+let metadataEditorAudio = null
+
 function closeMetaEditor() {
+  if (metadataEditorAudio) {
+    metadataEditorAudio.pause()
+    metadataEditorAudio = null
+  }
+  clearUnsavedChanges()
   document.getElementById('meta-editor-overlay')?.remove()
+}
+
+async function playMetadataTrack(sku) {
+  const btn = document.getElementById('meta-play-btn')
+  if (!btn) return
+
+  // Stop if already playing
+  if (metadataEditorAudio && !metadataEditorAudio.paused) {
+    metadataEditorAudio.pause()
+    metadataEditorAudio.currentTime = 0
+    metadataEditorAudio = null
+    btn.innerHTML = '<i class="ti ti-player-play"></i>'
+    return
+  }
+
+  try {
+    const result = await pgQ(`SELECT b2_key FROM mix_stems WHERE sku_root=$1 AND (upper(stem_name)='FULL' OR lower(filename) LIKE '%_full.%') AND b2_key IS NOT NULL ORDER BY upper(stem_name)='FULL' DESC LIMIT 1`, [sku])
+    if (!result || !result.length || !result[0].b2_key) {
+      alert('Audio not available for this track (only FULL stems are supported)')
+      return
+    }
+
+    const b2Key = result[0].b2_key
+    const audioUrl = `/api/b2/stream?key=${encodeURIComponent(b2Key)}`
+
+    const audio = new Audio(audioUrl)
+
+    audio.onerror = () => {
+      console.error('Audio error:', audio.error)
+      btn.innerHTML = '<i class="ti ti-player-play"></i>'
+      metadataEditorAudio = null
+    }
+
+    audio.onended = () => {
+      btn.innerHTML = '<i class="ti ti-player-play"></i>'
+      metadataEditorAudio = null
+    }
+
+    metadataEditorAudio = audio
+    btn.innerHTML = '<i class="ti ti-player-pause"></i>'
+
+    const playPromise = audio.play()
+    if (playPromise !== undefined) {
+      playPromise.catch(err => {
+        console.error('Play error:', err)
+        btn.innerHTML = '<i class="ti ti-player-play"></i>'
+        metadataEditorAudio = null
+      })
+    }
+  } catch (e) {
+    console.error('Error playing track:', e)
+    alert('Error playing track: ' + e.message)
+  }
 }
 
 async function openMetadataEditor(sku) {
@@ -5193,7 +5652,10 @@ async function openMetadataEditor(sku) {
           <div style="font-size:14px;font-weight:700">${esc(t.title)}</div>
           <div style="font-size:11px;color:var(--text3);font-family:monospace;margin-top:2px">${esc(sku)}</div>
         </div>
-        <button onclick="closeMetaEditor()" style="border:none;background:none;font-size:22px;cursor:pointer;color:var(--text3);line-height:1;padding:0 4px">×</button>
+        <div style="display:flex;align-items:center;gap:8px">
+          <button id="meta-play-btn" onclick="playMetadataTrack('${sku}')" title="Play audio" style="border:none;background:none;font-size:20px;cursor:pointer;color:var(--text3);line-height:1;padding:0 4px;transition:color .2s" onmouseover="this.style.color='var(--accent)'" onmouseout="this.style.color='var(--text3)'"><i class="ti ti-player-play"></i></button>
+          <button onclick="closeMetaEditor()" style="border:none;background:none;font-size:22px;cursor:pointer;color:var(--text3);line-height:1;padding:0 4px">×</button>
+        </div>
       </div>
       <div style="padding:16px 18px;overflow-y:auto;flex:1">
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:10px">
@@ -5284,6 +5746,11 @@ async function openMetadataEditor(sku) {
         <button class="btn primary" id="meta-save-btn" onclick="saveMetadataEditor('${sku}')"><i class="ti ti-device-floppy"></i> Save</button>
       </div>
     </div>`
+  // Track changes to metadata editor inputs
+  overlay.querySelectorAll('input, select, textarea').forEach(el => {
+    el.addEventListener('change', markUnsavedChanges)
+    el.addEventListener('input', markUnsavedChanges)
+  })
 }
 
 async function saveMetadataEditor(sku) {
@@ -5352,6 +5819,7 @@ async function saveMetadataEditor(sku) {
     }
 
     closeMetaEditor()
+    clearUnsavedChanges()
     await loadCatalog()
   } catch(e) {
     console.error('[saveMetadataEditor]', e)
@@ -5662,6 +6130,76 @@ async function exportCatalogCSV() {
   a.download = `HAUS_Catalog_${new Date().toISOString().split('T')[0]}.csv`
   a.click()
   URL.revokeObjectURL(url)
+}
+
+// Load mood2/ksl/rmo data asynchronously after main Collection is displayed
+async function loadCollectionSecondaryData(rows) {
+  if (!rows || !rows.length) return
+  const skus = rows.map(r => r.sku_root)
+
+  // Load all secondary data in parallel
+  const [mood2Map, kslMap, rmoMap] = await Promise.all([
+    loadMood2Map(skus),
+    loadKslMap(skus),
+    loadRmoMap(skus)
+  ])
+
+  // Update allTracks with secondary data
+  allTracks.forEach(track => {
+    if (mood2Map[track.sku]) track.mood2 = mood2Map[track.sku] || ''
+    if (kslMap[track.sku]) track.ksl = kslMap[track.sku] || ''
+    if (rmoMap[track.sku]) track.rmo = rmoMap[track.sku] || ''
+  })
+
+  // Refresh the displayed Collection to show updated data
+  renderTrackList(allTracks)
+}
+
+async function loadMood2Map(skus) {
+  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+  const rows = await pgQ(
+    `SELECT t.sku_root, string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name) as mood2
+     FROM titles t
+     LEFT JOIN title_moods tm ON tm.sku_root = t.sku_root
+     LEFT JOIN moods mo ON mo.mood_id = tm.mood_id
+     WHERE t.sku_root IN (${placeholders})
+     GROUP BY t.sku_root`,
+    skus
+  )
+  const map = {}
+  rows?.forEach(r => { map[r.sku_root] = r.mood2 || '' })
+  return map
+}
+
+async function loadKslMap(skus) {
+  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+  const rows = await pgQ(
+    `SELECT t.sku_root, string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name) as ksl
+     FROM titles t
+     LEFT JOIN ksl k ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
+     WHERE t.sku_root IN (${placeholders})
+     GROUP BY t.sku_root`,
+    skus
+  )
+  const map = {}
+  rows?.forEach(r => { map[r.sku_root] = r.ksl || '' })
+  return map
+}
+
+async function loadRmoMap(skus) {
+  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+  const rows = await pgQ(
+    `SELECT t.sku_root, string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name) as rmo
+     FROM titles t
+     LEFT JOIN title_rmo tr ON tr.sku_root = t.sku_root
+     LEFT JOIN rmo r ON r.rmo_id = tr.rmo_id
+     WHERE t.sku_root IN (${placeholders})
+     GROUP BY t.sku_root`,
+    skus
+  )
+  const map = {}
+  rows?.forEach(r => { map[r.sku_root] = r.rmo || '' })
+  return map
 }
 
 async function loadCatalogFM() {
@@ -6903,92 +7441,19 @@ function normalizeKey(k) {
 }
 
 function parseFolderName(name) {
-  const m = name.match(/^([A-Z]\d{2}[a-zA-Z])/i)
-  const composerID = m ? m[1] : ''
-  const rest = composerID ? name.slice(composerID.length).replace(/^[_ ]/, '') : name
+  // Simple positional rule: ComposerID_TITLE_KEY_TAGS
+  // [0] = ComposerID, [1] = TITLE, [2] = KEY, [3+] = TAGS
+  const segs = name.split('_')
+  const composerID = segs[0] || ''
+  const titleRaw = segs[1] || ''
+  const keyRaw = segs[2] || ''
+  const tagSegs = segs.slice(3) || []
 
-  // Strip numeric BPM segments (pure numbers 40–300) before parsing title/key/tag
-  const BPM_RE = /^(\d{2,3})(?:bpm)?$/i
-  const rawSegs = rest.split('_')
-  let bpm = ''
-  const segments = rawSegs.filter(s => {
-    const bpmMatch = s.match(BPM_RE)
-    if (bpmMatch && +bpmMatch[1] >= 40 && +bpmMatch[1] <= 300) { bpm = bpmMatch[1]; return false }
-    return true
-  })
+  let title = titleRaw, tag = tagSegs.join(' ').trim(), key = keyRaw
 
-  let title = '', tag = '', key = ''
-
-  // Strip known version/deliverable suffixes from the end before parsing key/tag
-  // Stem/version/deliverable suffixes — strip these from the end before parsing title/key
-  const VERSION_SUFFIX_RE = /^(full|dnb|alt|edit|tv|sting|underscore|loop|stem|stems|acoustic|piano|orchestra|strings|percussion|rhythm|melody|bass|drums|fx|solo|intro|outro|short|long|60s?|30s?|15s?|mix|instrumental|inst|vox|novox|beds?|bumper|stab|nobass|noperc|nomelody|norhythm|nodrums|nolead|novox|guitars?|pads?|choir|brass)$/i
-  // Genre/mood/style descriptor keywords — treated as tags, never part of the title
-  const GENRE_TAG_RE = /^(tension|tense|action|epic|chase|drama|dramatic|comedy|horror|crime|tex|texan|texas|mystery|myst|adventure|romantic|suspense|thriller|corporate|uplifting|melancholy|dark|light|quirky|funny|emotional|hero|villain|sad|happy|angry|fearful|calm|danger|power|strength|triumph|defeat|loss|hope|war|peace|sport|nature|urban|rural|space|scifi|fantasy|medieval|modern|groove|funk|soul|blues|jazz|rock|pop|indie|folk|gospel|worship|holiday|patriotic|military|spy|heist|noir|tropical|island|beach|summer|winter|desert|mountain|storm|fire)$/i
-  // Strip stems from the end (allow stripping down to just the title)
-  const segs = [...segments]
-  while (segs.length > 1 && VERSION_SUFFIX_RE.test(segs[segs.length - 1])) {
-    segs.pop()
-  }
-
-  // Album codes: all-uppercase letters only, 3–8 chars, not a musical key
-  const ALBUM_CODE_RE = /^[A-Z]{3,8}$/
-
-  // Search backwards through all segments for the musical key.
-  // Everything before the key = title; everything after = tag segments.
-  // This handles any number of trailing tag segments (COMM, MUSIC, ADVENTURE, etc.)
-  if (segs.length >= 2) {
-    let keyIdx = -1
-    for (let i = segs.length - 1; i >= 1; i--) {
-      if (KEY_RE.test(segs[i])) { keyIdx = i; break }
-    }
-    if (keyIdx > 0) {
-      key   = normalizeKey(segs[keyIdx])
-      // All segments after the key joined as tag (handles multi-segment tags like COMM_MUSIC)
-      const tagSegs = segs.slice(keyIdx + 1).filter(s => !KEY_RE.test(s))
-      tag   = tagSegs.join(' ').trim()
-      title = deCamelCase(segs.slice(0, keyIdx).join(' '))
-    } else {
-      // No key found — peel trailing genre/descriptor/all-caps segments into tag
-      // so they don't pollute the title (e.g. BigSky_Tex_Tension → "Big Sky", tag "Tex Tension")
-      // Also handles multi-word segments like "TEX SEXY" by checking each word individually.
-      const isTagSeg = s => {
-        if (GENRE_TAG_RE.test(s) || ALBUM_CODE_RE.test(s)) return true
-        const words = s.split(' ').filter(Boolean)
-        return words.length > 1 && words.every(w => GENRE_TAG_RE.test(w) || ALBUM_CODE_RE.test(w))
-      }
-      // Short all-alpha word (3-8 chars, no apostrophes/digits) — treated as a tag
-      // only after at least one clear tag has already been stripped (cascade rule),
-      // so genuine short title words like "Sky" aren't swallowed.
-      const isShortAlphaTag = s => /^[a-zA-Z]{3,8}$/.test(s)
-      const tagSegsNoKey = []
-      let strippedFirstTag = false
-      while (segs.length > 1) {
-        const tail = segs[segs.length - 1]
-        if (isTagSeg(tail)) { strippedFirstTag = true }
-        else if (strippedFirstTag && isShortAlphaTag(tail)) { /* cascade — strip after first real tag */ }
-        else { break }
-        tagSegsNoKey.unshift(segs.pop())
-      }
-      if (tagSegsNoKey.length) tag = tagSegsNoKey.join(' ').trim()
-      title = deCamelCase(segs.join(' '))
-    }
-  } else {
-    // Single underscore-delimited segment — folder uses spaces throughout,
-    // e.g. "Mood Ring Bb COMM MUSIC". Try space-based key/tag detection from the end.
-    const words = (segs[0] || rest).split(' ').filter(Boolean)
-    let keyIdx = -1
-    for (let i = words.length - 1; i >= 1; i--) {
-      if (KEY_RE.test(words[i])) { keyIdx = i; break }
-    }
-    if (keyIdx > 0) {
-      key   = normalizeKey(words[keyIdx])
-      // Words after key = tag (may be multi-word like "COMM MUSIC")
-      const tagWords = words.slice(keyIdx + 1)
-      tag   = tagWords.join(' ').trim()
-      title = words.slice(0, keyIdx).join(' ')
-    } else {
-      title = segs[0] || rest
-    }
+  // Normalize key if present
+  if (keyRaw) {
+    key = normalizeKey(keyRaw)
   }
 
   // Split CamelCase title segments into words: GoodNeighbor → Good Neighbor
@@ -7004,21 +7469,7 @@ function parseFolderName(name) {
     humanTitle = humanTitle.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())
   }
 
-  // Post-process: strip trailing genre/descriptor words from the title
-  // Catches cases like "BigSkyTexTension_D" where CamelCase puts Tex+Tension inside title
-  {
-    const titleWords = humanTitle.split(' ')
-    const stripped = []
-    while (titleWords.length > 1 && GENRE_TAG_RE.test(titleWords[titleWords.length - 1])) {
-      stripped.unshift(titleWords.pop())
-    }
-    if (stripped.length) {
-      humanTitle = titleWords.join(' ')
-      tag = tag ? stripped.join(' ') + ' ' + tag : stripped.join(' ')
-    }
-  }
-
-  return { composerID, title: humanTitle, tag: tag.trim(), key: key.trim(), bpm }
+  return { composerID, title: humanTitle, tag: tag.trim(), key: key.trim() }
 }
 
 async function checkIntakeDeps() {
@@ -7223,6 +7674,7 @@ function pickLot(lotId, lotName, lotType, webVisible) {
 // ── Intake Browser (left panel) ────────────────────────────────────────────
 
 async function renderIntakeBrowserClients() {
+  stopIntakeDraftAutoSave()
   const tree = document.getElementById('intake-tree')
   if (!tree) return
   tree.innerHTML = '<div style="color:var(--text3);font-size:12px;text-align:center;padding:20px"><i class="ti ti-loader-2"></i></div>'
@@ -7658,7 +8110,7 @@ function renderIntakeBrowserTracks() {
 
   const items = intakeDrops.map((d, i) => {
     const bgSt   = d._bgStatus  // 'uploading' | 'done' | 'error' | undefined
-    const done   = bgSt === 'done' || (!bgSt && i < intakeIndex)
+    const done   = bgSt === 'done'
     const active = !bgSt && i === intakeIndex
     const title  = esc(d.guessedTitle || d.name)
     let bg = '', icon = ''
@@ -7680,7 +8132,7 @@ function renderIntakeBrowserTracks() {
         <div style="font-size:12px;font-weight:600;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
         ${dupeTag}
       </div>
-      <div style="font-size:11px;color:#6F927E;margin-top:2px;font-weight:500">${esc(composerName)}${d.lotFolder ? ' · ' + esc(d.lotFolder) : ''}</div>
+      <div style="font-size:11px;color:#6F927E;margin-top:2px;font-weight:500">${esc(composerName)}${d.guessedTag ? ' | ' + esc(d.guessedTag) : ''}</div>
     </div>`
   }).join('')
 
@@ -7768,9 +8220,16 @@ function isStemFile(f) {
 // ── Rename popup ──────────────────────────────────────────────────────────────
 function _renamePopupRows(i) {
   const d = intakeDrops[i]; if (!d) return ''
-  const title = document.getElementById(`title-${i}`)?.value.trim() || d.guessedTitle || d.name
-  const key   = document.getElementById(`key-${i}`)?.value.trim()   || d.guessedKey  || ''
-  const id    = document.getElementById(`id-${i}`)?.value.trim()    || d.guessedID   || ''
+  // Check edit fields first (during edit mode), then main form fields
+  const title = document.getElementById(`rename-edit-title-${i}`)?.value.trim()
+    || document.getElementById(`title-${i}`)?.value.trim()
+    || d.guessedTitle || d.name
+  const key = document.getElementById(`rename-edit-key-${i}`)?.value.trim()
+    || document.getElementById(`key-${i}`)?.value.trim()
+    || d.guessedKey  || ''
+  const id = document.getElementById(`rename-edit-id-${i}`)?.value.trim()
+    || document.getElementById(`id-${i}`)?.value.trim()
+    || d.guessedID   || ''
   const isJup = /jupiter/i.test(intakeClient || '')
   const info  = { key, id, isJup }
   const rawMap = d.files.map(f => ({ orig: f, name: buildHausName(f, title, info) }))
@@ -7802,23 +8261,42 @@ function showRenamePopup(i) {
   modal.addEventListener('click', e => { if (e.target === modal) closeRenamePopup() })
   document.body.appendChild(modal)
 
+  const d = intakeDrops[i]
+  const currentTitle = document.getElementById(`title-${i}`)?.value.trim() || d?.guessedTitle || d?.name
+  const currentKey = document.getElementById(`key-${i}`)?.value.trim() || d?.guessedKey || ''
+  const currentId = document.getElementById(`id-${i}`)?.value.trim() || d?.guessedID || ''
+
   const popup = document.createElement('div')
   popup.id = 'intake-rename-popup'
   popup.style.cssText = `position:fixed;top:${popTop}px;left:${popLeft}px;z-index:201;
-    background:var(--bg);border-radius:10px;width:360px;max-height:min(480px,80vh);
+    background:var(--bg);border-radius:10px;width:420px;max-height:min(600px,90vh);
     display:flex;flex-direction:column;box-shadow:0 8px 32px rgba(0,0,0,.28);
     border:1px solid var(--border)`
   popup.innerHTML = `
     <div style="padding:11px 14px;border-bottom:1px solid var(--border);display:flex;align-items:center;gap:8px">
-      <div style="font-size:13px;font-weight:700;flex:1">Rename Preview</div>
+      <div style="font-size:13px;font-weight:700;flex:1" id="popup-title-${i}">Rename Preview</div>
       <button onclick="closeRenamePopup()" style="border:none;background:none;font-size:18px;line-height:1;cursor:pointer;color:var(--text3);padding:0 3px">×</button>
     </div>
-    <div id="rename-popup-rows" style="padding:8px 12px;overflow-y:auto;flex:1;font-size:11px">${_renamePopupRows(i)}</div>
+    <div id="rename-popup-preview-${i}" style="padding:8px 12px;overflow-y:auto;flex:1;font-size:11px">${_renamePopupRows(i)}</div>
+    <div id="rename-popup-edit-${i}" style="display:none;padding:12px 14px;border-top:1px solid var(--border);gap:10px;flex-direction:column;font-size:12px">
+      <div>
+        <label style="color:var(--text3);font-size:11px;font-weight:600">Title</label>
+        <input id="rename-edit-title-${i}" type="text" value="${esc(currentTitle)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text);font-family:monospace;font-size:11px" oninput="updateIntakePreview(${i})">
+      </div>
+      <div>
+        <label style="color:var(--text3);font-size:11px;font-weight:600">Key</label>
+        <input id="rename-edit-key-${i}" type="text" value="${esc(currentKey)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text);font-family:monospace;font-size:11px" oninput="updateIntakePreview(${i})">
+      </div>
+      <div>
+        <label style="color:var(--text3);font-size:11px;font-weight:600">Composer ID</label>
+        <input id="rename-edit-id-${i}" type="text" value="${esc(currentId)}" style="width:100%;padding:6px 8px;border:1px solid var(--border);border-radius:4px;background:var(--input-bg);color:var(--text);font-family:monospace;font-size:11px" oninput="updateIntakePreview(${i})">
+      </div>
+    </div>
     <div style="padding:10px 14px;border-top:1px solid var(--border);display:flex;gap:8px">
-      <button class="btn primary" style="flex:1;background:#6F9276;border-color:#6F9276;color:#fff;font-weight:700" onclick="closeRenamePopup()" onmouseover="this.style.background='#E7F0EA';this.style.color='#1a1a1a'" onmouseout="this.style.background='#6F9276';this.style.color='#fff'">
+      <button class="btn primary" style="flex:1;background:#6F9276;border-color:#6F9276;color:#fff;font-weight:700" onclick="applyRenameEdits(${i})" onmouseover="this.style.background='#E7F0EA';this.style.color='#1a1a1a'" onmouseout="this.style.background='#6F9276';this.style.color='#fff'">
         <i class="ti ti-check"></i> OK
       </button>
-      <button class="btn" onclick="closeRenamePopup()" style="background:#E6B271;border-color:#E6B271;color:#6F9276;font-weight:700" onmouseover="this.style.background='#d4a060'" onmouseout="this.style.background='#E6B271'">Fix</button>
+      <button class="btn" id="rename-fix-btn-${i}" onclick="toggleRenameEdit(${i})" style="background:#E6B271;border-color:#E6B271;color:#6F9276;font-weight:700" onmouseover="this.style.background='#d4a060'" onmouseout="this.style.background='#E6B271'">Fix</button>
     </div>`
   document.body.appendChild(popup)
 }
@@ -7828,18 +8306,189 @@ function closeRenamePopup() {
   document.querySelectorAll('[id^="intake-rename-popup"]').forEach(el => el.remove())
 }
 
+function toggleRenameEdit(i) {
+  const preview = document.getElementById(`rename-popup-preview-${i}`)
+  const edit = document.getElementById(`rename-popup-edit-${i}`)
+  const btn = document.getElementById(`rename-fix-btn-${i}`)
+  const title = document.getElementById(`popup-title-${i}`)
+
+  const isEditing = edit?.style.display !== 'none'
+  if (isEditing) {
+    // Close edit mode → show preview
+    preview.style.display = ''
+    edit.style.display = 'none'
+    btn.textContent = 'Fix'
+    title.textContent = 'Rename Preview'
+  } else {
+    // Open edit mode
+    preview.style.display = 'none'
+    edit.style.display = 'flex'
+    btn.textContent = 'Preview'
+    title.textContent = 'Edit Title / Key / ID'
+    document.getElementById(`rename-edit-title-${i}`)?.focus()
+  }
+}
+
+function applyRenameEdits(i) {
+  // Save edited values back to the main form fields
+  const editTitle = document.getElementById(`rename-edit-title-${i}`)?.value.trim()
+  const editKey = document.getElementById(`rename-edit-key-${i}`)?.value.trim()
+  const editId = document.getElementById(`rename-edit-id-${i}`)?.value.trim()
+
+  if (editTitle) {
+    document.getElementById(`title-${i}`).value = editTitle
+    document.getElementById(`title-${i}`)?.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  if (editKey) {
+    document.getElementById(`key-${i}`).value = editKey
+    document.getElementById(`key-${i}`)?.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  if (editId) {
+    document.getElementById(`id-${i}`).value = editId
+    document.getElementById(`id-${i}`)?.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+
+  closeRenamePopup()
+}
+
 function updateIntakePreview(i) {
   // Live-update popup rows while user types in title/key/id fields
   const rows = document.getElementById('rename-popup-rows')
-  if (rows && document.getElementById('intake-rename-modal')?.style.display !== 'none') {
-    rows.innerHTML = _renamePopupRows(i)
+  const rows_edit = document.getElementById(`rename-popup-preview-${i}`)
+
+  if ((rows || rows_edit) && document.getElementById('intake-rename-modal')?.style.display !== 'none') {
+    const newHTML = _renamePopupRows(i)
+    if (rows) rows.innerHTML = newHTML
+    if (rows_edit) rows_edit.innerHTML = newHTML
   }
+}
+
+// ─── Intake Draft Save/Load ───────────────────────────────────────────
+let _draftAutoSaveInterval = null
+
+function collectIntakeFormData(i) {
+  return {
+    title: document.getElementById(`title-${i}`)?.value.trim() || '',
+    key: document.getElementById(`key-${i}`)?.value.trim() || '',
+    composerId: document.getElementById(`id-${i}`)?.value.trim() || '',
+    subGenre: document.getElementById(`subgenre-${i}`)?.value.trim() || '',
+    bpm: parseInt(document.getElementById(`bpm-${i}`)?.value) || null,
+    description: document.getElementById(`description-${i}`)?.value.trim() || '',
+    plotArc: document.getElementById(`plot-arc-${i}`)?.value.trim() || '',
+    releaseDate: document.getElementById(`release-date-${i}`)?.value || '',
+    vocals: document.getElementById(`vocals-${i}`)?.value || 'no_vocals',
+    mood1: document.getElementById(`mood1sel-${i}`)?.value.trim() || '',
+    mood2Tags: Array.from(document.querySelectorAll(`#m2tags-${i} [data-tag]`)).map(el => el.dataset.tag),
+    kslTags: Array.from(document.querySelectorAll(`#ksl-${i}-tags [data-tag]`)).map(el => el.dataset.tag),
+    rmoTags: Array.from(document.querySelectorAll(`#rmo-${i}-tags [data-tag]`)).map(el => el.dataset.tag),
+    mmwTags: Array.from(document.querySelectorAll(`#mmw-${i}-tags [data-tag]`)).map(el => el.dataset.tag)
+  }
+}
+
+function autoSaveIntakeDraft(i) {
+  const data = collectIntakeFormData(i)
+  const draft = {
+    clientName: intakeClient,
+    dropIndex: i,
+    formData: data,
+    timestamp: Date.now()
+  }
+  sessionStorage.setItem('intake_draft', JSON.stringify(draft))
+}
+
+function startIntakeDraftAutoSave(i) {
+  if (_draftAutoSaveInterval) clearInterval(_draftAutoSaveInterval)
+  _draftAutoSaveInterval = setInterval(() => autoSaveIntakeDraft(i), 2000)
+}
+
+function stopIntakeDraftAutoSave() {
+  if (_draftAutoSaveInterval) { clearInterval(_draftAutoSaveInterval); _draftAutoSaveInterval = null }
+}
+
+async function saveDraftToDatabase(i) {
+  const data = collectIntakeFormData(i)
+  const draft = {
+    clientName: intakeClient,
+    dropIndex: i,
+    dropName: intakeDrops[i]?.name || '',
+    formData: data
+  }
+  try {
+    await fetch('/api/intake/draft', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(draft)
+    })
+    alert('Draft saved!')
+  } catch (e) {
+    console.error('Error saving draft:', e)
+    alert('Error saving draft: ' + e.message)
+  }
+}
+
+async function loadIntakeDraft() {
+  try {
+    const r = await fetch('/api/intake/draft')
+    if (r.ok) return await r.json()
+  } catch (e) {
+    console.error('Error loading server draft:', e)
+  }
+  // Fallback to sessionStorage
+  try {
+    const sessionDraft = sessionStorage.getItem('intake_draft')
+    if (sessionDraft) return JSON.parse(sessionDraft)
+  } catch (e) {
+    console.error('Error loading session draft:', e)
+  }
+  return null
+}
+
+function restoreFormData(i, data) {
+  if (!data) return
+  const fields = [
+    [`title-${i}`, data.title],
+    [`key-${i}`, data.key],
+    [`id-${i}`, data.composerId],
+    [`subgenre-${i}`, data.subGenre],
+    [`bpm-${i}`, data.bpm],
+    [`description-${i}`, data.description],
+    [`plot-arc-${i}`, data.plotArc],
+    [`release-date-${i}`, data.releaseDate],
+    [`vocals-${i}`, data.vocals || 'no_vocals'],
+    [`mood1sel-${i}`, data.mood1]
+  ]
+  fields.forEach(([id, value]) => {
+    const el = document.getElementById(id)
+    if (el) el.value = value || ''
+  })
+}
+
+function resumeIntakeDraft(i) {
+  const banner = document.getElementById('intake-draft-banner')
+  if (banner) banner.remove()
+
+  // Re-load draft and restore data
+  loadIntakeDraft().then(draft => {
+    if (draft && draft.formData) {
+      restoreFormData(i, draft.formData)
+      window._refreshIntakeFieldsDone?.()
+    }
+  })
+}
+
+function discardIntakeDraft() {
+  const banner = document.getElementById('intake-draft-banner')
+  if (banner) banner.remove()
+  // Clear sessionStorage draft too
+  sessionStorage.removeItem('intake_draft')
 }
 
 async function loadIntakeTrackForm(idx) {
   intakeIndex = idx
   intakeBatchMode = false
   renderIntakeBrowserTracks()
+
+  startIntakeDraftAutoSave(idx)
 
   const panel = document.getElementById('intake-form-panel')
   if (!panel) return
@@ -8104,6 +8753,7 @@ async function loadIntakeTrackForm(idx) {
         <button class="btn primary" style="flex:1;background:#6F9276;border-color:#6F9276;color:#fff;font-weight:700" id="intake-submit-btn-${i}" onclick="confirmIntake(${i})" onmouseover="this.style.background='#E7F0EA';this.style.color='#1a1a1a'" onmouseout="this.style.background='#6F9276';this.style.color='#fff'">
           <i class="ti ti-upload"></i> Run Intake
         </button>
+        <button class="btn" onclick="saveDraftToDatabase(${i})" style="background:#8FAF9B;border-color:#8FAF9B;color:#fff;font-weight:700" onmouseover="this.style.background='#7a9b85'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-bookmark"></i> Save Draft</button>
         <button class="btn" onclick="skipIntakeDrop()" style="background:#E6B271;border-color:#E6B271;color:#6F9276;font-weight:700" onmouseover="this.style.background='#d4a060'" onmouseout="this.style.background='#E6B271'"><i class="ti ti-player-skip-forward"></i> Skip</button>
         <button class="btn" title="Remove from intake list" style="color:var(--red,#c44)" onclick="removeIntakeDrop(${i})"><i class="ti ti-trash"></i></button>
       </div>
@@ -8114,6 +8764,32 @@ async function loadIntakeTrackForm(idx) {
   if (isJupClient) setJupToggle(i, true)
   if (document.getElementById(`id-${i}`)?.value) resolveComposer(i)
   setTimeout(() => { if (document.getElementById(`title-${i}`)?.value) checkTitleUnique(i) }, 50)
+
+  // Check for saved draft and show banner
+  const draft = await loadIntakeDraft()
+  if (draft && draft.dropIndex === idx && draft.clientName === intakeClient) {
+    const banner = document.createElement('div')
+    banner.id = 'intake-draft-banner'
+    banner.style.cssText = 'background:#E8F5E9;border:1px solid #81C784;border-radius:8px;padding:12px 16px;margin-bottom:16px;display:flex;align-items:center;justify-content:space-between;gap:12px'
+    banner.innerHTML = `
+      <div style="display:flex;align-items:center;gap:8px;flex:1">
+        <i class="ti ti-bookmark" style="color:#4CAF50;font-size:18px"></i>
+        <span style="color:#2E7D32;font-weight:500">Draft found for <strong>${esc(draft.dropName || 'this track')}</strong></span>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="resumeIntakeDraft(${idx})" style="background:#4CAF50;border-color:#4CAF50;color:#fff;font-weight:600;padding:6px 14px;font-size:12px">
+          <i class="ti ti-arrow-back"></i> Resume Draft
+        </button>
+        <button class="btn" onclick="discardIntakeDraft()" style="background:#fff;border-color:#ccc;color:#666;padding:6px 14px;font-size:12px">
+          Start Fresh
+        </button>
+      </div>
+    `
+    const panel = document.getElementById('intake-form-panel')
+    if (panel && panel.firstChild) {
+      panel.insertBefore(banner, panel.firstChild)
+    }
+  }
 
   // Colour-fill completed fields
   window._checkIntakeFieldDone = (el) => {
@@ -8277,6 +8953,45 @@ function _intakeProgress(title, msg) {
 }
 
 // ── Ops Dashboard ──────────────────────────────────────────────────────────
+
+async function clearLotB2Keys(lotName) {
+  if (!confirm(`Clear all b2_key entries for "${lotName}"? This will allow backfill to re-upload.`)) return
+  const rows = await pgQ(`
+    UPDATE mix_stems
+    SET b2_key = NULL
+    WHERE sku_root IN (
+      SELECT DISTINCT t.sku_root
+      FROM titles t
+      JOIN lot_titles lt ON lt.sku_root = t.sku_root
+      JOIN lots l ON l.lot_id = lt.lot_id
+      WHERE l.lot_name LIKE $1
+    )
+    RETURNING mix_stem_id
+  `, [lotName + '%'])
+  alert(`Cleared ${rows?.length || 0} b2_key entries. Run backfill now.`)
+}
+
+async function clearSKUb2Keys(sku) {
+  if (!confirm(`Clear all b2_key entries for SKU "${sku}"? This will allow backfill to re-upload.`)) return
+  const rows = await pgQ(`
+    UPDATE mix_stems
+    SET b2_key = NULL
+    WHERE sku_root = $1
+    RETURNING mix_stem_id
+  `, [sku])
+  alert(`Cleared ${rows?.length || 0} b2_key entries for ${sku}. Run backfill now.`)
+}
+
+async function addB2Key(sku, filename, b2Key) {
+  if (!confirm(`Add b2_key for ${sku} / ${filename}?`)) return
+  const result = await pgQ(`
+    INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key)
+    VALUES ($1, $2, $3, $4)
+    ON CONFLICT (sku_root, filename) DO UPDATE SET b2_key = EXCLUDED.b2_key
+    RETURNING mix_stem_id
+  `, [sku, 'FULL', filename, b2Key])
+  alert(`Added b2_key. Try playing the song now.`)
+}
 
 async function opsMigrateB2() {
   const btn = document.getElementById('ops-b2-btn')
@@ -9207,8 +9922,10 @@ async function b2Backfill(statusElId = 'b2-connect-result') {
         )
         if (existing && existing.length) { skipped++; continue }
         log(`Uploading ${f.name}… (${uploaded} done, ${errors} errors)`)
+        console.log('[b2-backfill] uploading real file:', f.path, '→', b2Key)
         const url = await b2UploadFile(f.path, b2Key)
         if (url) {
+          console.log('[b2-backfill] upload SUCCESS:', b2Key)
           // Upsert into mix_stems — covers both "row exists, b2_key was null" and "no row at all" cases
           await pgQ(
             `INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key)
@@ -9218,6 +9935,7 @@ async function b2Backfill(statusElId = 'b2-connect-result') {
           )
           uploaded++
         } else {
+          console.error('[b2-backfill] upload FAILED:', f.path, '→', b2Key, '— b2UploadFile returned null')
           errors++
         }
       }
@@ -9628,7 +10346,7 @@ async function showIntakeLotPicker() {
           </button>`).join('')}
       </div>
       <div style="display:flex;gap:8px">
-        <button class="btn" onclick="document.getElementById('intake-lot-picker-modal').remove();showCreateLotModal()" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500"><i class="ti ti-plus"></i> New Lot</button>
+        <button class="btn" onclick="showCreateLotModal(null, '${esc(intakeClient)}', ${intakeIndex})" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500"><i class="ti ti-plus"></i> New Lot</button>
         <button class="btn" onclick="document.getElementById('intake-lot-picker-modal').remove()">Cancel</button>
       </div>
     </div>
@@ -10134,81 +10852,51 @@ async function collectIntakeInfo() {
   loadLotPortalPicker()
 }
 
+// detectVersion — uses module from rename-validation.js if loaded, else fallback
 function detectVersion(filename) {
-  // Composers send files with space+number suffixes: "BUMPER 1", "FULL MIX", "NO DNB", "STING 2"
-  // Use lastIndexOf('_') to get the raw suffix, then normalize to output format.
   const base = filename.replace(/\.[^.]+$/, '')
   const lastUs = base.lastIndexOf('_')
   const rawSuffix = lastUs >= 0 ? base.slice(lastUs + 1).trim() : ''
   const su = rawSuffix.toUpperCase()
-
-  // FULL (and "FULL MIX", "FULL VERSION", etc.)
   if (/^FULL\b/.test(su)) return 'FULL'
-
-  // Legacy long/short sting names
   if (su === 'LONGSTING')  return 'STING'
   if (su === 'SHORTSTING') return 'STINGa'
-
-  // NO DNB / NoDNB → NoDNB
   if (/^NO\s*DNB$/i.test(su)) return 'NoDNB'
-
-  // NO DRUMS / NoDrums → NoDrums
+  if (/^DRUMS$/i.test(su)) return 'DRUMS'
+  if (/^DRUMS\s*ONLY$/i.test(su) || /^DRUMSONLY$/i.test(su)) return 'DRUMS'
   if (/^NO\s*DRUMS?$/i.test(su)) return 'NoDrums'
-
-  // NO LEAD / NoLead → NoLead
   if (/^NO\s*LEAD$/i.test(su)) return 'NoLead'
-
-  // NO VOX / NoVox / NOVOX → NoVox
   if (/^NO\s*VOX$/i.test(su)) return 'NoVox'
-
-  // PIANO → PIANO
   if (/^PIANO$/i.test(su)) return 'PIANO'
-
-  // GUITAR / GUITARS → GUITARS
   if (/^GUITARS?$/i.test(su)) return 'GUITARS'
-
-  // DNB
   if (su === 'DNB') return 'DNB'
-
-  // BUMPER {n} → BUMPER, BUMPERa, BUMPERb  (1=base, 2=a, 3=b, …)
-  // Single-letter suffixes (BUMPERa, BUMPERb) are valid variants.
-  // Multi-char word suffixes (BUMPERalt, BUMPERbtn) collapse to base BUMPER —
-  // there must always be a plain BUMPER before a BUMPERa can exist.
   const bumperNum = rawSuffix.match(/^BUMPER\s+(\d+)$/i)
   if (bumperNum) { const n = parseInt(bumperNum[1]); return 'BUMPER' + (n <= 1 ? '' : String.fromCharCode(96 + n - 1)) }
   const bumperLtr = rawSuffix.match(/^BUMPER([a-z]+)$/i)
   if (bumperLtr) return 'BUMPER' + (bumperLtr[1].length === 1 ? bumperLtr[1].toLowerCase() : '')
   if (/^BUMPER$/i.test(rawSuffix)) return 'BUMPER'
-
-  // STING {n} → STING, STINGa, STINGb  (same rule: word suffixes collapse to base)
   const stingNum = rawSuffix.match(/^STING\s+(\d+)$/i)
   if (stingNum) { const n = parseInt(stingNum[1]); return 'STING' + (n <= 1 ? '' : String.fromCharCode(96 + n - 1)) }
   const stingLtr = rawSuffix.match(/^STING([a-z0-9]+)$/i)
   if (stingLtr) return 'STING' + (stingLtr[1].length === 1 ? stingLtr[1].toLowerCase() : '')
   if (/^STING$/i.test(rawSuffix)) return 'STING'
-
-  // ALT {n} → ALT, ALTa, ALTb  (same rule)
   const altNum = rawSuffix.match(/^ALT\s+(\d+)$/i)
   if (altNum) { const n = parseInt(altNum[1]); return 'ALT' + (n <= 1 ? '' : String.fromCharCode(96 + n - 1)) }
   const altLtr = rawSuffix.match(/^ALT([a-z]+)$/i)
   if (altLtr) return 'ALT' + (altLtr[1].length === 1 ? altLtr[1].toLowerCase() : '')
   if (/^ALT$/i.test(rawSuffix)) return 'ALT'
-
-  // Suffix is a composer ID (e.g. R15a) or musical key (e.g. D, Gm) → no version → FULL
   const KEY_RE2 = /^([A-Ga-g](?:sharp|flat|##?|bb?)?m?)$/i
   const COMP_RE  = /^[A-Z]\d{2,3}[a-z]$/i
   if (KEY_RE2.test(rawSuffix) || COMP_RE.test(rawSuffix)) return 'FULL'
-
-  // Anything else unrecognized (e.g. "LITE MIX") → ALT
   return 'ALT'
 }
 
 function buildHausName(filename, title, info) {
+  // Use shared module logic from rename-validation.js
   const ext = filename.split('.').pop().toLowerCase()
   const version = detectVersion(filename)
   const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
   const prefix = info.isJup ? 'HAUSJUP' : 'HAUS'
-  // HAUS_{Title}_{Key}_{ComposerID}_{VERSION}.ext
   return `${prefix}_${titleCamel}_${info.key}_${info.id}_${version}.${ext}`
 }
 
@@ -10503,14 +11191,30 @@ async function executeIntake(snapshot = null) {
     const bpmLine    = info.bpm ? `**BPM:** ${info.bpm}\n` : ''
     const md = `# ${title}\n\n**Composer:** ${info.id}\n**Key:** ${info.key}\n**Genre:** ${info.genre}\n${skuLine}${dupeLine}${kslLine}${mmwLine}${bpmLine}**Type:** ${info.isJup ? 'JUP' : 'Regular'}\n**Date Intake:** ${now}\n\n## Files\n${renamedFiles.map(f => `- ${f}`).join('\n')}\n`
     await window.haus.fs.writeFile(`${destDir}/${mdName}`, md)
-    // Delete source folder from staging after successful intake
-    const rmR = await window.haus.shell.exec(`rm -rf "${d.path}"`)
-    if (rmR?.err) console.warn(`[executeIntake] rm -rf failed for "${d.path}":`, rmR.err)
-    // Verify folder is actually gone (Dropbox can re-sync it back within seconds)
-    const stillExists = await window.haus.shell.exec(`test -d "${d.path}" && echo exists`)
-    if ((stillExists?.stdout || '').trim() === 'exists') {
-      console.warn(`[executeIntake] staging folder still present after rm -rf — may be a Dropbox re-sync. Retrying with xattr strip…`)
-      await window.haus.shell.exec(`xattr -dr com.dropbox.attributes "${d.path}" 2>/dev/null; rm -rf "${d.path}"`)
+
+    // Move source folder to archive/finished location instead of deleting
+    const archiveDir = cfg.finish || (cfg.intake ? `${cfg.intake}/../_PROCESSED` : null)
+    if (archiveDir && archiveDir !== cfg.intake) {
+      // Create archive folder if needed
+      const mkArchive = await window.haus.shell.exec(`mkdir -p "${archiveDir}"`)
+      if (!mkArchive?.err) {
+        const baseName = d.path.split('/').pop()
+        // Move (not delete) the source folder to archive
+        const mvR = await window.haus.shell.exec(`mv "${d.path}" "${archiveDir}/${baseName}"`)
+        if (mvR?.err) {
+          console.warn(`[executeIntake] failed to move "${d.path}" to archive:`, mvR.err)
+          // Fallback to deletion if move fails (for safety)
+          await window.haus.shell.exec(`rm -rf "${d.path}"`)
+        } else {
+          console.log(`[executeIntake] archived intake folder: ${archiveDir}/${baseName}`)
+        }
+      } else {
+        console.warn(`[executeIntake] could not create archive dir ${archiveDir}:`, mkArchive.err)
+      }
+    } else {
+      // No archive configured — clean deletion as fallback
+      const rmR = await window.haus.shell.exec(`rm -rf "${d.path}"`)
+      if (rmR?.err) console.warn(`[executeIntake] rm -rf failed for "${d.path}":`, rmR.err)
     }
     // Always purge from staged_files DB cache by filepath (covers both cache and live-scan drops)
     fetch(`/api/staged-files/by-path?path=${encodeURIComponent(d.path)}`, { method: 'DELETE' }).catch(() => {})
@@ -11048,13 +11752,22 @@ spinStyle.textContent = '@keyframes spin{to{transform:rotate(360deg)}}'
 document.head.appendChild(spinStyle)
 
 // ─── Init ───────────────────────────────────────────────────
-loadCfg()
-renderTopbarDate()
-loadLibraryStats()
-
-// In web mode, check for an existing server-side session so the login
-// screen is skipped when the user refreshes the page.
 ;(async () => {
+  await loadCfg()
+  renderTopbarDate()
+  loadLibraryStats()
+
+  // Warn on unsaved changes before leaving page
+  window.addEventListener('beforeunload', e => {
+    if (hasUnsavedChanges) {
+      e.preventDefault()
+      e.returnValue = 'You have unsaved changes. Leave anyway?'
+      return 'You have unsaved changes. Leave anyway?'
+    }
+  })
+
+  // In web mode, check for an existing server-side session so the login
+  // screen is skipped when the user refreshes the page.
   if (typeof window.__hausCheckSession === 'function') {
     const user = await window.__hausCheckSession()
     if (user) {
@@ -12132,7 +12845,7 @@ async function exportPlaylistAvidComments() {
 
   // Query directly from playlist_tracks — don't rely on in-memory playlistTracks array
   const rows = await pgQ(
-    `SELECT t.sku_root, t.title, t.key, t.bpm,
+    `SELECT t.sku_root, t.title, t.key, t.bpm, t.vocals,
             pg.primary_genre_name   AS genre1,
             sg.secondary_genre_name AS genre2,
             m1.mood_1_name          AS mood1,
@@ -12155,7 +12868,12 @@ async function exportPlaylistAvidComments() {
   const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"'
   const lines = [['SKU','TITLE','COMMENTS'].map(q).join(',')]
   for (const r of rows) {
-    const comments = [r.genre1, r.genre2, r.mood1, r.mood2, r.bpm ? r.bpm + ' BPM' : null, r.ksl1, r.key].filter(Boolean).join(' - ')
+    let comments = [r.genre1, r.genre2, r.mood1, r.mood2, r.bpm ? r.bpm + ' BPM' : null, r.ksl1, r.key].filter(Boolean).join(' - ')
+    if (r.vocals === 'male_vocals') {
+      comments += ' - MALE VOCALS'
+    } else if (r.vocals === 'female_vocals') {
+      comments += ' - FEMALE VOCALS'
+    }
     lines.push([r.sku_root, r.title, comments].map(q).join(','))
   }
 

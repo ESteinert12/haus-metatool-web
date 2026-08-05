@@ -8,13 +8,14 @@
     const r = await fetch(path, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
+      body: JSON.stringify(body),
+      credentials: 'include'
     })
     return r.json()
   }
 
   async function _get(path) {
-    const r = await fetch(path)
+    const r = await fetch(path, { credentials: 'include' })
     return r.json()
   }
 
@@ -89,7 +90,7 @@
       fd.append('mimeType',         mimeType || 'application/octet-stream')
       // fileOrPath is a File/Blob in web mode
       fd.append('file', fileOrPath instanceof Blob ? fileOrPath : new Blob([fileOrPath]))
-      const r = await fetch('/api/b2/upload-file', { method: 'POST', body: fd })
+      const r = await fetch('/api/b2/upload-file', { method: 'POST', body: fd, credentials: 'include' })
       return r.json()
     }
   }

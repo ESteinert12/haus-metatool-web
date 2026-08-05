@@ -61,7 +61,7 @@ const PUBLIC_ROUTES = ['/auth/login', '/pg/connect', '/pg/status', '/pg/query',
   '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
   '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
   '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
-  '/b2/stream']
+  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots']
 app.use('/api', (req, res, next) => {
   if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
@@ -83,13 +83,13 @@ function _b2Request(opts) {
       if (isBuffer) {
         const chunks = []
         res.on('data', c => chunks.push(c))
-        res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks) }))
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: Buffer.concat(chunks) }))
       } else {
         let data = ''
         res.on('data', c => data += c)
         res.on('end', () => {
-          try { resolve({ status: res.statusCode, body: JSON.parse(data) }) }
-          catch { resolve({ status: res.statusCode, body: data }) }
+          try { resolve({ status: res.statusCode, headers: res.headers, body: JSON.parse(data) }) }
+          catch { resolve({ status: res.statusCode, headers: res.headers, body: data }) }
         })
       }
     })
@@ -133,7 +133,7 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_FGSU13AbJlZj@ep-polished-cloud-adsex56o-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+const DEFAULT_NEON = 'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -181,44 +181,56 @@ async function runServerMigrations(pool) {
   console.log('✅ staged_files ready')
 }
 
-// ─── Neon keep-alive ───────────────────────────────────────────────────────
-// Neon serverless computes sleep after ~5 min of inactivity → 30-60s cold start.
-// Pinging every 4 min keeps the compute warm so connections are instant.
-let _keepAliveTimer = null
-function startNeonKeepAlive() {
-  if (_keepAliveTimer) clearInterval(_keepAliveTimer)
-  _keepAliveTimer = setInterval(async () => {
-    if (!pgPool) return
-    try { await pgPool.query('SELECT 1') }
-    catch (e) { console.warn('[keep-alive] ping failed:', e.message) }
-  }, 4 * 60 * 1000) // every 4 minutes
-  _keepAliveTimer.unref() // don't prevent process exit
-}
+// ─── Neon connection ───────────────────────────────────────────────────────
+// Neon serverless computes may sleep after ~5 min of inactivity (30-60s cold start).
+// We don't ping proactively — next query wakes compute if needed.
 
 // Auto-connect to Neon on startup — tries saved config first, falls back to default
 ;(async () => {
-  try {
-    let connStr = DEFAULT_NEON
-    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-    if (fs.existsSync(cfgPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      if (cfg.pgConn) connStr = cfg.pgConn
+  let connStr = DEFAULT_NEON
+  const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+  if (fs.existsSync(cfgPath)) {
+    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+    if (cfg.pgConn) connStr = cfg.pgConn
+  }
+
+  // Retry logic for initial connection (Neon can reset on cold start)
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      pgPool = new Pool({
+        connectionString: connStr,
+        ssl: { rejectUnauthorized: false },
+        keepAlive: true,
+        connectionTimeoutMillis: 30000,
+        idleTimeoutMillis: 0,
+        socket: { timeout: 30000 }
+      })
+      pgPool.on('error', (err, client) => {
+        console.error('[pool] error:', err.message)
+      })
+      pgPool.on('connect', () => {
+        console.log('[pool] client connected')
+      })
+      pgPool.on('remove', () => {
+        console.log('[pool] client removed')
+      })
+      await pgPool.query('SELECT 1')
+      console.log('✅ PostgreSQL connected')
+      await runServerMigrations(pgPool)
+      startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
+      break  // Success, exit retry loop
+    } catch (e) {
+      console.log(`⚠ PG auto-connect attempt ${attempt}/3 failed:`, e.message)
+      pgPool = null
+      if (attempt < 3) {
+        const delay = 2000 * attempt  // 2s, 4s, 6s
+        console.log(`  Retrying in ${delay}ms…`)
+        await new Promise(resolve => setTimeout(resolve, delay))
+      }
     }
-    pgPool = new Pool({
-      connectionString: connStr,
-      ssl: { rejectUnauthorized: false },
-      keepAlive: true,
-      connectionTimeoutMillis: 10000,
-      idleTimeoutMillis: 0,  // never drop idle connections — keeps Neon warm
-    })
-    await pgPool.query('SELECT 1')
-    console.log('✅ PostgreSQL connected')
-    startNeonKeepAlive()
-    await runServerMigrations(pgPool)
-    startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
-  } catch (e) {
-    console.log('⚠ PG auto-connect failed:', e.message)
-    pgPool = null
+  }
+  if (!pgPool) {
+    console.log('⚠ Could not connect to database. Use manual /api/pg/connect to retry.')
   }
 })()
 
@@ -266,16 +278,28 @@ app.post('/api/auth/change-password', async (req, res) => {
 app.post('/api/pg/connect', async (req, res) => {
   const { connStr } = req.body
   try {
-    if (pgPool) { try { await pgPool.end() } catch {} }
-    pgPool = new Pool({
+    const newPool = new Pool({
       connectionString: connStr,
       ssl: { rejectUnauthorized: false },
       keepAlive: true,
       connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 0,
     })
-    const client = await pgPool.connect()
+    // Test the new pool before switching
+    const client = await newPool.connect()
     client.release()
+
+    // Switch to new pool WITHOUT ending old one — let connections drain naturally
+    // Ending the pool aggressively causes "Cannot use a pool after calling end" errors
+    const oldPool = pgPool
+    pgPool = newPool
+
+    // Async drain old pool in background (don't block reconnect)
+    if (oldPool) {
+      setTimeout(() => {
+        oldPool.end().catch(e => console.warn('[pg] old pool drain error:', e.message))
+      }, 5000)  // Give 5 seconds for existing queries to finish
+    }
     // Run schema migrations - create tables if they don't exist
     await pgPool.query(`
       CREATE TABLE IF NOT EXISTS playlists (
@@ -297,7 +321,6 @@ app.post('/api/pg/connect', async (req, res) => {
     await pgPool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
     await pgPool.query(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
     await pgPool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
-    startNeonKeepAlive()
     // Persist the connection string for auto-connect on restart
     const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
     let cfg = {}
@@ -448,6 +471,140 @@ app.post('/api/fs/folder-stats', (req, res) => {
   } catch { res.json({ audioCount: 0, totalCount: 0, folderCount: 0 }) }
 })
 
+// ─── Create lot with folder ────────────────────────────────────────────────
+app.post('/api/lot/create', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { lotName, limit, projectId, clientName } = req.body
+  if (!lotName) return res.json({ ok: false, error: 'Lot name required' })
+
+  try {
+    // Insert lot into database
+    const result = await pgPool.query(
+      `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client)
+       VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
+      [lotName, limit || null, projectId || null, clientName || null]
+    )
+
+    if (!result.rows.length) {
+      return res.json({ ok: false, error: 'Failed to create lot' })
+    }
+
+    const lotId = result.rows[0].lot_id
+
+    // Create folder in shipping directory
+    let shippingBase = process.env.HAUS_SHIPPING
+    let folderCreated = false
+    let folderPath = null
+    let folderError = null
+
+    if (!shippingBase) {
+      try {
+        const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+        console.log(`[lot/create] Checking config at: ${cfgPath}`)
+        if (fs.existsSync(cfgPath)) {
+          const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+          console.log(`[lot/create] Config loaded, hausjup: ${cfg.hausjup}`)
+          if (cfg.hausjup) shippingBase = cfg.hausjup
+        } else {
+          console.warn(`[lot/create] Config file not found at ${cfgPath}`)
+        }
+      } catch (e) {
+        console.warn('[lot/create] Could not read shipping path from config:', e.message)
+        folderError = e.message
+      }
+    }
+
+    if (shippingBase) {
+      folderPath = path.join(shippingBase, lotName)
+      console.log(`[lot/create] Creating folder at: ${folderPath}`)
+      try {
+        fs.mkdirSync(folderPath, { recursive: true })
+        folderCreated = true
+        console.log(`✅ [lot/create] Created lot folder: ${folderPath}`)
+      } catch (e) {
+        console.error(`❌ [lot/create] Could not create lot folder ${folderPath}:`, e.message)
+        folderError = e.message
+      }
+    } else {
+      console.warn('[lot/create] No shipping base path found')
+      folderError = 'No shipping path configured'
+    }
+
+    res.json({ ok: true, lotId, folderCreated, folderPath, folderError })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ─── Download lot WAV files for AVID ───────────────────────────────────────
+app.post('/api/lot/download-avid-wavs', async (req, res) => {
+  const { lotId, lotName, safeName } = req.body
+  try {
+    // Get lot details from DB
+    const lotRows = await pgPool.query('SELECT * FROM lots WHERE lot_id = $1', [lotId])
+    const lot = lotRows?.rows?.[0]
+    if (!lot) return res.json({ ok: false, error: 'Lot not found' })
+
+    // Create AVID folder in user's Downloads
+    const avidDir = path.resolve(path.join(os.homedir(), 'Downloads', `AVID_${safeName}`))
+    if (!fs.existsSync(avidDir)) fs.mkdirSync(avidDir, { recursive: true })
+
+    // Find lot folder in shipping directory (read from config)
+    let shippingBase = process.env.HAUS_SHIPPING
+
+    if (!shippingBase) {
+      try {
+        const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+        if (fs.existsSync(cfgPath)) {
+          const cfgData = fs.readFileSync(cfgPath, 'utf8')
+          const cfg = JSON.parse(cfgData)
+          if (cfg.hausjup) shippingBase = cfg.hausjup
+        }
+      } catch (e) {
+        console.warn('Could not read config for shipping path:', e.message)
+      }
+    }
+
+    if (!shippingBase) {
+      return res.json({ ok: false, error: 'Shipping path not configured. Set HAUS_SHIPPING env var or configure in app settings.' })
+    }
+
+    const lotFolder = path.resolve(path.join(shippingBase, lotName))
+    console.log('[AVID] Looking for lot folder:', lotFolder)
+
+    if (!fs.existsSync(lotFolder)) {
+      return res.json({ ok: false, error: `Lot folder not found: ${lotFolder}. Checked shipping path: ${shippingBase}` })
+    }
+
+    // Recursively find all WAV files and copy them
+    let wavCount = 0
+    const copyWavs = (srcDir) => {
+      try {
+        const items = fs.readdirSync(srcDir, { withFileTypes: true })
+        for (const item of items) {
+          if (item.name.startsWith('.')) continue
+          const srcPath = path.join(srcDir, item.name)
+          if (item.isDirectory()) {
+            copyWavs(srcPath)
+          } else if (item.name.toLowerCase().endsWith('.wav')) {
+            const destPath = path.join(avidDir, item.name)
+            fs.copyFileSync(srcPath, destPath)
+            wavCount++
+          }
+        }
+      } catch (e) {
+        console.error('Error copying WAVs:', e.message)
+      }
+    }
+
+    copyWavs(lotFolder)
+    res.json({ ok: true, count: wavCount, folder: avidDir })
+  } catch (e) {
+    console.error('AVID download error:', e)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 // ─── Shell routes ──────────────────────────────────────────────────────────
 app.post('/api/shell/exec', (req, res) => {
   const { cmd, cwd } = req.body
@@ -484,7 +641,7 @@ app.get('/api/shell/show-folder-picker', (req, res) => {
 
 // ─── Server-side canonical paths ───────────────────────────────────────────
 // Stores shared folder paths so all users inherit them without local config.
-const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail']
+const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
 
 app.get('/api/cfg/server-paths', (req, res) => {
   const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
@@ -708,9 +865,46 @@ app.get('/api/b2/stream', async (req, res) => {
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
         console.log(`[b2/stream] stub detected — serving local file: ${bodyStr}`)
-        const localPath = bodyStr
+        let localPath = bodyStr
+
+        // If exact file doesn't exist, search for alternatives (FULL > ALT > STING > BUMPER)
         if (!fs.existsSync(localPath)) {
-          return res.status(404).json({ error: 'Local file not found', path: localPath })
+          const dir = path.dirname(localPath)
+          const fileName = path.basename(localPath)
+          const baseName = fileName.replace(/_(FULL|ALT|STING|BUMPER)\./i, '_')
+
+          console.log(`[b2/stream] exact path not found: ${localPath}`)
+          console.log(`[b2/stream] searching folder: ${dir} for alternatives to ${baseName}`)
+
+          let foundFile = null
+          try {
+            const files = fs.readdirSync(dir)
+            const audioFiles = files.filter(f => /\.(wav|mp3|aif|aiff)$/i.test(f))
+
+            // Try to find FULL, ALT, STING, BUMPER versions in order
+            for (const variant of ['_FULL', '_ALT', '_STING', '_BUMPER']) {
+              const match = audioFiles.find(f => f.includes(variant))
+              if (match) {
+                foundFile = path.join(dir, match)
+                console.log(`[b2/stream] found alternative: ${foundFile}`)
+                break
+              }
+            }
+
+            // Fall back to any audio file
+            if (!foundFile && audioFiles.length) {
+              foundFile = path.join(dir, audioFiles[0])
+              console.log(`[b2/stream] using first audio file: ${foundFile}`)
+            }
+          } catch (e) {
+            console.error(`[b2/stream] error searching folder: ${e.message}`)
+          }
+
+          if (!foundFile) {
+            return res.status(404).json({ error: 'Local file and alternatives not found', path: localPath, folder: dir })
+          }
+
+          localPath = foundFile
         }
         const stat = fs.statSync(localPath)
         const localMime = path.extname(localPath).toLowerCase() === '.mp3' ? 'audio/mpeg'
@@ -785,9 +979,10 @@ app.post('/api/b2/authorize', async (req, res) => {
     if (result.status === 200) {
       const b = result.body
       b2Auth = {
-        authorizationToken: b.authorizationToken,
-        apiUrl:      b.apiInfo?.storageApi?.apiUrl      || b.apiUrl,
-        downloadUrl: b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
+        accountId:           b.accountId,
+        authorizationToken:  b.authorizationToken,
+        apiUrl:              b.apiInfo?.storageApi?.apiUrl      || b.apiUrl,
+        downloadUrl:         b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
       }
       return res.json({ ok: true, downloadUrl: b2Auth.downloadUrl })
     }
@@ -797,6 +992,42 @@ app.post('/api/b2/authorize', async (req, res) => {
 
 app.get('/api/b2/status', (req, res) => {
   res.json({ connected: !!b2Auth })
+})
+
+app.post('/api/b2/get-song-lots', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  const { skus } = req.body
+  if (!Array.isArray(skus) || skus.length === 0) {
+    return res.json({ ok: false, error: 'skus must be a non-empty array' })
+  }
+
+  try {
+    const client = await pgPool.connect()
+
+    // Escape SKUs for SQL
+    const skuList = skus.map(s => `'${s.replace(/'/g, "''")}'`).join(',')
+
+    const result = await client.query(`
+      SELECT t.sku_root, l.lot_name
+      FROM titles t
+      LEFT JOIN lot_titles lt ON lt.sku_root = t.sku_root
+      LEFT JOIN lots l ON l.lot_id = lt.lot_id
+      WHERE t.sku_root IN (${skuList})
+      ORDER BY t.sku_root
+    `)
+
+    client.release()
+
+    // Format results as object for easy lookup
+    const songLots = {}
+    result.rows.forEach(row => {
+      songLots[row.sku_root] = row.lot_name || 'No Lot'
+    })
+
+    res.json({ ok: true, songLots })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
 })
 
 app.get('/api/b2/list-buckets', async (req, res) => {
@@ -827,6 +1058,272 @@ app.post('/api/b2/list-files', async (req, res) => {
     if (result.status === 200) return res.json({ ok: true, files: result.body.files || [], nextFileName: result.body.nextFileName })
     res.json({ ok: false, error: result.body?.message || `HTTP ${result.status}` })
   } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// DATABASE AUDIT: Query mix_stems for all b2_keys and check file sizes in B2
+app.get('/api/b2/db-audit', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
+
+  try {
+    const client = await pgPool.connect()
+    // Get ALL b2_keys to get total count
+    const countResult = await client.query(`SELECT COUNT(*) as cnt FROM mix_stems WHERE b2_key IS NOT NULL AND b2_key != ''`)
+    const totalCount = parseInt(countResult.rows[0].cnt)
+
+    // Sample strategy: first 1000 + random sample of remaining
+    const sampleSize = Math.min(2000, totalCount)
+    const result = await client.query(`
+      SELECT b2_key FROM mix_stems
+      WHERE b2_key IS NOT NULL AND b2_key != ''
+      ORDER BY RANDOM()
+      LIMIT $1
+    `, [sampleSize])
+    client.release()
+
+    const files = result.rows
+    console.log(`[b2/db-audit] Found ${files.length} files in mix_stems table`)
+
+    const realAudio = []
+    const stubs = []
+    const errors = []
+
+    // Check each file's size in B2 using HEAD request
+    let checked = 0
+    for (const file of files) {
+      try {
+        // URL-encode the path
+        const encodedPath = `/file/haus-music/${file.b2_key.split('/').map(p => encodeURIComponent(p)).join('/')}`
+        const headResult = await _b2Request({
+          method: 'HEAD', hostname: b2Auth.downloadUrl.replace(/^https?:\/\//, ''),
+          urlPath: encodedPath,
+          headers: { 'Authorization': b2Auth.authorizationToken }
+        })
+
+        // Get size from response headers
+        const size = headResult.headers?.['content-length']
+          ? parseInt(headResult.headers['content-length'])
+          : (headResult.body?.['content-length'] ? parseInt(headResult.body['content-length']) : 0)
+
+        if (checked < 5) {
+          console.log(`[b2/db-audit] File ${checked}: ${file.b2_key.substring(0, 50)}... status=${headResult.status} size=${size}`)
+        }
+        checked++
+
+        if (size < 1000 && size > 0) {
+          stubs.push({ name: file.b2_key, size })
+        } else if (size >= 1000000) {
+          realAudio.push({ name: file.b2_key, size })
+        }
+      } catch (e) {
+        if (errors.length < 10) {
+          console.log(`[b2/db-audit] Error checking ${file.b2_key}: ${e.message}`)
+          errors.push({ b2_key: file.b2_key, error: e.message })
+        }
+      }
+    }
+    console.log(`[b2/db-audit] Checked ${checked} files. Real: ${realAudio.length}, Stubs: ${stubs.length}, Errors: ${errors.length}`)
+
+    // Extrapolate results from sample to total
+    const avgRealAudioPercent = files.length > 0 ? (realAudio.length / files.length) : 0
+    const avgStubPercent = files.length > 0 ? (stubs.length / files.length) : 0
+    const estimatedRealAudio = Math.round(totalCount * avgRealAudioPercent)
+    const estimatedStubs = Math.round(totalCount * avgStubPercent)
+
+    res.json({
+      ok: true,
+      audit: {
+        totalTracked: totalCount,
+        sampledFiles: files.length,
+        realAudio: {
+          count: realAudio.length,
+          estimatedCount: estimatedRealAudio,
+          totalSize: realAudio.reduce((s, f) => s + f.size, 0),
+          avgSize: realAudio.length > 0 ? Math.round(realAudio.reduce((s, f) => s + f.size, 0) / realAudio.length) : 0,
+          examples: realAudio.slice(0, 5)
+        },
+        stubs: {
+          count: stubs.length,
+          estimatedCount: estimatedStubs,
+          totalSize: stubs.reduce((s, f) => s + f.size, 0),
+          details: stubs.slice(0, 50)
+        },
+        errors: errors.slice(0, 20)
+      }
+    })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// QUICK AUDIT: Check if B2 is authorized, then audit if it is
+app.get('/api/b2/quick-audit', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected. Click "Connect B2" in the app first.' })
+
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
+    console.log('[b2/quick-audit] apiUrl:', b2Auth.apiUrl)
+    console.log('[b2/quick-audit] apiHost:', apiHost)
+
+    // Get buckets to find haus-music
+    const bucketsParams = new URLSearchParams({ accountId: b2Auth.accountId })
+    const bucketsResult = await _b2Request({
+      method: 'GET', hostname: apiHost, urlPath: `/b2api/v3/b2_list_buckets?${bucketsParams}`,
+      headers: { 'Authorization': b2Auth.authorizationToken }
+    })
+
+    console.log('[b2/quick-audit] bucketsResult status:', bucketsResult.status)
+    console.log('[b2/quick-audit] bucketsResult body:', JSON.stringify(bucketsResult.body))
+
+    if (bucketsResult.status !== 200) {
+      return res.json({ ok: false, error: bucketsResult.body?.message || `HTTP ${bucketsResult.status}: ${JSON.stringify(bucketsResult.body)}` })
+    }
+
+    const hausBucket = bucketsResult.body.buckets.find(b => b.bucketName === 'haus-music')
+    if (!hausBucket) {
+      return res.json({ ok: false, error: 'haus-music bucket not found' })
+    }
+
+    // Now fetch from the audit endpoint internally
+    const bucketId = hausBucket.bucketId
+    const allFiles = []
+    let startFileName = null
+    let startFileId = null
+
+    // Paginate through all file versions
+    while (true) {
+      const params = new URLSearchParams({ bucketId, maxFileCount: 10000 })
+      if (startFileName) params.set('startFileName', startFileName)
+      if (startFileId) params.set('startFileId', startFileId)
+
+      const result = await _b2Request({
+        method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_versions?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+
+      if (result.status !== 200) {
+        return res.json({ ok: false, error: result.body?.message || `HTTP ${result.status}` })
+      }
+
+      // Only count latest version (hide=false or action=upload)
+      const latestFiles = (result.body.files || []).filter(f => !f.action || f.action === 'upload')
+      allFiles.push(...latestFiles)
+
+      if (!result.body.nextFileName) break
+      startFileName = result.body.nextFileName
+      startFileId = result.body.nextFileId || null
+    }
+
+    // Categorize by size
+    const stubs = allFiles.filter(f => f.size < 1000)
+    const realAudio = allFiles.filter(f => f.size >= 1000000)
+    const other = allFiles.filter(f => f.size >= 1000 && f.size < 1000000)
+
+    // List stub files for inspection
+    const stubDetails = stubs.map(f => ({
+      name: f.fileName,
+      size: f.size,
+      uploadTime: f.uploadTimestamp
+    }))
+
+    res.json({
+      ok: true,
+      audit: {
+        totalFiles: allFiles.length,
+        realAudio: {
+          count: realAudio.length,
+          totalSize: realAudio.reduce((s, f) => s + f.size, 0),
+          avgSize: realAudio.length > 0 ? Math.round(realAudio.reduce((s, f) => s + f.size, 0) / realAudio.length) : 0
+        },
+        stubs: {
+          count: stubs.length,
+          totalSize: stubs.reduce((s, f) => s + f.size, 0),
+          details: stubDetails.slice(0, 100) // First 100 stubs for inspection
+        },
+        other: {
+          count: other.length,
+          totalSize: other.reduce((s, f) => s + f.size, 0)
+        }
+      }
+    })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// AUDIT: List all files with sizes to detect stubs vs real audio
+app.get('/api/b2/audit', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'Not authorized' })
+  const { bucketId } = req.query
+  if (!bucketId) return res.json({ ok: false, error: 'bucketId required' })
+
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
+    const allFiles = []
+    let startFileName = null
+    let startFileId = null
+
+    // Paginate through all file versions
+    while (true) {
+      const params = new URLSearchParams({ bucketId, maxFileCount: 10000 })
+      if (startFileName) params.set('startFileName', startFileName)
+      if (startFileId) params.set('startFileId', startFileId)
+
+      const result = await _b2Request({
+        method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_versions?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+
+      if (result.status !== 200) {
+        return res.json({ ok: false, error: result.body?.message || `HTTP ${result.status}` })
+      }
+
+      // Only count latest version (hide=false)
+      const latestFiles = (result.body.files || []).filter(f => !f.action || f.action === 'upload')
+      allFiles.push(...latestFiles)
+
+      if (!result.body.nextFileName) break
+      startFileName = result.body.nextFileName
+      startFileId = result.body.nextFileId || null
+    }
+
+    // Categorize by size
+    const stubs = allFiles.filter(f => f.size < 1000)
+    const realAudio = allFiles.filter(f => f.size >= 1000000)
+    const other = allFiles.filter(f => f.size >= 1000 && f.size < 1000000)
+
+    // List stub files for inspection
+    const stubDetails = stubs.map(f => ({
+      name: f.fileName,
+      size: f.size,
+      uploadTime: f.uploadTimestamp
+    }))
+
+    res.json({
+      ok: true,
+      audit: {
+        totalFiles: allFiles.length,
+        realAudio: {
+          count: realAudio.length,
+          totalSize: realAudio.reduce((s, f) => s + f.size, 0),
+          avgSize: realAudio.length > 0 ? Math.round(realAudio.reduce((s, f) => s + f.size, 0) / realAudio.length) : 0
+        },
+        stubs: {
+          count: stubs.length,
+          totalSize: stubs.reduce((s, f) => s + f.size, 0),
+          details: stubDetails.slice(0, 100) // First 100 stubs for inspection
+        },
+        other: {
+          count: other.length,
+          totalSize: other.reduce((s, f) => s + f.size, 0)
+        }
+      }
+    })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
 })
 
 app.get('/api/b2/download-token', (req, res) => {
@@ -900,6 +1397,132 @@ app.post('/api/b2/download-file', async (req, res) => {
     res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
+
+// ─── B2 Rebuild Stem Keys (server-side) ───────────────────────────────────
+app.post('/api/b2/rebuild-stem-keys', async (req, res) => {
+  if (!b2Auth) return res.status(503).json({ error: 'B2 not authorized' })
+
+  let client = null
+  try {
+    // Create pooled connection for rebuild (pooler is better for concurrent connections)
+    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+    let connStr = process.env.DATABASE_URL
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      if (cfg.pgConn) connStr = cfg.pgConn
+    }
+    if (!connStr) throw new Error('No database connection string found')
+
+    const { Client } = require('pg')
+    console.log('[b2-rebuild] Using connection string:', connStr.slice(0, 50) + '...')
+    client = new Client({ connectionString: connStr, ssl: { rejectUnauthorized: false } })
+    await client.connect()
+    console.log('[b2-rebuild] Connected via pooled client')
+
+    const BATCH_SIZE = 100
+    let scanned = 0, updated = 0, errors = 0
+    let startFileName = null
+
+    console.log('[b2-rebuild] Starting scan of haus-music bucket…')
+    res.setHeader('Content-Type', 'application/json')
+    res.write('{"status":"Scanning B2 for audio files…","progress":0}\n')
+
+    // Paginate through all files in bucket
+    while (true) {
+      const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
+      // Get bucket ID from request or use hardcoded (should match your bucket)
+      const bucketId = req.body.bucketId || '707a97f6e032b16c9be50d1a'
+      const urlPath = `/b2api/v3/b2_list_file_versions?bucketId=${encodeURIComponent(bucketId)}&maxFileCount=10000${startFileName ? `&startFileName=${encodeURIComponent(startFileName)}` : ''}`
+
+      const result = await _b2Request({
+        method: 'GET',
+        hostname: apiHost,
+        urlPath,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+
+      if (result.status !== 200) {
+        console.error('[b2-rebuild] B2 list error:', result.status, result.body)
+        if (client) client.release()
+        return res.json({ ok: false, error: `B2 API error: ${result.status}` })
+      }
+
+      const files = result.body.files || []
+      if (!files.length) break
+
+      // Process files in batches
+      const batch = []
+      for (const f of files) {
+        if (!/\.(wav|mp3|aif|aiff)$/i.test(f.fileName)) continue
+        const fileName = f.fileName.split('/').pop()
+        if (!/^HAUS_/i.test(fileName)) continue
+
+        scanned++
+        batch.push({ b2Key: f.fileName, fileName })
+
+        if (batch.length >= BATCH_SIZE) {
+          const updateCount = await updateMixStemsBatch(client, batch)
+          updated += updateCount
+          batch.length = 0
+          res.write(`{"status":"Processed ${scanned} files, updated ${updated}…","progress":${Math.min(100, Math.round(scanned / 100))}}\n`)
+        }
+      }
+
+      // Process remaining batch
+      if (batch.length) {
+        const updateCount = await updateMixStemsBatch(client, batch)
+        updated += updateCount
+      }
+
+      // Check for next page
+      startFileName = result.body.nextFileName
+      if (!startFileName) break
+    }
+
+    console.log(`[b2-rebuild] Complete: scanned ${scanned}, updated ${updated}`)
+    res.write(`{"ok":true,"scanned":${scanned},"updated":${updated},"errors":${errors}}\n`)
+    res.end()
+  } catch (e) {
+    console.error('[b2-rebuild] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  } finally {
+    if (client) {
+      try {
+        await client.end()
+      } catch (e) {
+        console.error('[b2-rebuild] client close error:', e.message)
+      }
+    }
+  }
+})
+
+async function updateMixStemsBatch(pool, batch, retries = 3) {
+  if (!batch.length) return 0
+
+  let updated = 0
+  // Update one file at a time to avoid overwhelming Neon pool
+  for (const item of batch) {
+    for (let attempt = 1; attempt <= retries; attempt++) {
+      try {
+        const result = await pool.query(
+          `UPDATE mix_stems SET b2_key = $1 WHERE filename = $2 AND b2_key IS NULL RETURNING mix_stem_id`,
+          [item.b2Key, item.fileName]
+        )
+        if (result.rowCount) updated++
+        break  // Success, move to next file
+      } catch (e) {
+        if (attempt < retries) {
+          const delay = 500 * attempt
+          await new Promise(resolve => setTimeout(resolve, delay))
+        } else {
+          // After retries fail, skip this file and continue
+          console.error(`[b2-rebuild] failed to update ${item.fileName}: ${e.message}`)
+        }
+      }
+    }
+  }
+  return updated
+}
 
 // ─── Intake API ────────────────────────────────────────────────────────────
 
@@ -1282,6 +1905,39 @@ app.post('/api/db/migrate-client-ids', async (req, res) => {
   } catch (e) {
     res.json({ ok: false, error: e.message })
   }
+})
+
+// ─── Intake Draft Save/Load ────────────────────────────────────────────────
+const intakeDrafts = {} // In-memory store: { clientName_dropIndex: { clientName, dropIndex, dropName, formData, timestamp } }
+
+app.post('/api/intake/draft', (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { clientName, dropIndex, dropName, formData } = req.body
+  if (!clientName || dropIndex === undefined) return res.json({ ok: false, error: 'Missing clientName or dropIndex' })
+
+  const key = `${clientName}_${dropIndex}`
+  intakeDrafts[key] = {
+    clientName,
+    dropIndex,
+    dropName,
+    formData,
+    timestamp: Date.now()
+  }
+  console.log(`[intake/draft] Saved draft for ${clientName} drop ${dropIndex}`)
+  res.json({ ok: true, message: 'Draft saved' })
+})
+
+app.get('/api/intake/draft', (req, res) => {
+  // Return the most recent draft (typically the last one the user was working on)
+  const drafts = Object.values(intakeDrafts).sort((a, b) => b.timestamp - a.timestamp)
+  if (drafts.length === 0) return res.json(null)
+  res.json(drafts[0])
+})
+
+app.delete('/api/intake/draft/:key', (req, res) => {
+  const { key } = req.params
+  delete intakeDrafts[key]
+  res.json({ ok: true })
 })
 
 // ─── Start ─────────────────────────────────────────────────────────────────
