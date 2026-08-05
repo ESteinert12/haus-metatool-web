@@ -2,3 +2,19 @@ node_modules/
 .env
 *.log
 .DS_Store
+
+# Data files (work-in-progress, exports, backups)
+*.csv
+*.json
+*.bak
+*.xlsx
+
+# Temporary/debug files
+*.tmp
+*.temp
+*~
+
+# OS files
+Thumbs.db
+.vscode/
+.idea/
