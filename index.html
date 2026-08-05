@@ -1314,7 +1314,12 @@ let pgConnected = false
 let currentUser  = null  // { user_id, username, display_name }
 let hasUnsavedChanges = false  // Set to true when editing, false after save
 
-async function loadCfg() {
+// ─── LOTS Feature Modules ──────────────────────────────────────
+// Database helpers and functions for lot management
+// Note: Import order matters — lots-db.js must load before lots.js
+// If you remove these lines, copy the contents of lots-db.js and lots.js
+// directly into this script section in that order.
+
   try { const s = localStorage.getItem('haus-cfg'); if (s) cfg = { ...DEFAULT_CFG, ...JSON.parse(s) } } catch {}
   // Merge server-side canonical paths — overrides local cfg so all users share the same folders
   try {
