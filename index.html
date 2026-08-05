@@ -5555,55 +5555,61 @@ async function loadCatalogPG() {
   const countLabel = document.getElementById('track-count-label')
   if (countLabel) countLabel.textContent = 'Loading from database…'
   const badge = document.getElementById('pg-catalog-badge')
-  const rows = await pgQ(
-    `SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.description,
-            c.full_name,
-            pg.primary_genre_name,
-            sg.secondary_genre_name,
-            m1.mood_1_name,
-            l.lot_name
-     FROM titles t
-     LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
-     LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
-     LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
-     LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
-     LEFT JOIN lot_titles       lt  ON lt.sku_root           = t.sku_root
-     LEFT JOIN lots             l   ON l.lot_id              = lt.lot_id
-     WHERE COALESCE(t.status, 'active') = 'active'
-     ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
-  )
-  if (!rows) { if (countLabel) countLabel.textContent = 'DB error'; return }
-  allTracks = rows.map(r => ({
-    composerID:   r.composer_id           || '—',
-    composerName: r.full_name             || '',
-    title:        r.title,
-    key:          r.key                   || '—',
-    bpm:          r.bpm                   || null,
-    primaryGenre: r.primary_genre_name    || '',
-    subGenre:     r.secondary_genre_name  || '',
-    genre:        r.primary_genre_name
-                    ? (r.secondary_genre_name
-                        ? `${r.primary_genre_name}_${r.secondary_genre_name}`
-                        : r.primary_genre_name)
-                    : '—',
-    mood1:        r.mood_1_name           || '',
-    mood2:        '',  // simplified query — no longer loaded from DB
-    ksl:          '',  // simplified query — no longer loaded from DB
-    rmo:          '',  // simplified query — no longer loaded from DB
-    description:  r.description           || '',
-    mmw:          '',
-    sku:          r.sku_root              || '',
-    isJup:        false,
-    lot:          r.lot_name              || '',
-    dateAdded:    null,
-    titleId:      r.sku_root,
-    folder: '', path: '', files: [], versions: []
-  }))
-  if (badge) badge.textContent = '● DB'
-  if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
+  try {
+    const rows = await pgQ(
+      `SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.description,
+              c.full_name,
+              pg.primary_genre_name,
+              sg.secondary_genre_name,
+              m1.mood_1_name,
+              l.lot_name
+       FROM titles t
+       LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
+       LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
+       LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
+       LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
+       LEFT JOIN lot_titles       lt  ON lt.sku_root           = t.sku_root
+       LEFT JOIN lots             l   ON l.lot_id              = lt.lot_id
+       WHERE COALESCE(t.status, 'active') = 'active'
+       ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
+    )
+    if (!Array.isArray(rows)) {
+      console.error('[loadCatalogPG] failed to fetch rows')
+      if (countLabel) countLabel.textContent = 'DB error loading collection'
+      return
+    }
+    allTracks = rows.map(r => ({
+      composerID:   r.composer_id           || '—',
+      composerName: r.full_name             || '',
+      title:        r.title,
+      key:          r.key                   || '—',
+      bpm:          r.bpm                   || null,
+      primaryGenre: r.primary_genre_name    || '',
+      subGenre:     r.secondary_genre_name  || '',
+      genre:        r.primary_genre_name
+                      ? (r.secondary_genre_name
+                          ? `${r.primary_genre_name}_${r.secondary_genre_name}`
+                          : r.primary_genre_name)
+                      : '—',
+      mood1:        r.mood_1_name           || '',
+      mood2:        '',  // simplified query — no longer loaded from DB
+      ksl:          '',  // simplified query — no longer loaded from DB
+      rmo:          '',  // simplified query — no longer loaded from DB
+      description:  r.description           || '',
+      mmw:          '',
+      sku:          r.sku_root              || '',
+      isJup:        false,
+      lot:          r.lot_name              || '',
+      dateAdded:    null,
+      titleId:      r.sku_root,
+      folder: '', path: '', files: [], versions: []
+    }))
+    if (badge) badge.textContent = '● DB'
+    if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
+    console.log(`[loadCatalogPG] loaded ${allTracks.length} tracks`)
 
-  // Load secondary data (mood2, ksl, rmo) async in background
-  loadCollectionSecondaryData(rows)
+    // Load secondary data (mood2, ksl, rmo) async in background
+    loadCollectionSecondaryData(rows)
 
   // Only update catalog UI if we're in the catalog section
   if (document.getElementById('track-count-label')) {
@@ -5631,6 +5637,10 @@ async function loadCatalogPG() {
     if (_prevMood)  { const el = document.getElementById('catalog-mood-filter');       if (el) el.value = _prevMood }
     if (_prevKsl)   { const el = document.getElementById('catalog-ksl-filter');        if (el) el.value = _prevKsl }
     filterTracks(_prevQ)
+  }
+  } catch (e) {
+    console.error(`[loadCatalogPG] exception: ${e.message}`)
+    if (countLabel) countLabel.textContent = `DB error: ${e.message}`
   }
 }
 
@@ -6288,72 +6298,115 @@ async function exportCatalogCSV() {
 
 // Load mood2/ksl/rmo data asynchronously after main Collection is displayed
 async function loadCollectionSecondaryData(rows) {
-  if (!rows || !rows.length) return
-  const skus = rows.map(r => r.sku_root)
+  try {
+    if (!Array.isArray(rows) || !rows.length) {
+      console.warn('[loadCollectionSecondaryData] rows not an array or empty')
+      return
+    }
+    const skus = rows.map(r => r.sku_root)
 
-  // Load all secondary data in parallel
-  const [mood2Map, kslMap, rmoMap] = await Promise.all([
-    loadMood2Map(skus),
-    loadKslMap(skus),
-    loadRmoMap(skus)
-  ])
+    // Load all secondary data in parallel
+    const [mood2Map, kslMap, rmoMap] = await Promise.all([
+      loadMood2Map(skus),
+      loadKslMap(skus),
+      loadRmoMap(skus)
+    ])
 
-  // Update allTracks with secondary data
-  allTracks.forEach(track => {
-    if (mood2Map[track.sku]) track.mood2 = mood2Map[track.sku] || ''
-    if (kslMap[track.sku]) track.ksl = kslMap[track.sku] || ''
-    if (rmoMap[track.sku]) track.rmo = rmoMap[track.sku] || ''
-  })
+    // Verify maps are valid before updating
+    if (!mood2Map || !kslMap || !rmoMap) {
+      console.error('[loadCollectionSecondaryData] one or more maps failed to load')
+      return
+    }
 
-  // Refresh the displayed Collection to show updated data
-  renderTrackList(allTracks)
+    // Update allTracks with secondary data
+    allTracks.forEach(track => {
+      if (mood2Map[track.sku]) track.mood2 = mood2Map[track.sku] || ''
+      if (kslMap[track.sku]) track.ksl = kslMap[track.sku] || ''
+      if (rmoMap[track.sku]) track.rmo = rmoMap[track.sku] || ''
+    })
+
+    console.log('[loadCollectionSecondaryData] updated secondary data for ' + allTracks.length + ' tracks')
+    // Refresh the displayed Collection to show updated data (preserve label set by filterTracks)
+    if (currentDisplayTracks.length > 0) {
+      renderTrackList(currentDisplayTracks, true)  // skipLabelUpdate=true
+    }
+  } catch (e) {
+    console.error(`[loadCollectionSecondaryData] exception: ${e.message}`)
+  }
 }
 
 async function loadMood2Map(skus) {
-  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
-  const rows = await pgQ(
-    `SELECT t.sku_root, string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name) as mood2
-     FROM titles t
-     LEFT JOIN title_moods tm ON tm.sku_root = t.sku_root
-     LEFT JOIN moods mo ON mo.mood_id = tm.mood_id
-     WHERE t.sku_root IN (${placeholders})
-     GROUP BY t.sku_root`,
-    skus
-  )
-  const map = {}
-  rows?.forEach(r => { map[r.sku_root] = r.mood2 || '' })
-  return map
+  try {
+    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    const rows = await pgQ(
+      `SELECT t.sku_root, string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name) as mood2
+       FROM titles t
+       LEFT JOIN title_moods tm ON tm.sku_root = t.sku_root
+       LEFT JOIN moods mo ON mo.mood_id = tm.mood_id
+       WHERE t.sku_root IN (${placeholders})
+       GROUP BY t.sku_root`,
+      skus
+    )
+    const map = {}
+    if (Array.isArray(rows)) {
+      rows.forEach(r => { map[r.sku_root] = r.mood2 || '' })
+    } else {
+      console.error('[loadMood2Map] rows not an array')
+    }
+    return map
+  } catch (e) {
+    console.error(`[loadMood2Map] exception: ${e.message}`)
+    return {}
+  }
 }
 
 async function loadKslMap(skus) {
-  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
-  const rows = await pgQ(
-    `SELECT t.sku_root, string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name) as ksl
-     FROM titles t
-     LEFT JOIN ksl k ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
-     WHERE t.sku_root IN (${placeholders})
-     GROUP BY t.sku_root`,
-    skus
-  )
-  const map = {}
-  rows?.forEach(r => { map[r.sku_root] = r.ksl || '' })
-  return map
+  try {
+    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    const rows = await pgQ(
+      `SELECT t.sku_root, string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name) as ksl
+       FROM titles t
+       LEFT JOIN ksl k ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
+       WHERE t.sku_root IN (${placeholders})
+       GROUP BY t.sku_root`,
+      skus
+    )
+    const map = {}
+    if (Array.isArray(rows)) {
+      rows.forEach(r => { map[r.sku_root] = r.ksl || '' })
+    } else {
+      console.error('[loadKslMap] rows not an array')
+    }
+    return map
+  } catch (e) {
+    console.error(`[loadKslMap] exception: ${e.message}`)
+    return {}
+  }
 }
 
 async function loadRmoMap(skus) {
-  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
-  const rows = await pgQ(
-    `SELECT t.sku_root, string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name) as rmo
-     FROM titles t
-     LEFT JOIN title_rmo tr ON tr.sku_root = t.sku_root
-     LEFT JOIN rmo r ON r.rmo_id = tr.rmo_id
-     WHERE t.sku_root IN (${placeholders})
-     GROUP BY t.sku_root`,
-    skus
-  )
-  const map = {}
-  rows?.forEach(r => { map[r.sku_root] = r.rmo || '' })
-  return map
+  try {
+    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    const rows = await pgQ(
+      `SELECT t.sku_root, string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name) as rmo
+       FROM titles t
+       LEFT JOIN title_rmo tr ON tr.sku_root = t.sku_root
+       LEFT JOIN rmo r ON r.rmo_id = tr.rmo_id
+       WHERE t.sku_root IN (${placeholders})
+       GROUP BY t.sku_root`,
+      skus
+    )
+    const map = {}
+    if (Array.isArray(rows)) {
+      rows.forEach(r => { map[r.sku_root] = r.rmo || '' })
+    } else {
+      console.error('[loadRmoMap] rows not an array')
+    }
+    return map
+  } catch (e) {
+    console.error(`[loadRmoMap] exception: ${e.message}`)
+    return {}
+  }
 }
 
 async function loadCatalogFM() {
@@ -6407,11 +6460,17 @@ async function loadCatalogFiles() {
   renderTrackList(allTracks)
 }
 
-function renderTrackList(tracks) {
-  currentDisplayTracks = tracks
-  document.getElementById('track-count-label').textContent = `${tracks.length} tracks`
+function renderTrackList(tracks, skipLabelUpdate = false) {
+  // Render only up to CATALOG_DISPLAY_LIMIT to prevent UI freeze
+  const displayTracks = tracks.slice(0, CATALOG_DISPLAY_LIMIT)
+  const total = tracks.length
+
+  currentDisplayTracks = tracks  // Keep full list for filtering
+
   const list = document.getElementById('track-list')
-  list.innerHTML = tracks.map((t, i) => {
+  if (!list) return
+
+  list.innerHTML = displayTracks.map((t, i) => {
     const sku = t.sku || t.titleId || ''
     const flagged = flaggedSkus.has(sku)
     const inPlaylist = activePlaylistSkus.has(sku)
@@ -6431,6 +6490,16 @@ function renderTrackList(tracks) {
       </button>
     </div>`
   }).join('')
+
+  // Only update label if not called from filterTracks() which manages its own label
+  if (!skipLabelUpdate) {
+    const label = document.getElementById('track-count-label')
+    if (label) {
+      label.textContent = total > CATALOG_DISPLAY_LIMIT
+        ? `Showing ${CATALOG_DISPLAY_LIMIT.toLocaleString()} of ${total.toLocaleString()} — refine filters`
+        : `${total.toLocaleString()} track${total !== 1 ? 's' : ''}`
+    }
+  }
 }
 
 let flaggedSkus = new Set(JSON.parse(localStorage.getItem('haus_flagged_skus') || '[]'))
@@ -6438,11 +6507,23 @@ let activePlaylistSkus = new Set()   // tracks already in the currently-targeted
 let activePlaylistName = ''          // for the catalog indicator label
 
 async function loadActivePlaylistSkus(playlistId, playlistName) {
-  activePlaylistName = playlistName || ''
-  if (!playlistId) { activePlaylistSkus = new Set(); updatePlaylistIndicator(); return }
-  const rows = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [playlistId])
-  activePlaylistSkus = new Set((rows || []).map(r => r.sku_root))
-  updatePlaylistIndicator()
+  try {
+    activePlaylistName = playlistName || ''
+    if (!playlistId) { activePlaylistSkus = new Set(); updatePlaylistIndicator(); return }
+    const rows = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [playlistId])
+    if (!Array.isArray(rows)) {
+      console.error(`[loadActivePlaylistSkus] failed to load tracks for playlist ${playlistId}`)
+      activePlaylistSkus = new Set()
+    } else {
+      activePlaylistSkus = new Set(rows.map(r => r.sku_root))
+    }
+    console.log(`[loadActivePlaylistSkus] loaded ${activePlaylistSkus.size} tracks for playlist ${playlistId}`)
+    updatePlaylistIndicator()
+  } catch (e) {
+    console.error(`[loadActivePlaylistSkus] exception: ${e.message}`)
+    activePlaylistSkus = new Set()
+    updatePlaylistIndicator()
+  }
 }
 
 function updatePlaylistIndicator() {
@@ -6895,8 +6976,7 @@ function filterTracks(q) {
     )
 
     const total   = filtered.length
-    const display = filtered.slice(0, CATALOG_DISPLAY_LIMIT)
-    renderTrackList(display)
+    renderTrackList(filtered, true)  // skipLabelUpdate=true, we manage label below
 
     const label = document.getElementById('track-count-label')
     if (label) {
