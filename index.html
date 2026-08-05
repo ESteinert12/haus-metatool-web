@@ -2016,7 +2016,7 @@ async function pgQ(sql, params, retries = 2) {
   if (!pgConnected) return null
   for (let i = 0; i <= retries; i++) {
     try {
-      const r = await window.haus.pg.query(sql, params)
+      const r = await pgQ(sql, params)
       if (!r.ok) {
         if (i < retries && (r.error?.includes('ECONNRESET') || r.error?.includes('terminated'))) {
           await new Promise(resolve => setTimeout(resolve, 500))  // Wait 500ms before retry
@@ -3619,16 +3619,9 @@ async function loadClientsSection() {
   }
 }
 
-function renderClientsSection() {
-  if (!_allClients || _allClients.length === 0) {
-    document.getElementById('clients-sidebar-list').innerHTML = '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No clients yet</div>'
-    return
-  }
-
-  const hideInactive = document.getElementById('clients-show-inactive')?.checked
-  const filtered = hideInactive ? _allClients.filter(c => c.active) : _allClients
-
-  document.getElementById('clients-sidebar-list').innerHTML = filtered.map(c => `
+// ── Client List Helpers (DRY) ────────────────────────────
+function renderClientItemsHTML(clients) {
+  return clients.map(c => `
     <div class="client-item${currentClientId === c.id ? ' client-active' : ''}" data-clientid="${c.id}" id="client-${c.id}"
       style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;flex-direction:column;gap:3px">
       <div style="font-size:13px;font-weight:500;color:#1a2226">${c.name}</div>
@@ -3636,17 +3629,41 @@ function renderClientsSection() {
       <div style="font-size:10px;color:#5a6b70">${[c.city, c.state, c.country].filter(Boolean).join(', ')}</div>
     </div>
   `).join('')
+}
 
-  // Wire up click handlers
-  document.querySelectorAll('.client-item').forEach(row => {
-    row.addEventListener('mouseenter', () => {
-      if (!row.classList.contains('client-active')) row.style.background = '#8FAF9B'
+function attachClientListHandlers() {
+  // Attach event handlers WITHOUT creating new listeners each render
+  const sidebar = document.getElementById('clients-sidebar-list')
+  if (sidebar) {
+    sidebar.addEventListener('mouseenter', (e) => {
+      if (e.target.closest('.client-item') && !e.target.closest('.client-item').classList.contains('client-active')) {
+        e.target.closest('.client-item').style.background = '#8FAF9B'
+      }
+    }, true)
+    sidebar.addEventListener('mouseleave', (e) => {
+      if (e.target.closest('.client-item') && !e.target.closest('.client-item').classList.contains('client-active')) {
+        e.target.closest('.client-item').style.background = ''
+      }
+    }, true)
+    sidebar.addEventListener('click', (e) => {
+      const item = e.target.closest('.client-item')
+      if (item) selectClient(parseInt(item.dataset.clientid))
     })
-    row.addEventListener('mouseleave', () => {
-      if (!row.classList.contains('client-active')) row.style.background = ''
-    })
-    row.addEventListener('click', () => selectClient(parseInt(row.dataset.clientid)))
-  })
+  }
+}
+
+function renderClientsSection() {
+  const list = document.getElementById('clients-sidebar-list')
+  if (!_allClients || _allClients.length === 0) {
+    list.innerHTML = '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No clients yet</div>'
+    return
+  }
+
+  const hideInactive = document.getElementById('clients-show-inactive')?.checked
+  const filtered = hideInactive ? _allClients.filter(c => c.active) : _allClients
+
+  list.innerHTML = renderClientItemsHTML(filtered)
+  attachClientListHandlers()
 }
 
 function filterClientsList() {
@@ -3655,24 +3672,9 @@ function filterClientsList() {
   const hideInactive = document.getElementById('clients-show-inactive')?.checked
   const finalFiltered = hideInactive ? filtered.filter(c => c.active) : filtered
 
-  document.getElementById('clients-sidebar-list').innerHTML = finalFiltered.map(c => `
-    <div class="client-item${currentClientId === c.id ? ' client-active' : ''}" data-clientid="${c.id}" id="client-${c.id}"
-      style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;flex-direction:column;gap:3px">
-      <div style="font-size:13px;font-weight:500;color:#1a2226">${c.name}</div>
-      ${c.contact ? `<div style="font-size:11px;color:#5a6b70">${c.contact}</div>` : ''}
-      <div style="font-size:10px;color:#5a6b70">${[c.city, c.state, c.country].filter(Boolean).join(', ')}</div>
-    </div>
-  `).join('')
-
-  document.querySelectorAll('.client-item').forEach(row => {
-    row.addEventListener('mouseenter', () => {
-      if (!row.classList.contains('client-active')) row.style.background = '#8FAF9B'
-    })
-    row.addEventListener('mouseleave', () => {
-      if (!row.classList.contains('client-active')) row.style.background = ''
-    })
-    row.addEventListener('click', () => selectClient(parseInt(row.dataset.clientid)))
-  })
+  const list = document.getElementById('clients-sidebar-list')
+  list.innerHTML = finalFiltered.length ? renderClientItemsHTML(finalFiltered) : '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No results</div>'
+  attachClientListHandlers()
 }
 
 async function selectClient(clientId) {
@@ -4336,7 +4338,7 @@ async function loadComposers() {
     '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-muted)">Loading…</td></tr>'
   await pgQ(`ALTER TABLE composers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`).catch(() => {})
   await pgQ(`UPDATE composers SET is_active = TRUE WHERE is_active IS NULL`).catch(() => {})
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     'SELECT composer_id, first_name, last_name, full_name, pro, ipi_number, location, status, is_jup, middle_name, notes, date_added, is_active FROM composers ORDER BY composer_id',
     []
   )
@@ -4414,7 +4416,7 @@ async function toggleComposerActive(composerId) {
   const c = _allComposers.find(x => x.composer_id === composerId)
   if (!c) return
   const newVal = c.is_active === false ? true : false
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `UPDATE composers SET is_active = $1 WHERE composer_id = $2`, [newVal, composerId]
   )
   if (r.ok) {
@@ -4492,13 +4494,13 @@ async function saveComposer() {
 
   let r
   if (isNew) {
-    r = await window.haus.pg.query(
+    r = await pgQ(
       `INSERT INTO composers (composer_id, first_name, last_name, middle_name, full_name, pro, ipi_number, location, status, is_jup, notes, date_added)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`,
       [cid, first, last, middle||null, fullName, pro||null, ipi||null, location||null, status, isJup, notes||null]
     )
   } else {
-    r = await window.haus.pg.query(
+    r = await pgQ(
       `UPDATE composers SET first_name=$1, last_name=$2, middle_name=$3, full_name=$4, pro=$5, ipi_number=$6, location=$7, status=$8, is_jup=$9, notes=$10 WHERE composer_id=$11`,
       [first, last, middle||null, fullName, pro||null, ipi||null, location||null, status, isJup, notes||null, cid]
     )
@@ -4557,11 +4559,11 @@ async function refreshTeamsPanel(composerId) {
 
   // Keep co-writer cache fresh for autocomplete
   if (!_cwCache.length) {
-    const cwR = await window.haus.pg.query(`SELECT cowriter_name, pro, ipi FROM cowriters ORDER BY cowriter_name`)
+    const cwR = await pgQ(`SELECT cowriter_name, pro, ipi FROM cowriters ORDER BY cowriter_name`)
     if (cwR.ok) _cwCache = cwR.rows || []
   }
 
-  const teamsR = await window.haus.pg.query(
+  const teamsR = await pgQ(
     `SELECT t.*, d.name AS deal_name FROM teams t LEFT JOIN deals d ON d.deal_id = t.deal_id WHERE t.composer_prefix = $1 ORDER BY t.composer_full_id`,
     [composerId]
   )
@@ -4573,7 +4575,7 @@ async function refreshTeamsPanel(composerId) {
   const teams = teamsR.rows || []
   let writers = []
   if (teams.length) {
-    const wR = await window.haus.pg.query(
+    const wR = await pgQ(
       `SELECT * FROM team_writers WHERE team_id = ANY($1::varchar[]) ORDER BY team_id, id`,
       [teams.map(t => t.team_id)]
     )
@@ -4704,7 +4706,7 @@ async function showAddTeamForm(composerId) {
   f.style.display = 'block'
 
   // Auto-detect next letter suffix from existing teams
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `SELECT composer_full_id FROM teams WHERE composer_prefix = $1`, [composerId]
   )
   const existing = (r.ok ? r.rows : []).map(row => row.composer_full_id || '')
@@ -4740,11 +4742,11 @@ async function saveNewTeam(composerId) {
   const dealId  = dealRaw ? parseInt(dealRaw) : null
 
   // Auto-generate next TM number
-  const maxR = await window.haus.pg.query(`SELECT MAX(CAST(SUBSTRING(team_id FROM 3) AS INTEGER)) AS mx FROM teams WHERE team_id ~ '^TM[0-9]+$'`)
+  const maxR = await pgQ(`SELECT MAX(CAST(SUBSTRING(team_id FROM 3) AS INTEGER)) AS mx FROM teams WHERE team_id ~ '^TM[0-9]+$'`)
   const nextNum = ((maxR.ok && maxR.rows[0]?.mx) || 0) + 1
   const teamId = 'TM' + String(nextNum).padStart(4, '0')
 
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `INSERT INTO teams (team_id, composer_prefix, composer_full_id, status, registered_date, is_jup, has_cowriters, deal_id)
      VALUES ($1, $2, $3, 'COMPLETE', $4, $5, false, $6)`,
     [teamId, composerId, fullId, date || null, isJup, dealId]
@@ -4752,12 +4754,12 @@ async function saveNewTeam(composerId) {
   if (!r.ok) { alert('Error saving team: ' + r.error); return }
 
   // Auto-add primary composer as first writer
-  const cR = await window.haus.pg.query(
+  const cR = await pgQ(
     `SELECT full_name, pro, ipi_number FROM composers WHERE composer_id = $1 LIMIT 1`, [composerId]
   )
   if (cR.ok && cR.rows.length) {
     const c = cR.rows[0]
-    await window.haus.pg.query(
+    await pgQ(
       `INSERT INTO team_writers (team_id, writer_name, pro, ipi, is_jup) VALUES ($1, $2, $3, $4, $5)`,
       [teamId, c.full_name, c.pro || null, c.ipi_number || null, isJup]
     )
@@ -4775,20 +4777,20 @@ async function saveTeamWriter(teamId, composerId) {
 
   if (!name) { alert('Writer name is required.'); return }
 
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `INSERT INTO team_writers (team_id, writer_name, pro, split_pct, is_jup, ipi) VALUES ($1, $2, $3, $4, $5, $6)`,
     [teamId, name, pro || null, split ? parseFloat(split) : null, isJup, ipi]
   )
   if (!r.ok) { alert('Error adding cowriter: ' + r.error); return }
 
   // Upsert into cowriters table so they appear in the co-writers roster
-  await window.haus.pg.query(
+  await pgQ(
     `INSERT INTO cowriters (cowriter_name, pro, ipi) VALUES ($1, $2, $3)
      ON CONFLICT (cowriter_name) DO UPDATE SET pro=EXCLUDED.pro, ipi=COALESCE(EXCLUDED.ipi, cowriters.ipi)`,
     [name, pro || null, ipi || null]
   )
 
-  await window.haus.pg.query(
+  await pgQ(
     `UPDATE teams SET has_cowriters = true WHERE team_id = $1`,
     [teamId]
   )
@@ -4802,7 +4804,7 @@ async function editTeamWriter(writerId, composerId, currentSplit, currentPro, cu
   if (pro === null) return
   const ipi = prompt('IPI:', currentIpi)
   if (ipi === null) return
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `UPDATE team_writers SET split_pct=$1, pro=$2, ipi=$3 WHERE id=$4`,
     [split !== '' ? parseFloat(split) : null, pro || null, ipi || null, writerId]
   )
@@ -4812,7 +4814,7 @@ async function editTeamWriter(writerId, composerId, currentSplit, currentPro, cu
 
 async function removeTeamWriter(writerId, composerId) {
   if (!confirm('Remove this cowriter?')) return
-  const r = await window.haus.pg.query(`DELETE FROM team_writers WHERE id = $1`, [writerId])
+  const r = await pgQ(`DELETE FROM team_writers WHERE id = $1`, [writerId])
   if (!r.ok) { alert('Error: ' + r.error); return }
   await refreshTeamsPanel(composerId)
 }
@@ -7196,7 +7198,7 @@ function addMetapak(i) {
     const tag = document.createElement('span')
     tag.dataset.tag = phrase
     tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:var(--accent);color:#fff;padding:3px 10px;border-radius:20px;font-size:12px'
-    tag.innerHTML = `${esc(phrase)} <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">&times;</button>`
+    tag.innerHTML = `${esc(phrase)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">&times;</button>`
     container.appendChild(tag)
   }
   markUnsavedChanges()
@@ -7214,7 +7216,7 @@ function addMmwPhrase(i) {
   const tag = document.createElement('span')
   tag.dataset.tag = phrase
   tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:var(--bg2);color:var(--text1);padding:3px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)'
-  tag.innerHTML = `${esc(phrase)} <button onclick="this.parentElement.remove()" style="background:none;border:none;cursor:pointer;padding:0;font-size:14px;line-height:1;color:var(--text2)">&times;</button>`
+  tag.innerHTML = `${esc(phrase)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;cursor:pointer;padding:0;font-size:14px;line-height:1;color:var(--text2)">&times;</button>`
   container.appendChild(tag)
   markUnsavedChanges()
 }
@@ -7241,7 +7243,7 @@ function addIntakeMoodTag(i) {
   const tag = document.createElement('span')
   tag.dataset.tag = name
   tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--accent);color:#fff;border-radius:20px;font-size:12px'
-  tag.innerHTML = `${esc(name)} <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">×</button>`
+  tag.innerHTML = `${esc(name)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">×</button>`
   container.appendChild(tag)
   inp.value = ''
   markUnsavedChanges()
@@ -8468,10 +8470,9 @@ function collectIntakeFormData(i) {
 
 function autoSaveIntakeDraft(i) {
   const data = collectIntakeFormData(i)
+  const meta = getIntakeMeta(i)
   const draft = {
-    clientName: window.intakeClient || 'unknown',
-    dropIndex: i,
-    dropName: window.intakeDrops?.[i]?.name || `Drop ${i + 1}`,
+    ...meta,
     formData: data,
     timestamp: Date.now()
   }
@@ -8496,22 +8497,32 @@ function enableIntakeFormTracking(i) {
   fieldIds.forEach(id => {
     const el = document.getElementById(id)
     if (el) {
-      el.addEventListener('change', () => {
-        markUnsavedChanges()
-      })
-      el.addEventListener('input', () => {
-        markUnsavedChanges()
+      ['change', 'input'].forEach(event => {
+        el.addEventListener(event, markUnsavedChanges)
       })
     }
   })
 }
 
+// ── Intake Helper Functions ──────────────────────────────
+function getIntakeMeta(i) {
+  return {
+    clientName: window.intakeClient || 'unknown',
+    dropName: window.intakeDrops?.[i]?.name || `Drop ${i + 1}`,
+    dropIndex: i
+  }
+}
+
+function removeIntakeTag(btn) {
+  btn.parentElement.remove()
+  markUnsavedChanges()
+}
+
 async function saveDraftToDatabase(i) {
   const data = collectIntakeFormData(i)
+  const meta = getIntakeMeta(i)
   const draft = {
-    clientName: window.intakeClient || 'unknown',
-    dropIndex: i,
-    dropName: window.intakeDrops?.[i]?.name || `Drop ${i + 1}`,
+    ...meta,
     formData: data,
     timestamp: new Date().toISOString()
   }
