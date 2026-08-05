@@ -12391,17 +12391,39 @@ async function deleteProject(id) {
 
 async function createPlaylist(projectId) {
   hausPrompt('Playlist name:', async name => {
-    if (!name || !name.trim()) return
-    await pgQ('INSERT INTO playlists (project_id, name) VALUES ($1,$2)', [projectId, name.trim()])
-    loadPlaylistsForProject(projectId)
+    try {
+      if (!name || !name.trim()) return
+      const r = await pgQ('INSERT INTO playlists (project_id, name) VALUES ($1,$2)', [projectId, name.trim()])
+      if (!Array.isArray(r)) {
+        console.error('[createPlaylist] INSERT failed')
+        alert('Error creating playlist')
+        return
+      }
+      console.log(`[createPlaylist] created playlist "${name.trim()}" in project ${projectId}`)
+      loadPlaylistsForProject(projectId)
+    } catch (e) {
+      console.error(`[createPlaylist] exception: ${e.message}`)
+      alert(`Error creating playlist: ${e.message}`)
+    }
   })
 }
 
 async function deletePlaylist(id) {
   hausConfirm('Delete this playlist?', async () => {
-    await pgQ('DELETE FROM playlists WHERE id=$1', [id])
-    if (currentPlaylistId === id) { currentPlaylistId = null; clearPlaylistPane() }
-    if (currentProjectId) loadPlaylistsForProject(currentProjectId)
+    try {
+      const r = await pgQ('DELETE FROM playlists WHERE id=$1', [id])
+      if (!Array.isArray(r)) {
+        console.error(`[deletePlaylist] DELETE failed for playlist ${id}`)
+        alert('Error deleting playlist')
+        return
+      }
+      console.log(`[deletePlaylist] deleted playlist ${id}`)
+      if (currentPlaylistId === id) { currentPlaylistId = null; clearPlaylistPane() }
+      if (currentProjectId) loadPlaylistsForProject(currentProjectId)
+    } catch (e) {
+      console.error(`[deletePlaylist] exception: ${e.message}`)
+      alert(`Error deleting playlist: ${e.message}`)
+    }
   })
 }
 
@@ -12417,43 +12439,55 @@ function clearPlaylistPane() {
 }
 
 async function selectProjectLot(lotId) {
-  currentLotId = lotId
-  currentPlaylistId = null
-  document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
-  document.querySelectorAll('.proj-lot-item').forEach(el => el.classList.remove('plt-active'))
-  document.getElementById(`proj-lot-${lotId}`)?.classList.add('plt-active')
-  document.getElementById('playlist-add-btn').style.display = 'none'
-  document.getElementById('playlist-export-btn').style.display = 'none'
-  document.getElementById('playlist-avid-btn').style.display = 'none'
+  try {
+    currentLotId = lotId
+    currentPlaylistId = null
+    document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
+    document.querySelectorAll('.proj-lot-item').forEach(el => el.classList.remove('plt-active'))
+    document.getElementById(`proj-lot-${lotId}`)?.classList.add('plt-active')
+    document.getElementById('playlist-add-btn').style.display = 'none'
+    document.getElementById('playlist-export-btn').style.display = 'none'
+    document.getElementById('playlist-avid-btn').style.display = 'none'
 
-  const [lotRows, trackRows] = await Promise.all([
-    pgQ('SELECT lot_name, sent_date, notes FROM lots WHERE lot_id=$1', [lotId]),
-    pgQ(`SELECT lt.sku_root, t.title, t.bpm, t.key, t.composer_id, t.vocals,
-               c.full_name AS composer_name,
-               pg.primary_genre_name AS genre,
-               sg.secondary_genre_name AS sub_genre
-         FROM lot_titles lt
-         JOIN titles t ON t.sku_root = lt.sku_root
-         LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-         LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-         WHERE lt.lot_id = $1
-         ORDER BY lt.added_at, lt.sku_root`, [lotId])
-  ])
+    const [lotRows, trackRows] = await Promise.all([
+      pgQ('SELECT lot_name, sent_date, notes FROM lots WHERE lot_id=$1', [lotId]),
+      pgQ(`SELECT lt.sku_root, t.title, t.bpm, t.key, t.composer_id, t.vocals,
+                 c.full_name AS composer_name,
+                 pg.primary_genre_name AS genre,
+                 sg.secondary_genre_name AS sub_genre
+           FROM lot_titles lt
+           JOIN titles t ON t.sku_root = lt.sku_root
+           LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+           LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+           LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+           WHERE lt.lot_id = $1
+           ORDER BY lt.added_at, lt.sku_root`, [lotId])
+    ])
 
-  const lot = lotRows?.[0]
-  playlistTracks = (trackRows || []).map(r => ({ ...r, _isLotTrack: true }))
-  playlistCurrentIdx = -1
+    if (!Array.isArray(lotRows) || !Array.isArray(trackRows)) {
+      console.error(`[selectProjectLot] failed to load lot ${lotId}: lotRows=${Array.isArray(lotRows)}, trackRows=${Array.isArray(trackRows)}`)
+      alert('Error loading lot tracks')
+      return
+    }
 
-  const countEl = document.getElementById('playlist-track-count')
-  if (countEl) {
-    const badge = lot?.sent_date
-      ? `<span style="background:#4a7c5930;color:#4a7c59;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Sent ${String(lot.sent_date).slice(0,10)}</span>`
-      : `<span style="background:#c17a5e20;color:#c17a5e;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Open</span>`
-    countEl.innerHTML = `<span style="font-weight:600">${lot?.lot_name||'Lot'}</span> · ${playlistTracks.length} tracks${badge}`
+    const lot = lotRows?.[0]
+    playlistTracks = (trackRows || []).map(r => ({ ...r, _isLotTrack: true }))
+    playlistCurrentIdx = -1
+
+    const countEl = document.getElementById('playlist-track-count')
+    if (countEl) {
+      const badge = lot?.sent_date
+        ? `<span style="background:#4a7c5930;color:#4a7c59;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Sent ${String(lot.sent_date).slice(0,10)}</span>`
+        : `<span style="background:#c17a5e20;color:#c17a5e;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Open</span>`
+      countEl.innerHTML = `<span style="font-weight:600">${lot?.lot_name||'Lot'}</span> · ${playlistTracks.length} tracks${badge}`
+    }
+
+    console.log(`[selectProjectLot] loaded ${playlistTracks.length} tracks for lot ${lotId}`)
+    renderPlaylistTrackList()
+  } catch (e) {
+    console.error(`[selectProjectLot] exception: ${e.message}`)
+    alert(`Error loading lot: ${e.message}`)
   }
-
-  renderPlaylistTrackList()
 }
 
 function showLotCtxMenu(e, lotId, lotName, projId) {
@@ -12469,29 +12503,40 @@ function showLotCtxMenu(e, lotId, lotName, projId) {
 }
 
 async function selectPlaylist(id) {
-  currentPlaylistId = id
-  document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
-  document.getElementById(`pl-${id}`)?.classList.add('active')
-  document.getElementById('playlist-add-btn').style.display = ''
-  document.getElementById('playlist-export-btn').style.display = ''
-  document.getElementById('playlist-avid-btn').style.display = ''
-  const rows = await pgQ(`
-    SELECT pt.id as pt_id, pt.position, pt.sku_root,
-           t.title, t.bpm, t.key, t.composer_id,
-           c.full_name as composer_name,
-           pg.primary_genre_name AS genre,
-           sg.secondary_genre_name AS sub_genre
-    FROM playlist_tracks pt
-    JOIN titles t ON t.sku_root = pt.sku_root
-    LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-    LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-    LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-    WHERE pt.playlist_id = $1
-    ORDER BY pt.position, pt.id
-  `, [id])
-  playlistTracks = rows || []
-  playlistCurrentIdx = -1
-  renderPlaylistTrackList()
+  try {
+    currentPlaylistId = id
+    document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
+    document.getElementById(`pl-${id}`)?.classList.add('active')
+    document.getElementById('playlist-add-btn').style.display = ''
+    document.getElementById('playlist-export-btn').style.display = ''
+    document.getElementById('playlist-avid-btn').style.display = ''
+    const rows = await pgQ(`
+      SELECT pt.id as pt_id, pt.position, pt.sku_root,
+             t.title, t.bpm, t.key, t.composer_id,
+             c.full_name as composer_name,
+             pg.primary_genre_name AS genre,
+             sg.secondary_genre_name AS sub_genre
+      FROM playlist_tracks pt
+      JOIN titles t ON t.sku_root = pt.sku_root
+      LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+      WHERE pt.playlist_id = $1
+      ORDER BY pt.position, pt.id
+    `, [id])
+    if (!Array.isArray(rows)) {
+      console.error(`[selectPlaylist] failed to load tracks for playlist ${id}`)
+      alert('Error loading playlist tracks')
+      return
+    }
+    playlistTracks = rows
+    playlistCurrentIdx = -1
+    console.log(`[selectPlaylist] loaded playlist ${id} with ${playlistTracks.length} tracks`)
+    renderPlaylistTrackList()
+  } catch (e) {
+    console.error(`[selectPlaylist] exception: ${e.message}`)
+    alert(`Error loading playlist: ${e.message}`)
+  }
 }
 
 function renderPlaylistTrackList() {
@@ -12545,7 +12590,13 @@ async function selectPlaylistTrack(idx) {
   `
   // Auto-advance to next track when current ends
   const audio = document.getElementById('playlist-detail-audio')
-  if (audio) audio.addEventListener('ended', () => selectPlaylistTrack(idx+1), {once:true})
+  if (audio) {
+    // Remove any previous 'ended' listeners to prevent accumulation
+    const newAudio = audio.cloneNode(true)
+    audio.parentNode?.replaceChild(newAudio, audio)
+    const freshAudio = document.getElementById('playlist-detail-audio')
+    if (freshAudio) freshAudio.addEventListener('ended', () => selectPlaylistTrack(idx+1), {once:true})
+  }
   
   // Load B2 audio
   if (b2Connected && b2DownloadUrl) {
@@ -12813,37 +12864,64 @@ function renderAddTracksList(tracks) {
 }
 
 async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
-  if (!currentPlaylistId) return
-  const ex = window._addTracksExisting
-  if (ex?.has(skuRoot)) return
-  const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
-  const pos = maxRes?.[0]?.next || 1
-  await pgQ('INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1,$2,$3) ON CONFLICT (playlist_id,sku_root) DO NOTHING', [currentPlaylistId, skuRoot, pos])
-  ex?.add(skuRoot)
-  const btn = rowEl?.querySelector('button')
-  if (btn) { btn.textContent='Added'; btn.style.opacity='0.4'; btn.disabled=true; btn.style.pointerEvents='none' }
-  // Refresh track list in background
-  const rows = await pgQ(`
-    SELECT pt.id as pt_id, pt.position, pt.sku_root,
-           t.title, t.bpm, t.key,
-           c.full_name as composer_name,
-           CASE WHEN pg.primary_genre_name IS NOT NULL AND sg.secondary_genre_name IS NOT NULL
-                THEN pg.primary_genre_name || '_' || sg.secondary_genre_name
-                WHEN pg.primary_genre_name IS NOT NULL THEN pg.primary_genre_name
-                ELSE '' END as genre
-    FROM playlist_tracks pt
-    JOIN titles t ON t.sku_root = pt.sku_root
-    LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-    LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-    LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-    WHERE pt.playlist_id = $1
-    ORDER BY pt.position, pt.id
-  `, [currentPlaylistId])
-  playlistTracks = rows || []
-  renderPlaylistTrackList()
-  // Update sidebar with simplified track data
-  const sidebarData = (rows || []).map(r => ({ title: r.title, composerName: r.composer_name, composerId: r.composer_id }))
-  updatePlaylistSidebar(sidebarData)
+  try {
+    if (!currentPlaylistId) return
+    const ex = window._addTracksExisting
+    if (ex?.has(skuRoot)) return
+
+    // Get next position
+    const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
+    if (!Array.isArray(maxRes)) {
+      console.error(`[addTrackToCurrentPlaylist] failed to fetch max position for playlist ${currentPlaylistId}`)
+      alert('Error adding track')
+      return
+    }
+    const pos = maxRes?.[0]?.next || 1
+
+    // Insert track
+    const insertRes = await pgQ('INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1,$2,$3) ON CONFLICT (playlist_id,sku_root) DO NOTHING', [currentPlaylistId, skuRoot, pos])
+    if (!Array.isArray(insertRes)) {
+      console.error(`[addTrackToCurrentPlaylist] INSERT failed for ${skuRoot} in playlist ${currentPlaylistId}`)
+      alert('Error adding track to playlist')
+      return
+    }
+
+    // Only update UI if INSERT succeeded
+    ex?.add(skuRoot)
+    const btn = rowEl?.querySelector('button')
+    if (btn) { btn.textContent='Added'; btn.style.opacity='0.4'; btn.disabled=true; btn.style.pointerEvents='none' }
+
+    // Refresh track list in background
+    const rows = await pgQ(`
+      SELECT pt.id as pt_id, pt.position, pt.sku_root,
+             t.title, t.bpm, t.key,
+             c.full_name as composer_name,
+             CASE WHEN pg.primary_genre_name IS NOT NULL AND sg.secondary_genre_name IS NOT NULL
+                  THEN pg.primary_genre_name || '_' || sg.secondary_genre_name
+                  WHEN pg.primary_genre_name IS NOT NULL THEN pg.primary_genre_name
+                  ELSE '' END as genre
+      FROM playlist_tracks pt
+      JOIN titles t ON t.sku_root = pt.sku_root
+      LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+      WHERE pt.playlist_id = $1
+      ORDER BY pt.position, pt.id
+    `, [currentPlaylistId])
+    if (!Array.isArray(rows)) {
+      console.error(`[addTrackToCurrentPlaylist] failed to refresh playlist ${currentPlaylistId}`)
+      return
+    }
+    playlistTracks = rows
+    renderPlaylistTrackList()
+    // Update sidebar with simplified track data
+    const sidebarData = rows.map(r => ({ title: r.title, composerName: r.composer_name, composerId: r.composer_id }))
+    updatePlaylistSidebar(sidebarData)
+    console.log(`[addTrackToCurrentPlaylist] added ${skuRoot} to playlist ${currentPlaylistId}`)
+  } catch (e) {
+    console.error(`[addTrackToCurrentPlaylist] exception: ${e.message}`)
+    alert(`Error adding track: ${e.message}`)
+  }
 }
 
 
@@ -12858,21 +12936,24 @@ async function showAddToPlaylistModal(skuRoot) {
     if (alreadyIn) { showQuickToast('Already in playlist'); return }
 
     try {
-      console.log('[fast-add] currentPlaylistId:', currentPlaylistId, 'skuRoot:', skuRoot, 'type:', typeof skuRoot)
+      // Get next position
       const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
+      if (!Array.isArray(maxRes)) {
+        console.error('[fast-add] failed to fetch max position')
+        showQuickToast('Error: could not get position')
+        return
+      }
       const pos = maxRes?.[0]?.next || 1
-      console.log('[fast-add] max position:', pos, 'playlist_id type:', typeof currentPlaylistId)
 
-      // Try insert with detailed error reporting
-      const insertSql = `INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1, $2, $3)`
-      console.log('[fast-add] About to INSERT:', insertSql, 'params:', [currentPlaylistId, skuRoot, pos])
-      const result = await pgQ(insertSql, [currentPlaylistId, skuRoot, pos])
-      console.log('[fast-add] Insert result:', result, 'for sku:', skuRoot, 'playlist:', currentPlaylistId)
-
-      if (!result) {
-        console.warn('[fast-add] Insert returned null - may have failed silently')
+      // Insert track into playlist
+      const result = await pgQ(`INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1, $2, $3)`, [currentPlaylistId, skuRoot, pos])
+      if (!Array.isArray(result)) {
+        console.error(`[fast-add] INSERT failed for ${skuRoot}`)
+        showQuickToast(`Error: could not add track`)
+        return
       }
 
+      // Only update local state if INSERT succeeded
       activePlaylistSkus.add(skuRoot)
       const safeId = skuRoot.replace(/[^a-zA-Z0-9]/g,'_')
       const row = document.getElementById('track-row-' + safeId)
@@ -12880,6 +12961,7 @@ async function showAddToPlaylistModal(skuRoot) {
       const countEl = document.getElementById('playlist-indicator-count')
       if (countEl) { const n = activePlaylistSkus.size; countEl.textContent = `${n} track${n !== 1 ? 's' : ''}` }
       showQuickToast(`Added to ${activePlaylistName}`)
+      console.log(`[fast-add] added ${skuRoot} to playlist ${currentPlaylistId}`)
 
       // Update sidebar in real-time with the new track
       const updatedTracks = await pgQ(`
@@ -12889,8 +12971,11 @@ async function showAddToPlaylistModal(skuRoot) {
         LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR LENGTH(t.composer_id)-1)
         WHERE pt.playlist_id = $1
         ORDER BY t.title
-      `, [currentPlaylistId]).catch(() => [])
-      if (updatedTracks) {
+      `, [currentPlaylistId]).catch(e => {
+        console.error('[fast-add] failed to update sidebar:', e.message)
+        return []
+      })
+      if (Array.isArray(updatedTracks) && updatedTracks.length) {
         updatePlaylistSidebar(updatedTracks)
       }
 
@@ -12902,30 +12987,35 @@ async function showAddToPlaylistModal(skuRoot) {
           JOIN titles t ON t.sku_root = pt.sku_root
           WHERE pt.playlist_id = $1
           ORDER BY t.title
-        `, [window._currentPlaylistId]).catch(() => [])
-        const tracks = trackData || []
-        const detailDiv = document.getElementById('clients-detail')
-        if (detailDiv) {
-          const tracksList = detailDiv.querySelector('div[id*="track"]') || detailDiv.firstElementChild?.querySelector('div')
-          if (tracksList) {
-            tracksList.innerHTML = tracks.length > 0 ? tracks.map((t, i) => `
-              <div style="padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);font-size:12px">
-                <div style="font-weight:500;margin-bottom:4px">${i + 1}. ${t.title}</div>
-                <div style="color:var(--text3);font-size:11px">${t.key || '—'}</div>
-              </div>
-            `).join('') : '<div style="font-size:12px;color:var(--text3);padding:16px;text-align:center;background:var(--bg2);border-radius:6px">No tracks in this playlist</div>'
+        `, [window._currentPlaylistId]).catch(e => {
+          console.error('[fast-add] failed to fetch track data:', e.message)
+          return []
+        })
+        const tracks = Array.isArray(trackData) ? trackData : []
+        if (tracks.length > 0) {
+          const detailDiv = document.getElementById('clients-detail')
+          if (detailDiv) {
+            const tracksList = detailDiv.querySelector('div[id*="track"]') || detailDiv.firstElementChild?.querySelector('div')
+            if (tracksList) {
+              tracksList.innerHTML = tracks.map((t, i) => `
+                <div style="padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);font-size:12px">
+                  <div style="font-weight:500;margin-bottom:4px">${i + 1}. ${t.title}</div>
+                  <div style="color:var(--text3);font-size:11px">${t.key || '—'}</div>
+                </div>
+              `).join('')
+            }
           }
         }
       }
     } catch (err) {
-      console.error('[fast-add] Error adding track:', err)
+      console.error('[fast-add] exception:', err.message)
       showQuickToast(`Error: ${err.message}`)
     }
     return
   }
 
   const projects = await pgQ('SELECT id, name FROM projects ORDER BY name')
-  if (!projects || !projects.length) { alert('No projects yet — create one in the Projects section first.'); return }
+  if (!Array.isArray(projects) || !projects.length) { alert('No projects yet — create one in the Projects section first.'); return }
 
   const modal = document.createElement('div')
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;display:flex;align-items:center;justify-content:center'
