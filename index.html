@@ -1504,6 +1504,7 @@ async function doLogin() {
   if (!username || !password) { errEl.textContent = 'Enter your username and password.'; errEl.style.display = 'block'; return }
   if (!pgConnected) { errEl.textContent = 'Database not connected yet — please wait.'; errEl.style.display = 'block'; return }
   btn.disabled = true; btn.textContent = 'Signing in…'
+  // NOTE: window.haus.auth.login() returns {ok, error, user} — NOT a pgQ array format
   const r = await window.haus.auth.login(username, password)
   btn.disabled = false; btn.textContent = 'Sign In'
   if (!r.ok) { errEl.textContent = r.error || 'Login failed.'; errEl.style.display = 'block'; return }
@@ -1919,6 +1920,8 @@ let b2Connected = false
 let b2BucketId  = ''
 let b2DownloadUrl = ''
 
+// NOTE: B2/Backblaze API responses use {ok, error, downloadUrl} format
+// NOT pgQ arrays — do NOT change to Array.isArray()
 async function b2AutoConnect() {
   const keyId  = cfg.b2KeyId  || DEFAULT_CFG.b2KeyId
   const appKey = cfg.b2AppKey || DEFAULT_CFG.b2AppKey
@@ -2012,30 +2015,36 @@ async function b2UploadFile(localPath, b2Name) {
 }
 
 // ─── PostgreSQL helpers ─────────────────────────────────────
-async function pgQ(sql, params, retries = 2) {
-  if (!pgConnected) return null
+async function pgQ(sql, params = [], retries = 2) {
+  if (!pgConnected) return []
   for (let i = 0; i <= retries; i++) {
     try {
-      const r = await window.haus.pg.query(sql, params)
-      if (!r.ok) {
-        if (i < retries && (r.error?.includes('ECONNRESET') || r.error?.includes('terminated'))) {
-          await new Promise(resolve => setTimeout(resolve, 500))  // Wait 500ms before retry
+      const r = await fetch('/api/pg/query', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sql, params })
+      })
+      const data = await r.json()
+
+      if (!data.ok) {
+        if (i < retries && (data.error?.includes('ECONNRESET') || data.error?.includes('terminated'))) {
+          await new Promise(resolve => setTimeout(resolve, 500))
           continue
         }
-        console.error('pg error:', r.error)
-        return null
+        console.error('[pgQ] error:', data.error)
+        return []
       }
-      return r.rows
+      return data.rows || []
     } catch (e) {
       if (i < retries && (e.message?.includes('ECONNRESET') || e.message?.includes('terminated'))) {
         await new Promise(resolve => setTimeout(resolve, 500))
         continue
       }
-      console.error('pg error:', e.message)
-      return null
+      console.error('[pgQ] error:', e.message)
+      return []
     }
   }
-  return null
+  return []
 }
 
 async function loadLots(lotType, clientName) {
@@ -2269,40 +2278,41 @@ function filterLotsList() {
 }
 
 async function selectLot(lotId) {
-  // Highlight sidebar row
-  document.querySelectorAll('.lots-sidebar-row').forEach(r => {
-    r.classList.remove('active-lot')
-    r.style.background = ''
-  })
-  const activeRow = document.querySelector(`.lots-sidebar-row[data-lot-id="${lotId}"]`)
-  if (activeRow) { activeRow.classList.add('active-lot'); activeRow.style.background = '#E7F0EA'; activeRow.style.color = '#1a1a1a' }
+  try {
+    // Highlight sidebar row
+    document.querySelectorAll('.lots-sidebar-row').forEach(r => {
+      r.classList.remove('active-lot')
+      r.style.background = ''
+    })
+    const activeRow = document.querySelector(`.lots-sidebar-row[data-lot-id="${lotId}"]`)
+    if (activeRow) { activeRow.classList.add('active-lot'); activeRow.style.background = '#E7F0EA'; activeRow.style.color = '#1a1a1a' }
 
-  const detail = document.getElementById('lots-detail')
-  detail.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px">Loading…</div>'
+    const detail = document.getElementById('lots-detail')
+    detail.innerHTML = '<div style="color:var(--text3);font-size:12px;padding:20px">Loading…</div>'
 
-  const [metaRows, trackRows, clientRows, projectRows] = await Promise.all([
-    pgQ(`SELECT * FROM lots WHERE lot_id=$1`, [lotId]),
-    pgQ(`
-      SELECT t.sku_root, t.title, t.key, t.vocals, t.bpm, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
-      FROM lot_titles lt
-      JOIN titles t ON t.sku_root = lt.sku_root
-        OR (length(lt.sku_root) = 7 AND t.sku_root LIKE lt.sku_root || '_')
-      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
-      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-      WHERE lt.lot_id = $1
-      ORDER BY lt.added_at DESC
-    `, [lotId]),
-    pgQ(`SELECT * FROM clients WHERE active = true ORDER BY name`),
-    pgQ(`SELECT id, client_id, name FROM projects ORDER BY name`)
-  ])
-  const lot = metaRows?.[0]
-  const activeClients = clientRows || []
-  const allProjects = projectRows || []
-  if (!lot) { detail.innerHTML = '<div style="color:var(--text3)">Lot not found.</div>'; return }
+    const [metaRows, trackRows, clientRows, projectRows] = await Promise.all([
+      pgQ(`SELECT * FROM lots WHERE lot_id=$1`, [lotId]).catch(() => []),
+      pgQ(`
+        SELECT t.sku_root, t.title, t.key, t.vocals, t.bpm, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name, pg.primary_genre_name, sg.secondary_genre_name
+        FROM lot_titles lt
+        JOIN titles t ON t.sku_root = lt.sku_root
+          OR (length(lt.sku_root) = 7 AND t.sku_root LIKE lt.sku_root || '_')
+        LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR 3)
+        LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+        LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+        WHERE lt.lot_id = $1
+        ORDER BY lt.added_at DESC
+      `, [lotId]).catch(() => []),
+      pgQ(`SELECT * FROM clients WHERE active = true ORDER BY name`).catch(() => []),
+      pgQ(`SELECT id, client_id, name FROM projects ORDER BY name`).catch(() => [])
+    ])
+    const lot = metaRows?.[0]
+    const activeClients = clientRows || []
+    const allProjects = projectRows || []
+    if (!lot) { detail.innerHTML = '<div style="color:var(--text3)">Lot not found.</div>'; return }
 
-  const tracks = trackRows || []
-  detail.innerHTML = `
+    const tracks = trackRows || []
+    detail.innerHTML = `
     <div style="max-width:680px">
       <div style="background:#C0C9CD;padding:16px;border-radius:8px;margin-bottom:20px">
         <div style="font-size:20px;font-weight:700;margin-bottom:4px;color:#1a2226">${esc(lot.lot_name)}</div>
@@ -2372,8 +2382,13 @@ async function selectLot(lotId) {
     </div>
   `
 
-  // Initialize project list filtering
-  setTimeout(() => updateLotProjectList(), 0)
+    // Initialize project list filtering
+    setTimeout(() => updateLotProjectList(), 0)
+  } catch (e) {
+    console.error('[selectLot] error loading lot:', e.message)
+    const detail = document.getElementById('lots-detail')
+    if (detail) detail.innerHTML = `<div style="color:var(--red);padding:20px">Error loading lot: ${e.message}</div>`
+  }
 }
 
 async function exportAvidComments(lotId, lotName) {
@@ -3619,16 +3634,9 @@ async function loadClientsSection() {
   }
 }
 
-function renderClientsSection() {
-  if (!_allClients || _allClients.length === 0) {
-    document.getElementById('clients-sidebar-list').innerHTML = '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No clients yet</div>'
-    return
-  }
-
-  const hideInactive = document.getElementById('clients-show-inactive')?.checked
-  const filtered = hideInactive ? _allClients.filter(c => c.active) : _allClients
-
-  document.getElementById('clients-sidebar-list').innerHTML = filtered.map(c => `
+// ── Client List Helpers (DRY) ────────────────────────────
+function renderClientItemsHTML(clients) {
+  return clients.map(c => `
     <div class="client-item${currentClientId === c.id ? ' client-active' : ''}" data-clientid="${c.id}" id="client-${c.id}"
       style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;flex-direction:column;gap:3px">
       <div style="font-size:13px;font-weight:500;color:#1a2226">${c.name}</div>
@@ -3636,17 +3644,41 @@ function renderClientsSection() {
       <div style="font-size:10px;color:#5a6b70">${[c.city, c.state, c.country].filter(Boolean).join(', ')}</div>
     </div>
   `).join('')
+}
 
-  // Wire up click handlers
-  document.querySelectorAll('.client-item').forEach(row => {
-    row.addEventListener('mouseenter', () => {
-      if (!row.classList.contains('client-active')) row.style.background = '#8FAF9B'
+function attachClientListHandlers() {
+  // Attach event handlers WITHOUT creating new listeners each render
+  const sidebar = document.getElementById('clients-sidebar-list')
+  if (sidebar) {
+    sidebar.addEventListener('mouseenter', (e) => {
+      if (e.target.closest('.client-item') && !e.target.closest('.client-item').classList.contains('client-active')) {
+        e.target.closest('.client-item').style.background = '#8FAF9B'
+      }
+    }, true)
+    sidebar.addEventListener('mouseleave', (e) => {
+      if (e.target.closest('.client-item') && !e.target.closest('.client-item').classList.contains('client-active')) {
+        e.target.closest('.client-item').style.background = ''
+      }
+    }, true)
+    sidebar.addEventListener('click', (e) => {
+      const item = e.target.closest('.client-item')
+      if (item) selectClient(parseInt(item.dataset.clientid))
     })
-    row.addEventListener('mouseleave', () => {
-      if (!row.classList.contains('client-active')) row.style.background = ''
-    })
-    row.addEventListener('click', () => selectClient(parseInt(row.dataset.clientid)))
-  })
+  }
+}
+
+function renderClientsSection() {
+  const list = document.getElementById('clients-sidebar-list')
+  if (!_allClients || _allClients.length === 0) {
+    list.innerHTML = '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No clients yet</div>'
+    return
+  }
+
+  const hideInactive = document.getElementById('clients-show-inactive')?.checked
+  const filtered = hideInactive ? _allClients.filter(c => c.active) : _allClients
+
+  list.innerHTML = renderClientItemsHTML(filtered)
+  attachClientListHandlers()
 }
 
 function filterClientsList() {
@@ -3655,24 +3687,9 @@ function filterClientsList() {
   const hideInactive = document.getElementById('clients-show-inactive')?.checked
   const finalFiltered = hideInactive ? filtered.filter(c => c.active) : filtered
 
-  document.getElementById('clients-sidebar-list').innerHTML = finalFiltered.map(c => `
-    <div class="client-item${currentClientId === c.id ? ' client-active' : ''}" data-clientid="${c.id}" id="client-${c.id}"
-      style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;flex-direction:column;gap:3px">
-      <div style="font-size:13px;font-weight:500;color:#1a2226">${c.name}</div>
-      ${c.contact ? `<div style="font-size:11px;color:#5a6b70">${c.contact}</div>` : ''}
-      <div style="font-size:10px;color:#5a6b70">${[c.city, c.state, c.country].filter(Boolean).join(', ')}</div>
-    </div>
-  `).join('')
-
-  document.querySelectorAll('.client-item').forEach(row => {
-    row.addEventListener('mouseenter', () => {
-      if (!row.classList.contains('client-active')) row.style.background = '#8FAF9B'
-    })
-    row.addEventListener('mouseleave', () => {
-      if (!row.classList.contains('client-active')) row.style.background = ''
-    })
-    row.addEventListener('click', () => selectClient(parseInt(row.dataset.clientid)))
-  })
+  const list = document.getElementById('clients-sidebar-list')
+  list.innerHTML = finalFiltered.length ? renderClientItemsHTML(finalFiltered) : '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No results</div>'
+  attachClientListHandlers()
 }
 
 async function selectClient(clientId) {
@@ -4336,16 +4353,16 @@ async function loadComposers() {
     '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-muted)">Loading…</td></tr>'
   await pgQ(`ALTER TABLE composers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`).catch(() => {})
   await pgQ(`UPDATE composers SET is_active = TRUE WHERE is_active IS NULL`).catch(() => {})
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     'SELECT composer_id, first_name, last_name, full_name, pro, ipi_number, location, status, is_jup, middle_name, notes, date_added, is_active FROM composers ORDER BY composer_id',
     []
   )
-  if (!r.ok) {
+  if (!Array.isArray(r)) {
     document.getElementById('composers-tbody').innerHTML =
-      `<tr><td colspan="7" style="padding:20px;text-align:center;color:#e05">DB error: ${r.error}</td></tr>`
+      `<tr><td colspan="7" style="padding:20px;text-align:center;color:#e05">DB error loading composers</td></tr>`
     return
   }
-  _allComposers = r.rows || []
+  _allComposers = r
   filterComposers('')
 }
 
@@ -4414,10 +4431,10 @@ async function toggleComposerActive(composerId) {
   const c = _allComposers.find(x => x.composer_id === composerId)
   if (!c) return
   const newVal = c.is_active === false ? true : false
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `UPDATE composers SET is_active = $1 WHERE composer_id = $2`, [newVal, composerId]
   )
-  if (r.ok) {
+  if (Array.isArray(r)) {
     c.is_active = newVal
     filterComposers(document.getElementById('composers-search')?.value || '')
   }
@@ -4492,13 +4509,13 @@ async function saveComposer() {
 
   let r
   if (isNew) {
-    r = await window.haus.pg.query(
+    r = await pgQ(
       `INSERT INTO composers (composer_id, first_name, last_name, middle_name, full_name, pro, ipi_number, location, status, is_jup, notes, date_added)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,NOW())`,
       [cid, first, last, middle||null, fullName, pro||null, ipi||null, location||null, status, isJup, notes||null]
     )
   } else {
-    r = await window.haus.pg.query(
+    r = await pgQ(
       `UPDATE composers SET first_name=$1, last_name=$2, middle_name=$3, full_name=$4, pro=$5, ipi_number=$6, location=$7, status=$8, is_jup=$9, notes=$10 WHERE composer_id=$11`,
       [first, last, middle||null, fullName, pro||null, ipi||null, location||null, status, isJup, notes||null, cid]
     )
@@ -4507,8 +4524,9 @@ async function saveComposer() {
   btn.disabled = false
   btn.textContent = 'Save Composer'
 
-  if (!r.ok) {
-    errEl.textContent = r.error || 'Database error.'
+  // pgQ returns [] on error, so empty array means success for INSERT/UPDATE
+  if (!Array.isArray(r)) {
+    errEl.textContent = 'Database error.'
     errEl.style.display = 'block'
     return
   }
@@ -4557,27 +4575,27 @@ async function refreshTeamsPanel(composerId) {
 
   // Keep co-writer cache fresh for autocomplete
   if (!_cwCache.length) {
-    const cwR = await window.haus.pg.query(`SELECT cowriter_name, pro, ipi FROM cowriters ORDER BY cowriter_name`)
-    if (cwR.ok) _cwCache = cwR.rows || []
+    const cwR = await pgQ(`SELECT cowriter_name, pro, ipi FROM cowriters ORDER BY cowriter_name`)
+    if (cwR && cwR.length) _cwCache = cwR
   }
 
-  const teamsR = await window.haus.pg.query(
+  const teamsR = await pgQ(
     `SELECT t.*, d.name AS deal_name FROM teams t LEFT JOIN deals d ON d.deal_id = t.deal_id WHERE t.composer_prefix = $1 ORDER BY t.composer_full_id`,
     [composerId]
   )
-  if (!teamsR.ok) {
-    panel.innerHTML = `<div style="padding:14px 20px;color:#e05;font-size:13px">DB error: ${esc(teamsR.error)}</div>`
+  if (!Array.isArray(teamsR)) {
+    panel.innerHTML = `<div style="padding:14px 20px;color:#e05;font-size:13px">DB error loading teams</div>`
     return
   }
 
-  const teams = teamsR.rows || []
+  const teams = teamsR
   let writers = []
   if (teams.length) {
-    const wR = await window.haus.pg.query(
+    const wR = await pgQ(
       `SELECT * FROM team_writers WHERE team_id = ANY($1::varchar[]) ORDER BY team_id, id`,
       [teams.map(t => t.team_id)]
     )
-    if (wR.ok) writers = wR.rows || []
+    if (wR && wR.length) writers = wR
   }
 
   const byTeam = {}
@@ -4704,10 +4722,10 @@ async function showAddTeamForm(composerId) {
   f.style.display = 'block'
 
   // Auto-detect next letter suffix from existing teams
-  const r = await window.haus.pg.query(
+  const r = await pgQ(
     `SELECT composer_full_id FROM teams WHERE composer_prefix = $1`, [composerId]
   )
-  const existing = (r.ok ? r.rows : []).map(row => row.composer_full_id || '')
+  const existing = (r || []).map(row => row.composer_full_id || '')
   const letters = existing.map(id => id.replace(composerId, '').toLowerCase()).filter(s => /^[a-z]+$/.test(s))
   const lastLetter = letters.sort().pop() || ''
   const nextLetter = lastLetter
@@ -4733,132 +4751,192 @@ function showAddWriterForm(teamId) {
 }
 
 async function saveNewTeam(composerId) {
-  const fullId  = document.getElementById(`nt-full-id-${composerId}`).value.trim() || composerId
-  const date    = document.getElementById(`nt-date-${composerId}`).value
-  const isJup   = document.getElementById(`nt-jup-${composerId}`).checked
-  const dealRaw = document.getElementById(`nt-deal-${composerId}`)?.value
-  const dealId  = dealRaw ? parseInt(dealRaw) : null
+  try {
+    const fullId  = document.getElementById(`nt-full-id-${composerId}`).value.trim() || composerId
+    const date    = document.getElementById(`nt-date-${composerId}`).value
+    const isJup   = document.getElementById(`nt-jup-${composerId}`).checked
+    const dealRaw = document.getElementById(`nt-deal-${composerId}`)?.value
+    const dealId  = dealRaw ? parseInt(dealRaw) : null
 
-  // Auto-generate next TM number
-  const maxR = await window.haus.pg.query(`SELECT MAX(CAST(SUBSTRING(team_id FROM 3) AS INTEGER)) AS mx FROM teams WHERE team_id ~ '^TM[0-9]+$'`)
-  const nextNum = ((maxR.ok && maxR.rows[0]?.mx) || 0) + 1
-  const teamId = 'TM' + String(nextNum).padStart(4, '0')
+    // Auto-generate next TM number
+    const maxR = await pgQ(`SELECT MAX(CAST(SUBSTRING(team_id FROM 3) AS INTEGER)) AS mx FROM teams WHERE team_id ~ '^TM[0-9]+$'`)
+    if (!Array.isArray(maxR)) { console.error('[saveNewTeam] failed to fetch max team ID'); alert('Error saving team'); return }
+    const nextNum = ((maxR[0]?.mx) || 0) + 1
+    const teamId = 'TM' + String(nextNum).padStart(4, '0')
 
-  const r = await window.haus.pg.query(
-    `INSERT INTO teams (team_id, composer_prefix, composer_full_id, status, registered_date, is_jup, has_cowriters, deal_id)
-     VALUES ($1, $2, $3, 'COMPLETE', $4, $5, false, $6)`,
-    [teamId, composerId, fullId, date || null, isJup, dealId]
-  )
-  if (!r.ok) { alert('Error saving team: ' + r.error); return }
-
-  // Auto-add primary composer as first writer
-  const cR = await window.haus.pg.query(
-    `SELECT full_name, pro, ipi_number FROM composers WHERE composer_id = $1 LIMIT 1`, [composerId]
-  )
-  if (cR.ok && cR.rows.length) {
-    const c = cR.rows[0]
-    await window.haus.pg.query(
-      `INSERT INTO team_writers (team_id, writer_name, pro, ipi, is_jup) VALUES ($1, $2, $3, $4, $5)`,
-      [teamId, c.full_name, c.pro || null, c.ipi_number || null, isJup]
+    const r = await pgQ(
+      `INSERT INTO teams (team_id, composer_prefix, composer_full_id, status, registered_date, is_jup, has_cowriters, deal_id)
+       VALUES ($1, $2, $3, 'COMPLETE', $4, $5, false, $6)`,
+      [teamId, composerId, fullId, date || null, isJup, dealId]
     )
-  }
+    if (!Array.isArray(r)) { console.error('[saveNewTeam] team INSERT failed'); alert('Error saving team'); return }
 
-  await refreshTeamsPanel(composerId)
+    // Auto-add primary composer as first writer
+    const cR = await pgQ(
+      `SELECT full_name, pro, ipi_number FROM composers WHERE composer_id = $1 LIMIT 1`, [composerId]
+    )
+    if (Array.isArray(cR) && cR.length) {
+      const c = cR[0]
+      const wR = await pgQ(
+        `INSERT INTO team_writers (team_id, writer_name, pro, ipi, is_jup) VALUES ($1, $2, $3, $4, $5)`,
+        [teamId, c.full_name, c.pro || null, c.ipi_number || null, isJup]
+      )
+      if (!Array.isArray(wR)) {
+        console.error(`[saveNewTeam] team_writers INSERT failed for ${teamId}`)
+        // Team created but primary writer missing—log for manual correction
+      }
+    }
+
+    console.log(`[saveNewTeam] created team ${teamId} for ${composerId}`)
+    await refreshTeamsPanel(composerId)
+  } catch (e) {
+    console.error(`[saveNewTeam] exception: ${e.message}`)
+    alert(`Error saving team: ${e.message}`)
+  }
 }
 
 async function saveTeamWriter(teamId, composerId) {
-  const name  = document.getElementById(`wf-name-${teamId}`).value.trim()
-  const pro   = document.getElementById(`wf-pro-${teamId}`).value.trim()
-  const split = document.getElementById(`wf-split-${teamId}`).value
-  const isJup = document.getElementById(`wf-jup-${teamId}`).checked
-  const ipi   = document.getElementById(`wf-ipi-${teamId}`)?.value.trim() || null
+  try {
+    const name  = document.getElementById(`wf-name-${teamId}`).value.trim()
+    const pro   = document.getElementById(`wf-pro-${teamId}`).value.trim()
+    const split = document.getElementById(`wf-split-${teamId}`).value
+    const isJup = document.getElementById(`wf-jup-${teamId}`).checked
+    const ipi   = document.getElementById(`wf-ipi-${teamId}`)?.value.trim() || null
 
-  if (!name) { alert('Writer name is required.'); return }
+    if (!name) { alert('Writer name is required.'); return }
 
-  const r = await window.haus.pg.query(
-    `INSERT INTO team_writers (team_id, writer_name, pro, split_pct, is_jup, ipi) VALUES ($1, $2, $3, $4, $5, $6)`,
-    [teamId, name, pro || null, split ? parseFloat(split) : null, isJup, ipi]
-  )
-  if (!r.ok) { alert('Error adding cowriter: ' + r.error); return }
+    const r = await pgQ(
+      `INSERT INTO team_writers (team_id, writer_name, pro, split_pct, is_jup, ipi) VALUES ($1, $2, $3, $4, $5, $6)`,
+      [teamId, name, pro || null, split ? parseFloat(split) : null, isJup, ipi]
+    )
+    if (!Array.isArray(r)) { console.error(`[saveTeamWriter] team_writers INSERT failed for ${teamId}`); alert('Error adding cowriter'); return }
 
-  // Upsert into cowriters table so they appear in the co-writers roster
-  await window.haus.pg.query(
-    `INSERT INTO cowriters (cowriter_name, pro, ipi) VALUES ($1, $2, $3)
-     ON CONFLICT (cowriter_name) DO UPDATE SET pro=EXCLUDED.pro, ipi=COALESCE(EXCLUDED.ipi, cowriters.ipi)`,
-    [name, pro || null, ipi || null]
-  )
+    // Upsert into cowriters table so they appear in the co-writers roster
+    const cR = await pgQ(
+      `INSERT INTO cowriters (cowriter_name, pro, ipi) VALUES ($1, $2, $3)
+       ON CONFLICT (cowriter_name) DO UPDATE SET pro=EXCLUDED.pro, ipi=COALESCE(EXCLUDED.ipi, cowriters.ipi)`,
+      [name, pro || null, ipi || null]
+    )
+    if (!Array.isArray(cR)) console.error(`[saveTeamWriter] cowriters UPSERT failed for ${name}`)
 
-  await window.haus.pg.query(
-    `UPDATE teams SET has_cowriters = true WHERE team_id = $1`,
-    [teamId]
-  )
-  await refreshTeamsPanel(composerId)
+    const uR = await pgQ(
+      `UPDATE teams SET has_cowriters = true WHERE team_id = $1`,
+      [teamId]
+    )
+    if (!Array.isArray(uR)) console.error(`[saveTeamWriter] has_cowriters UPDATE failed for ${teamId}`)
+
+    console.log(`[saveTeamWriter] added ${name} to team ${teamId}`)
+    await refreshTeamsPanel(composerId)
+  } catch (e) {
+    console.error(`[saveTeamWriter] exception: ${e.message}`)
+    alert(`Error adding cowriter: ${e.message}`)
+  }
 }
 
 async function editTeamWriter(writerId, composerId, currentSplit, currentPro, currentIpi) {
-  const split = prompt('Split %:', currentSplit ?? '')
-  if (split === null) return
-  const pro = prompt('PRO:', currentPro)
-  if (pro === null) return
-  const ipi = prompt('IPI:', currentIpi)
-  if (ipi === null) return
-  const r = await window.haus.pg.query(
-    `UPDATE team_writers SET split_pct=$1, pro=$2, ipi=$3 WHERE id=$4`,
-    [split !== '' ? parseFloat(split) : null, pro || null, ipi || null, writerId]
-  )
-  if (!r.ok) { alert('Error: ' + r.error); return }
-  await refreshTeamsPanel(composerId)
+  try {
+    const split = prompt('Split %:', currentSplit ?? '')
+    if (split === null) return
+    const pro = prompt('PRO:', currentPro)
+    if (pro === null) return
+    const ipi = prompt('IPI:', currentIpi)
+    if (ipi === null) return
+    const r = await pgQ(
+      `UPDATE team_writers SET split_pct=$1, pro=$2, ipi=$3 WHERE id=$4`,
+      [split !== '' ? parseFloat(split) : null, pro || null, ipi || null, writerId]
+    )
+    if (!Array.isArray(r)) { console.error(`[editTeamWriter] UPDATE failed for writer ${writerId}`); alert('Error updating cowriter'); return }
+    console.log(`[editTeamWriter] updated writer ${writerId}`)
+    await refreshTeamsPanel(composerId)
+  } catch (e) {
+    console.error(`[editTeamWriter] exception: ${e.message}`)
+    alert(`Error updating cowriter: ${e.message}`)
+  }
 }
 
 async function removeTeamWriter(writerId, composerId) {
-  if (!confirm('Remove this cowriter?')) return
-  const r = await window.haus.pg.query(`DELETE FROM team_writers WHERE id = $1`, [writerId])
-  if (!r.ok) { alert('Error: ' + r.error); return }
-  await refreshTeamsPanel(composerId)
+  try {
+    if (!confirm('Remove this cowriter?')) return
+    const r = await pgQ(`DELETE FROM team_writers WHERE id = $1`, [writerId])
+    if (!Array.isArray(r)) { console.error(`[removeTeamWriter] DELETE failed for writer ${writerId}`); alert('Error removing cowriter'); return }
+    console.log(`[removeTeamWriter] removed writer ${writerId}`)
+    await refreshTeamsPanel(composerId)
+  } catch (e) {
+    console.error(`[removeTeamWriter] exception: ${e.message}`)
+    alert(`Error removing cowriter: ${e.message}`)
+  }
 }
 
 
 
 async function seedTeams() {
-  // Skip if teams already exist
-  const count = await pgQ('SELECT COUNT(*) as c FROM teams')
-  if (count && count[0]?.c > 0) { console.log('[seedTeams] skipped, teams already exist'); return }
+  try {
+    // Skip if teams already exist
+    const count = await pgQ('SELECT COUNT(*) as c FROM teams')
+    if (Array.isArray(count) && count[0]?.c > 0) { console.log('[seedTeams] skipped, teams already exist'); return }
+    if (!Array.isArray(count)) { console.error('[seedTeams] failed to check team count'); return }
 
-  const teams = [{"t":"TM1200","p":"R04","f":"R04b","j":false,"c":true},{"t":"TM1202","p":"R04","f":"R04c","j":false,"c":false},{"t":"TM1204","p":"R08","f":"R08a","j":false,"c":false},{"t":"TM1206","p":"R09","f":"R09a","j":false,"c":false},{"t":"TM1207","p":"R09","f":"R09b","j":false,"c":true},{"t":"TM1208","p":"R11","f":"R11a","j":false,"c":false},{"t":"TM1209","p":"R11","f":"R11b","j":false,"c":false},{"t":"TM1210","p":"R12","f":"R12a","j":false,"c":false},{"t":"TM1211","p":"R13","f":"R13a","j":false,"c":false},{"t":"TM1212","p":"R13","f":"R13b","j":false,"c":false},{"t":"TM1213","p":"R14","f":"R14a","j":false,"c":false},{"t":"TM1214","p":"R15","f":"R15a","j":false,"c":false},{"t":"TM1215","p":"R16","f":"R16a","j":false,"c":false},{"t":"TM1216","p":"R17","f":"R17a","j":false,"c":true},{"t":"TM1217","p":"R17","f":"R17b","j":false,"c":true},{"t":"TM1218","p":"R17","f":"R17c","j":false,"c":true},{"t":"TM1219","p":"R17","f":"R17d","j":false,"c":true},{"t":"TM1220","p":"R17","f":"R17h","j":false,"c":true},{"t":"TM1221","p":"R17","f":"R17i","j":false,"c":true},{"t":"TM1222","p":"R17","f":"R17j","j":false,"c":true},{"t":"TM1223","p":"R17","f":"R17k","j":false,"c":true},{"t":"TM1224","p":"R17","f":"R17m","j":false,"c":true},{"t":"TM1225","p":"R87","f":"R87a","j":false,"c":false},{"t":"TM1226","p":"R87","f":"R87b","j":false,"c":true},{"t":"TM1227","p":"R87","f":"R87c","j":false,"c":true},{"t":"TM1228","p":"R18","f":"R18a","j":false,"c":false},{"t":"TM1229","p":"R19","f":"R19a","j":false,"c":false},{"t":"TM1230","p":"R19","f":"R19b","j":false,"c":true},{"t":"TM1231","p":"R19","f":"R19c","j":false,"c":true},{"t":"TM1232","p":"R19","f":"R19d","j":false,"c":true},{"t":"TM1233","p":"R21","f":"R21a","j":false,"c":false},{"t":"TM1234","p":"R23","f":"R23a","j":false,"c":false},{"t":"TM1235","p":"R24","f":"R24a","j":false,"c":false},{"t":"TM1236","p":"R25","f":"R25a","j":false,"c":false},{"t":"TM1237","p":"R25","f":"R25b","j":false,"c":true},{"t":"TM1238","p":"R25","f":"R25c","j":false,"c":true},{"t":"TM1239","p":"R26","f":"R26a","j":false,"c":false},{"t":"TM1240","p":"R27","f":"R27a","j":false,"c":false},{"t":"TM1241","p":"R27","f":"R27b","j":false,"c":false},{"t":"TM1242","p":"R28","f":"R28a","j":false,"c":true},{"t":"TM1243","p":"R29","f":"R29a","j":false,"c":false},{"t":"TM1244","p":"R30","f":"R30a","j":false,"c":false},{"t":"TM1245","p":"R31","f":"R31a","j":false,"c":false},{"t":"TM1246","p":"R32","f":"R32a","j":false,"c":false},{"t":"TM1247","p":"R33","f":"R33a","j":false,"c":false},{"t":"TM1248","p":"R34","f":"R34a","j":false,"c":false},{"t":"TM1249","p":"R35","f":"R35a","j":false,"c":false},{"t":"TM1250","p":"R36","f":"R36a","j":false,"c":false},{"t":"TM1251","p":"R37","f":"R37a","j":false,"c":false},{"t":"TM1252","p":"R38","f":"R38a","j":false,"c":false},{"t":"TM1253","p":"R38","f":"R38b","j":false,"c":true},{"t":"TM1254","p":"R38","f":"R38c","j":false,"c":true},{"t":"TM1255","p":"R39","f":"R39a","j":false,"c":false},{"t":"TM1256","p":"R39","f":"R39b","j":false,"c":true},{"t":"TM1257","p":"R39","f":"R39c","j":false,"c":true},{"t":"TM1258","p":"R39","f":"R39d","j":false,"c":true},{"t":"TM1259","p":"R40","f":"R40a","j":false,"c":false},{"t":"TM1260","p":"R41","f":"R41a","j":false,"c":false},{"t":"TM1261","p":"R42","f":"R42a","j":false,"c":false},{"t":"TM1262","p":"R43","f":"R43a","j":false,"c":false},{"t":"TM1263","p":"R44","f":"R44a","j":false,"c":false},{"t":"TM1264","p":"R44","f":"R44b","j":false,"c":true},{"t":"TM1265","p":"R44","f":"R44c","j":false,"c":true},{"t":"TM1266","p":"R45","f":"R45a","j":false,"c":false},{"t":"TM1267","p":"R87","f":"R87d","j":false,"c":true},{"t":"TM1268","p":"R46","f":"R46a","j":false,"c":false},{"t":"TM1269","p":"R47","f":"R47a","j":false,"c":false},{"t":"TM1270","p":"R47","f":"R47b","j":false,"c":true},{"t":"TM1271","p":"R48","f":"R48a","j":false,"c":false},{"t":"TM1272","p":"R48","f":"R48b","j":false,"c":true},{"t":"TM1273","p":"R48","f":"R48d","j":false,"c":true},{"t":"TM1274","p":"R49","f":"R49a","j":false,"c":false},{"t":"TM1275","p":"R50","f":"R50a","j":false,"c":false},{"t":"TM1276","p":"R51","f":"R51a","j":false,"c":true},{"t":"TM1277","p":"R51","f":"R51b","j":false,"c":false},{"t":"TM1278","p":"R51","f":"R51c","j":false,"c":true},{"t":"TM1279","p":"R52","f":"R52a","j":false,"c":false},{"t":"TM1280","p":"R53","f":"R53a","j":false,"c":false},{"t":"TM1281","p":"R54","f":"R54a","j":false,"c":false},{"t":"TM1282","p":"R55","f":"R55a","j":false,"c":true},{"t":"TM1283","p":"R56","f":"R56a","j":false,"c":false},{"t":"TM1284","p":"R57","f":"R57a","j":false,"c":false},{"t":"TM1285","p":"R58","f":"R58a","j":false,"c":false},{"t":"TM1286","p":"R59","f":"R59a","j":false,"c":false},{"t":"TM1287","p":"R59","f":"R59b","j":false,"c":true},{"t":"TM1288","p":"R60","f":"R60a","j":false,"c":false},{"t":"TM1289","p":"R61","f":"R61a","j":false,"c":false},{"t":"TM1290","p":"R62","f":"R62a","j":false,"c":false},{"t":"TM1291","p":"R63","f":"R63a","j":false,"c":false},{"t":"TM1292","p":"R64","f":"R64a","j":false,"c":false},{"t":"TM1293","p":"R65","f":"R65a","j":false,"c":false},{"t":"TM1294","p":"R66","f":"R66a","j":false,"c":false},{"t":"TM1295","p":"R66","f":"R66b","j":false,"c":true},{"t":"TM1296","p":"R67","f":"R67a","j":false,"c":false},{"t":"TM1297","p":"R68","f":"R68a","j":false,"c":false},{"t":"TM1298","p":"R69","f":"R69a","j":false,"c":false},{"t":"TM1299","p":"R69","f":"R69b","j":false,"c":true},{"t":"TM1300","p":"R70","f":"R70a","j":false,"c":false},{"t":"TM1301","p":"R70","f":"R70b","j":false,"c":true},{"t":"TM1302","p":"R70","f":"R70c","j":false,"c":true},{"t":"TM1303","p":"R71","f":"R71a","j":false,"c":false},{"t":"TM1304","p":"R72","f":"R72a","j":false,"c":false},{"t":"TM1305","p":"R73","f":"R73a","j":false,"c":false},{"t":"TM1306","p":"R74","f":"R74a","j":false,"c":false},{"t":"TM1307","p":"R75","f":"R75a","j":false,"c":false},{"t":"TM1308","p":"R75","f":"R75b","j":false,"c":true},{"t":"TM1309","p":"R76","f":"R76a","j":false,"c":false},{"t":"TM1310","p":"R76","f":"R76b","j":false,"c":true},{"t":"TM1311","p":"R77","f":"R77a","j":false,"c":false},{"t":"TM1312","p":"R78","f":"R78a","j":false,"c":false},{"t":"TM1313","p":"R78","f":"R78b","j":false,"c":true},{"t":"TM1314","p":"R78","f":"R78c","j":false,"c":true},{"t":"TM1315","p":"R78","f":"R78e","j":false,"c":true},{"t":"TM1316","p":"R78","f":"R78d","j":false,"c":true},{"t":"TM1317","p":"R79","f":"R79a","j":false,"c":false},{"t":"TM1318","p":"R79","f":"R79b","j":false,"c":true},{"t":"TM1319","p":"R80","f":"R80a","j":false,"c":false},{"t":"TM1320","p":"R81","f":"R81a","j":false,"c":false},{"t":"TM1321","p":"R81","f":"R81b","j":false,"c":true},{"t":"TM1322","p":"R82","f":"R82a","j":false,"c":false},{"t":"TM1324","p":"R83","f":"R83a","j":false,"c":false},{"t":"TM1325","p":"R84","f":"R84a","j":false,"c":false},{"t":"TM1326","p":"R85","f":"R85a","j":false,"c":false},{"t":"TM1327","p":"R85","f":"R85b","j":false,"c":false},{"t":"TM1328","p":"R86","f":"R86a","j":false,"c":false},{"t":"TM1329","p":"R88","f":"R88a","j":false,"c":false},{"t":"TM1330","p":"R89","f":"R89a","j":false,"c":false},{"t":"TM1331","p":"R90","f":"R90a","j":false,"c":false},{"t":"TM1332","p":"R90","f":"R90b","j":false,"c":true},{"t":"TM1333","p":"R90","f":"R90d","j":false,"c":true},{"t":"TM1334","p":"R90","f":"R90c","j":false,"c":true},{"t":"TM1335","p":"R90","f":"R90e","j":false,"c":true},{"t":"TM1336","p":"R90","f":"R90f","j":false,"c":true},{"t":"TM1337","p":"R90","f":"R90g","j":false,"c":true},{"t":"TM1338","p":"R90","f":"R90i","j":false,"c":true},{"t":"TM1339","p":"R90","f":"R90j","j":false,"c":true},{"t":"TM1340","p":"R90","f":"R90L","j":false,"c":true},{"t":"TM1341","p":"R90","f":"R90h","j":false,"c":true},{"t":"TM1342","p":"R91","f":"R91a","j":false,"c":false},{"t":"TM1343","p":"R91","f":"R91b","j":false,"c":false},{"t":"TM1344","p":"R92","f":"R92a","j":false,"c":false},{"t":"TM1345","p":"R93","f":"R93a","j":false,"c":false},{"t":"TM1346","p":"R94","f":"R94a","j":false,"c":false},{"t":"TM1347","p":"R95","f":"R95a","j":false,"c":false},{"t":"TM1348","p":"R95","f":"R95b","j":false,"c":true},{"t":"TM1349","p":"R96","f":"R96a","j":false,"c":false},{"t":"TM1350","p":"R97","f":"R97a","j":false,"c":false},{"t":"TM1351","p":"R98","f":"R98a","j":false,"c":false},{"t":"TM1352","p":"R99","f":"R99a","j":false,"c":false},{"t":"TM1353","p":"S18","f":"S18a","j":false,"c":false},{"t":"TM1354","p":"S19","f":"S19a","j":false,"c":false},{"t":"TM1355","p":"S19","f":"S19b","j":false,"c":false},{"t":"TM1356","p":"S20","f":"S20a","j":false,"c":false},{"t":"TM1357","p":"S20","f":"S20b","j":false,"c":true},{"t":"TM1358","p":"S21","f":"S21b","j":false,"c":true},{"t":"TM1359","p":"S21","f":"S21a","j":false,"c":false},{"t":"TM1360","p":"S22","f":"S22a","j":false,"c":false},{"t":"TM1361","p":"S23","f":"S23a","j":false,"c":false},{"t":"TM1362","p":"S24","f":"S24a","j":false,"c":false},{"t":"TM1363","p":"S24","f":"S24b","j":false,"c":true},{"t":"TM1364","p":"S24","f":"S24c","j":false,"c":true},{"t":"TM1365","p":"S26","f":"S26a","j":false,"c":false},{"t":"TM1366","p":"S27","f":"S27a","j":false,"c":false},{"t":"TM1367","p":"S28","f":"S28a","j":false,"c":false},{"t":"TM1368","p":"S29","f":"S29a","j":false,"c":false},{"t":"TM1369","p":"S30","f":"S30a","j":false,"c":false},{"t":"TM1370","p":"S31","f":"S31a","j":false,"c":false},{"t":"TM1371","p":"S32","f":"S32a","j":false,"c":false},{"t":"TM1372","p":"S33","f":"S33a","j":false,"c":false},{"t":"TM1373","p":"S34","f":"S34a","j":false,"c":false},{"t":"TM1375","p":"S36","f":"S36a","j":false,"c":false},{"t":"TM1376","p":"S37","f":"S37a","j":false,"c":false},{"t":"TM1377","p":"S38","f":"S38a","j":false,"c":false},{"t":"TM1378","p":"S39","f":"S39a","j":false,"c":false},{"t":"TM1379","p":"S40","f":"S40a","j":false,"c":false},{"t":"TM1380","p":"S41","f":"S41a","j":false,"c":false},{"t":"TM1381","p":"S42","f":"S42a","j":false,"c":false},{"t":"TM1382","p":"S43","f":"S43a","j":false,"c":false},{"t":"TM1383","p":"S44","f":"S44a","j":false,"c":false},{"t":"TM1384","p":"S45","f":"S45a","j":false,"c":false},{"t":"TM1385","p":"S47","f":"S47a","j":false,"c":false},{"t":"TM1386","p":"S48","f":"S48a","j":false,"c":false},{"t":"TM1387","p":"S49","f":"S49a","j":false,"c":false},{"t":"TM1388","p":"S50","f":"S50a","j":false,"c":false},{"t":"TM1389","p":"S51","f":"S51a","j":false,"c":false},{"t":"TM1390","p":"S52","f":"S52a","j":false,"c":false},{"t":"TM1391","p":"X59","f":"X59a","j":false,"c":false},{"t":"TM1392","p":"X76","f":"X76a","j":false,"c":false},{"t":"TM1393","p":"X77","f":"X77a","j":false,"c":false},{"t":"TM1394","p":"Z40","f":"Z40a","j":false,"c":false},{"t":"TM1395","p":"Z88","f":"Z88a","j":false,"c":false},{"t":"TM1399","p":"S46","f":"S46a","j":false,"c":false},{"t":"TM1404","p":"R25","f":"R25d","j":false,"c":false},{"t":"TM1405","p":"R04","f":"R04d","j":false,"c":true},{"t":"TM1408","p":"S54","f":"S54a","j":false,"c":false},{"t":"TM1409","p":"R17","f":"R17e","j":false,"c":true},{"t":"TM1410","p":"R86","f":"R86b","j":false,"c":true},{"t":"TM1411","p":"R79","f":"R79c","j":false,"c":true},{"t":"TM1412","p":"R28","f":"R28b","j":false,"c":true},{"t":"TM1413","p":"R87","f":"R87e","j":false,"c":true},{"t":"TM1414","p":"R39","f":"R39e","j":false,"c":false},{"t":"TM1415","p":"R78","f":"R78f","j":false,"c":true},{"t":"TM1416","p":"R86","f":"R86c","j":false,"c":true},{"t":"TM1417","p":"R90","f":"R90k","j":false,"c":true},{"t":"TM1418","p":"R17","f":"R17g","j":false,"c":false},{"t":"TM1419","p":"Z92","f":"Z92a","j":false,"c":false},{"t":"TM1420","p":"R37","f":"R37b","j":false,"c":false},{"t":"TM1421","p":"R05","f":"R05a","j":false,"c":false},{"t":"TM1422","p":"R46","f":"R46b","j":false,"c":false},{"t":"TM1423","p":"R20","f":"R20a","j":false,"c":false},{"t":"TM1425","p":"S55","f":"S55a","j":false,"c":false},{"t":"TM1438","p":"S56","f":"S56a","j":false,"c":false},{"t":"TM1440","p":"S56","f":"S56b","j":false,"c":true},{"t":"TM1441","p":"S57","f":"S57a","j":false,"c":false},{"t":"TM1443","p":"S58","f":"S58a","j":false,"c":false},{"t":"TM1444","p":"S59","f":"S59a","j":false,"c":false},{"t":"TM1445","p":"S21","f":"S21c","j":false,"c":true},{"t":"TM1446","p":"R73","f":"R73b","j":false,"c":false},{"t":"TM1447","p":"S60","f":"S60a","j":false,"c":false},{"t":"TM1448","p":"R11","f":"R11c","j":false,"c":false},{"t":"TM1449","p":"R46","f":"R46c","j":false,"c":false},{"t":"TM1450","p":"R17","f":"R17f","j":false,"c":true},{"t":"TM1451","p":"R23","f":"R23b","j":false,"c":false},{"t":"TM1452","p":"R75","f":"R75c","j":false,"c":false},{"t":"TM1453","p":"R04","f":"R04e","j":false,"c":false},{"t":"TM1455","p":"S52","f":"S52b","j":false,"c":true},{"t":"TM1456","p":"R41","f":"R41b","j":false,"c":false},{"t":"TM1457","p":"R94","f":"R94b","j":false,"c":false},{"t":"TM1458","p":"R20","f":"R20b","j":false,"c":false},{"t":"TM1459","p":"S33","f":"S33b","j":false,"c":false},{"t":"TM1460","p":"S58","f":"S58b","j":false,"c":false},{"t":"TM1462","p":"S61","f":"S61a","j":false,"c":false},{"t":"TM1463","p":"S62","f":"S62a","j":false,"c":false},{"t":"TM1464","p":"S63","f":"S63a","j":false,"c":false},{"t":"TM1465","p":"S64","f":"S64a","j":false,"c":false},{"t":"TM1466","p":"S65","f":"S65a","j":false,"c":false},{"t":"TM1467","p":"S66","f":"S66a","j":false,"c":false},{"t":"TM1468","p":"S67","f":"S67a","j":false,"c":false},{"t":"TM1469","p":"S62","f":"S62b","j":false,"c":true},{"t":"TM1471","p":"S68","f":"S68a","j":false,"c":false},{"t":"TM1472","p":"R63","f":"R63b","j":false,"c":true},{"t":"TM1474","p":"S62","f":"S62c","j":false,"c":true},{"t":"TM1475","p":"R74","f":"R74b","j":false,"c":true},{"t":"TM1476","p":"S21","f":"S21d","j":false,"c":true},{"t":"TM1477","p":"R27","f":"R27c","j":false,"c":true},{"t":"TM1478","p":"S69","f":"S69a","j":false,"c":false},{"t":"TM1479","p":"S70","f":"S70a","j":false,"c":false},{"t":"TM1480","p":"S71","f":"S71a","j":false,"c":false},{"t":"TM1483","p":"S72","f":"S72a","j":false,"c":false},{"t":"TM1484","p":"C27","f":"C27a","j":false,"c":false},{"t":"TM1485","p":"C28","f":"C28a","j":false,"c":false},{"t":"TM1486","p":"C29","f":"C29a","j":false,"c":false},{"t":"TM1487","p":"C30","f":"C30a","j":false,"c":false},{"t":"TM1488","p":"C31","f":"C31a","j":false,"c":false},{"t":"TM1489","p":"C32","f":"C32a","j":false,"c":false},{"t":"TM1490","p":"C33","f":"C33a","j":false,"c":false},{"t":"TM1491","p":"C34","f":"C34a","j":false,"c":false},{"t":"TM1492","p":"C47","f":"C47a","j":false,"c":false},{"t":"TM1493","p":"C35","f":"C35a","j":false,"c":false},{"t":"TM1494","p":"C36","f":"C36a","j":false,"c":false},{"t":"TM1495","p":"C37","f":"C37a","j":false,"c":false},{"t":"TM1496","p":"C38","f":"C38a","j":false,"c":false},{"t":"TM1497","p":"C39","f":"C39a","j":false,"c":false},{"t":"TM1498","p":"C40","f":"C40a","j":false,"c":false},{"t":"TM1499","p":"C41","f":"C41a","j":false,"c":false},{"t":"TM1500","p":"C42","f":"C42a","j":false,"c":false},{"t":"TM1501","p":"C43","f":"C43a","j":false,"c":false},{"t":"TM1502","p":"C44","f":"C44a","j":false,"c":false},{"t":"TM1503","p":"C45","f":"C45a","j":false,"c":false},{"t":"TM1504","p":"C46","f":"C46a","j":false,"c":false},{"t":"TM1508","p":"C32","f":"C32b","j":false,"c":true},{"t":"TM1510","p":"C48","f":"C48a","j":false,"c":false},{"t":"TM1511","p":"C49","f":"C49a","j":false,"c":false},{"t":"TM1515","p":"R68","f":"R68b","j":false,"c":true},{"t":"TM1516","p":"C43","f":"C43b","j":false,"c":true},{"t":"TM1519","p":"C50","f":"C50a","j":false,"c":false},{"t":"TM1520","p":"S45","f":"S45b","j":false,"c":true},{"t":"TM1521","p":"C51","f":"C51a","j":false,"c":false}]
-  const SQL = `INSERT INTO teams (team_id, composer_prefix, composer_full_id, status, is_jup, has_cowriters)
-    VALUES ($1,$2,$3,'COMPLETE',$4,$5)
-    ON CONFLICT (team_id) DO NOTHING`
-  for (let i = 0; i < teams.length; i += 30) {
-    await Promise.all(teams.slice(i, i+30).map(t =>
-      pgQ(SQL, [t.t, t.p, t.f, t.j, t.c]).catch(() => {})
-    ))
+    const teams = [{"t":"TM1200","p":"R04","f":"R04b","j":false,"c":true},{"t":"TM1202","p":"R04","f":"R04c","j":false,"c":false},{"t":"TM1204","p":"R08","f":"R08a","j":false,"c":false},{"t":"TM1206","p":"R09","f":"R09a","j":false,"c":false},{"t":"TM1207","p":"R09","f":"R09b","j":false,"c":true},{"t":"TM1208","p":"R11","f":"R11a","j":false,"c":false},{"t":"TM1209","p":"R11","f":"R11b","j":false,"c":false},{"t":"TM1210","p":"R12","f":"R12a","j":false,"c":false},{"t":"TM1211","p":"R13","f":"R13a","j":false,"c":false},{"t":"TM1212","p":"R13","f":"R13b","j":false,"c":false},{"t":"TM1213","p":"R14","f":"R14a","j":false,"c":false},{"t":"TM1214","p":"R15","f":"R15a","j":false,"c":false},{"t":"TM1215","p":"R16","f":"R16a","j":false,"c":false},{"t":"TM1216","p":"R17","f":"R17a","j":false,"c":true},{"t":"TM1217","p":"R17","f":"R17b","j":false,"c":true},{"t":"TM1218","p":"R17","f":"R17c","j":false,"c":true},{"t":"TM1219","p":"R17","f":"R17d","j":false,"c":true},{"t":"TM1220","p":"R17","f":"R17h","j":false,"c":true},{"t":"TM1221","p":"R17","f":"R17i","j":false,"c":true},{"t":"TM1222","p":"R17","f":"R17j","j":false,"c":true},{"t":"TM1223","p":"R17","f":"R17k","j":false,"c":true},{"t":"TM1224","p":"R17","f":"R17m","j":false,"c":true},{"t":"TM1225","p":"R87","f":"R87a","j":false,"c":false},{"t":"TM1226","p":"R87","f":"R87b","j":false,"c":true},{"t":"TM1227","p":"R87","f":"R87c","j":false,"c":true},{"t":"TM1228","p":"R18","f":"R18a","j":false,"c":false},{"t":"TM1229","p":"R19","f":"R19a","j":false,"c":false},{"t":"TM1230","p":"R19","f":"R19b","j":false,"c":true},{"t":"TM1231","p":"R19","f":"R19c","j":false,"c":true},{"t":"TM1232","p":"R19","f":"R19d","j":false,"c":true},{"t":"TM1233","p":"R21","f":"R21a","j":false,"c":false},{"t":"TM1234","p":"R23","f":"R23a","j":false,"c":false},{"t":"TM1235","p":"R24","f":"R24a","j":false,"c":false},{"t":"TM1236","p":"R25","f":"R25a","j":false,"c":false},{"t":"TM1237","p":"R25","f":"R25b","j":false,"c":true},{"t":"TM1238","p":"R25","f":"R25c","j":false,"c":true},{"t":"TM1239","p":"R26","f":"R26a","j":false,"c":false},{"t":"TM1240","p":"R27","f":"R27a","j":false,"c":false},{"t":"TM1241","p":"R27","f":"R27b","j":false,"c":false},{"t":"TM1242","p":"R28","f":"R28a","j":false,"c":true},{"t":"TM1243","p":"R29","f":"R29a","j":false,"c":false},{"t":"TM1244","p":"R30","f":"R30a","j":false,"c":false},{"t":"TM1245","p":"R31","f":"R31a","j":false,"c":false},{"t":"TM1246","p":"R32","f":"R32a","j":false,"c":false},{"t":"TM1247","p":"R33","f":"R33a","j":false,"c":false},{"t":"TM1248","p":"R34","f":"R34a","j":false,"c":false},{"t":"TM1249","p":"R35","f":"R35a","j":false,"c":false},{"t":"TM1250","p":"R36","f":"R36a","j":false,"c":false},{"t":"TM1251","p":"R37","f":"R37a","j":false,"c":false},{"t":"TM1252","p":"R38","f":"R38a","j":false,"c":false},{"t":"TM1253","p":"R38","f":"R38b","j":false,"c":true},{"t":"TM1254","p":"R38","f":"R38c","j":false,"c":true},{"t":"TM1255","p":"R39","f":"R39a","j":false,"c":false},{"t":"TM1256","p":"R39","f":"R39b","j":false,"c":true},{"t":"TM1257","p":"R39","f":"R39c","j":false,"c":true},{"t":"TM1258","p":"R39","f":"R39d","j":false,"c":true},{"t":"TM1259","p":"R40","f":"R40a","j":false,"c":false},{"t":"TM1260","p":"R41","f":"R41a","j":false,"c":false},{"t":"TM1261","p":"R42","f":"R42a","j":false,"c":false},{"t":"TM1262","p":"R43","f":"R43a","j":false,"c":false},{"t":"TM1263","p":"R44","f":"R44a","j":false,"c":false},{"t":"TM1264","p":"R44","f":"R44b","j":false,"c":true},{"t":"TM1265","p":"R44","f":"R44c","j":false,"c":true},{"t":"TM1266","p":"R45","f":"R45a","j":false,"c":false},{"t":"TM1267","p":"R87","f":"R87d","j":false,"c":true},{"t":"TM1268","p":"R46","f":"R46a","j":false,"c":false},{"t":"TM1269","p":"R47","f":"R47a","j":false,"c":false},{"t":"TM1270","p":"R47","f":"R47b","j":false,"c":true},{"t":"TM1271","p":"R48","f":"R48a","j":false,"c":false},{"t":"TM1272","p":"R48","f":"R48b","j":false,"c":true},{"t":"TM1273","p":"R48","f":"R48d","j":false,"c":true},{"t":"TM1274","p":"R49","f":"R49a","j":false,"c":false},{"t":"TM1275","p":"R50","f":"R50a","j":false,"c":false},{"t":"TM1276","p":"R51","f":"R51a","j":false,"c":true},{"t":"TM1277","p":"R51","f":"R51b","j":false,"c":false},{"t":"TM1278","p":"R51","f":"R51c","j":false,"c":true},{"t":"TM1279","p":"R52","f":"R52a","j":false,"c":false},{"t":"TM1280","p":"R53","f":"R53a","j":false,"c":false},{"t":"TM1281","p":"R54","f":"R54a","j":false,"c":false},{"t":"TM1282","p":"R55","f":"R55a","j":false,"c":true},{"t":"TM1283","p":"R56","f":"R56a","j":false,"c":false},{"t":"TM1284","p":"R57","f":"R57a","j":false,"c":false},{"t":"TM1285","p":"R58","f":"R58a","j":false,"c":false},{"t":"TM1286","p":"R59","f":"R59a","j":false,"c":false},{"t":"TM1287","p":"R59","f":"R59b","j":false,"c":true},{"t":"TM1288","p":"R60","f":"R60a","j":false,"c":false},{"t":"TM1289","p":"R61","f":"R61a","j":false,"c":false},{"t":"TM1290","p":"R62","f":"R62a","j":false,"c":false},{"t":"TM1291","p":"R63","f":"R63a","j":false,"c":false},{"t":"TM1292","p":"R64","f":"R64a","j":false,"c":false},{"t":"TM1293","p":"R65","f":"R65a","j":false,"c":false},{"t":"TM1294","p":"R66","f":"R66a","j":false,"c":false},{"t":"TM1295","p":"R66","f":"R66b","j":false,"c":true},{"t":"TM1296","p":"R67","f":"R67a","j":false,"c":false},{"t":"TM1297","p":"R68","f":"R68a","j":false,"c":false},{"t":"TM1298","p":"R69","f":"R69a","j":false,"c":false},{"t":"TM1299","p":"R69","f":"R69b","j":false,"c":true},{"t":"TM1300","p":"R70","f":"R70a","j":false,"c":false},{"t":"TM1301","p":"R70","f":"R70b","j":false,"c":true},{"t":"TM1302","p":"R70","f":"R70c","j":false,"c":true},{"t":"TM1303","p":"R71","f":"R71a","j":false,"c":false},{"t":"TM1304","p":"R72","f":"R72a","j":false,"c":false},{"t":"TM1305","p":"R73","f":"R73a","j":false,"c":false},{"t":"TM1306","p":"R74","f":"R74a","j":false,"c":false},{"t":"TM1307","p":"R75","f":"R75a","j":false,"c":false},{"t":"TM1308","p":"R75","f":"R75b","j":false,"c":true},{"t":"TM1309","p":"R76","f":"R76a","j":false,"c":false},{"t":"TM1310","p":"R76","f":"R76b","j":false,"c":true},{"t":"TM1311","p":"R77","f":"R77a","j":false,"c":false},{"t":"TM1312","p":"R78","f":"R78a","j":false,"c":false},{"t":"TM1313","p":"R78","f":"R78b","j":false,"c":true},{"t":"TM1314","p":"R78","f":"R78c","j":false,"c":true},{"t":"TM1315","p":"R78","f":"R78e","j":false,"c":true},{"t":"TM1316","p":"R78","f":"R78d","j":false,"c":true},{"t":"TM1317","p":"R79","f":"R79a","j":false,"c":false},{"t":"TM1318","p":"R79","f":"R79b","j":false,"c":true},{"t":"TM1319","p":"R80","f":"R80a","j":false,"c":false},{"t":"TM1320","p":"R81","f":"R81a","j":false,"c":false},{"t":"TM1321","p":"R81","f":"R81b","j":false,"c":true},{"t":"TM1322","p":"R82","f":"R82a","j":false,"c":false},{"t":"TM1324","p":"R83","f":"R83a","j":false,"c":false},{"t":"TM1325","p":"R84","f":"R84a","j":false,"c":false},{"t":"TM1326","p":"R85","f":"R85a","j":false,"c":false},{"t":"TM1327","p":"R85","f":"R85b","j":false,"c":false},{"t":"TM1328","p":"R86","f":"R86a","j":false,"c":false},{"t":"TM1329","p":"R88","f":"R88a","j":false,"c":false},{"t":"TM1330","p":"R89","f":"R89a","j":false,"c":false},{"t":"TM1331","p":"R90","f":"R90a","j":false,"c":false},{"t":"TM1332","p":"R90","f":"R90b","j":false,"c":true},{"t":"TM1333","p":"R90","f":"R90d","j":false,"c":true},{"t":"TM1334","p":"R90","f":"R90c","j":false,"c":true},{"t":"TM1335","p":"R90","f":"R90e","j":false,"c":true},{"t":"TM1336","p":"R90","f":"R90f","j":false,"c":true},{"t":"TM1337","p":"R90","f":"R90g","j":false,"c":true},{"t":"TM1338","p":"R90","f":"R90i","j":false,"c":true},{"t":"TM1339","p":"R90","f":"R90j","j":false,"c":true},{"t":"TM1340","p":"R90","f":"R90L","j":false,"c":true},{"t":"TM1341","p":"R90","f":"R90h","j":false,"c":true},{"t":"TM1342","p":"R91","f":"R91a","j":false,"c":false},{"t":"TM1343","p":"R91","f":"R91b","j":false,"c":false},{"t":"TM1344","p":"R92","f":"R92a","j":false,"c":false},{"t":"TM1345","p":"R93","f":"R93a","j":false,"c":false},{"t":"TM1346","p":"R94","f":"R94a","j":false,"c":false},{"t":"TM1347","p":"R95","f":"R95a","j":false,"c":false},{"t":"TM1348","p":"R95","f":"R95b","j":false,"c":true},{"t":"TM1349","p":"R96","f":"R96a","j":false,"c":false},{"t":"TM1350","p":"R97","f":"R97a","j":false,"c":false},{"t":"TM1351","p":"R98","f":"R98a","j":false,"c":false},{"t":"TM1352","p":"R99","f":"R99a","j":false,"c":false},{"t":"TM1353","p":"S18","f":"S18a","j":false,"c":false},{"t":"TM1354","p":"S19","f":"S19a","j":false,"c":false},{"t":"TM1355","p":"S19","f":"S19b","j":false,"c":false},{"t":"TM1356","p":"S20","f":"S20a","j":false,"c":false},{"t":"TM1357","p":"S20","f":"S20b","j":false,"c":true},{"t":"TM1358","p":"S21","f":"S21b","j":false,"c":true},{"t":"TM1359","p":"S21","f":"S21a","j":false,"c":false},{"t":"TM1360","p":"S22","f":"S22a","j":false,"c":false},{"t":"TM1361","p":"S23","f":"S23a","j":false,"c":false},{"t":"TM1362","p":"S24","f":"S24a","j":false,"c":false},{"t":"TM1363","p":"S24","f":"S24b","j":false,"c":true},{"t":"TM1364","p":"S24","f":"S24c","j":false,"c":true},{"t":"TM1365","p":"S26","f":"S26a","j":false,"c":false},{"t":"TM1366","p":"S27","f":"S27a","j":false,"c":false},{"t":"TM1367","p":"S28","f":"S28a","j":false,"c":false},{"t":"TM1368","p":"S29","f":"S29a","j":false,"c":false},{"t":"TM1369","p":"S30","f":"S30a","j":false,"c":false},{"t":"TM1370","p":"S31","f":"S31a","j":false,"c":false},{"t":"TM1371","p":"S32","f":"S32a","j":false,"c":false},{"t":"TM1372","p":"S33","f":"S33a","j":false,"c":false},{"t":"TM1373","p":"S34","f":"S34a","j":false,"c":false},{"t":"TM1375","p":"S36","f":"S36a","j":false,"c":false},{"t":"TM1376","p":"S37","f":"S37a","j":false,"c":false},{"t":"TM1377","p":"S38","f":"S38a","j":false,"c":false},{"t":"TM1378","p":"S39","f":"S39a","j":false,"c":false},{"t":"TM1379","p":"S40","f":"S40a","j":false,"c":false},{"t":"TM1380","p":"S41","f":"S41a","j":false,"c":false},{"t":"TM1381","p":"S42","f":"S42a","j":false,"c":false},{"t":"TM1382","p":"S43","f":"S43a","j":false,"c":false},{"t":"TM1383","p":"S44","f":"S44a","j":false,"c":false},{"t":"TM1384","p":"S45","f":"S45a","j":false,"c":false},{"t":"TM1385","p":"S47","f":"S47a","j":false,"c":false},{"t":"TM1386","p":"S48","f":"S48a","j":false,"c":false},{"t":"TM1387","p":"S49","f":"S49a","j":false,"c":false},{"t":"TM1388","p":"S50","f":"S50a","j":false,"c":false},{"t":"TM1389","p":"S51","f":"S51a","j":false,"c":false},{"t":"TM1390","p":"S52","f":"S52a","j":false,"c":false},{"t":"TM1391","p":"X59","f":"X59a","j":false,"c":false},{"t":"TM1392","p":"X76","f":"X76a","j":false,"c":false},{"t":"TM1393","p":"X77","f":"X77a","j":false,"c":false},{"t":"TM1394","p":"Z40","f":"Z40a","j":false,"c":false},{"t":"TM1395","p":"Z88","f":"Z88a","j":false,"c":false},{"t":"TM1399","p":"S46","f":"S46a","j":false,"c":false},{"t":"TM1404","p":"R25","f":"R25d","j":false,"c":false},{"t":"TM1405","p":"R04","f":"R04d","j":false,"c":true},{"t":"TM1408","p":"S54","f":"S54a","j":false,"c":false},{"t":"TM1409","p":"R17","f":"R17e","j":false,"c":true},{"t":"TM1410","p":"R86","f":"R86b","j":false,"c":true},{"t":"TM1411","p":"R79","f":"R79c","j":false,"c":true},{"t":"TM1412","p":"R28","f":"R28b","j":false,"c":true},{"t":"TM1413","p":"R87","f":"R87e","j":false,"c":true},{"t":"TM1414","p":"R39","f":"R39e","j":false,"c":false},{"t":"TM1415","p":"R78","f":"R78f","j":false,"c":true},{"t":"TM1416","p":"R86","f":"R86c","j":false,"c":true},{"t":"TM1417","p":"R90","f":"R90k","j":false,"c":true},{"t":"TM1418","p":"R17","f":"R17g","j":false,"c":false},{"t":"TM1419","p":"Z92","f":"Z92a","j":false,"c":false},{"t":"TM1420","p":"R37","f":"R37b","j":false,"c":false},{"t":"TM1421","p":"R05","f":"R05a","j":false,"c":false},{"t":"TM1422","p":"R46","f":"R46b","j":false,"c":false},{"t":"TM1423","p":"R20","f":"R20a","j":false,"c":false},{"t":"TM1425","p":"S55","f":"S55a","j":false,"c":false},{"t":"TM1438","p":"S56","f":"S56a","j":false,"c":false},{"t":"TM1440","p":"S56","f":"S56b","j":false,"c":true},{"t":"TM1441","p":"S57","f":"S57a","j":false,"c":false},{"t":"TM1443","p":"S58","f":"S58a","j":false,"c":false},{"t":"TM1444","p":"S59","f":"S59a","j":false,"c":false},{"t":"TM1445","p":"S21","f":"S21c","j":false,"c":true},{"t":"TM1446","p":"R73","f":"R73b","j":false,"c":false},{"t":"TM1447","p":"S60","f":"S60a","j":false,"c":false},{"t":"TM1448","p":"R11","f":"R11c","j":false,"c":false},{"t":"TM1449","p":"R46","f":"R46c","j":false,"c":false},{"t":"TM1450","p":"R17","f":"R17f","j":false,"c":true},{"t":"TM1451","p":"R23","f":"R23b","j":false,"c":false},{"t":"TM1452","p":"R75","f":"R75c","j":false,"c":false},{"t":"TM1453","p":"R04","f":"R04e","j":false,"c":false},{"t":"TM1455","p":"S52","f":"S52b","j":false,"c":true},{"t":"TM1456","p":"R41","f":"R41b","j":false,"c":false},{"t":"TM1457","p":"R94","f":"R94b","j":false,"c":false},{"t":"TM1458","p":"R20","f":"R20b","j":false,"c":false},{"t":"TM1459","p":"S33","f":"S33b","j":false,"c":false},{"t":"TM1460","p":"S58","f":"S58b","j":false,"c":false},{"t":"TM1462","p":"S61","f":"S61a","j":false,"c":false},{"t":"TM1463","p":"S62","f":"S62a","j":false,"c":false},{"t":"TM1464","p":"S63","f":"S63a","j":false,"c":false},{"t":"TM1465","p":"S64","f":"S64a","j":false,"c":false},{"t":"TM1466","p":"S65","f":"S65a","j":false,"c":false},{"t":"TM1467","p":"S66","f":"S66a","j":false,"c":false},{"t":"TM1468","p":"S67","f":"S67a","j":false,"c":false},{"t":"TM1469","p":"S62","f":"S62b","j":false,"c":true},{"t":"TM1471","p":"S68","f":"S68a","j":false,"c":false},{"t":"TM1472","p":"R63","f":"R63b","j":false,"c":true},{"t":"TM1474","p":"S62","f":"S62c","j":false,"c":true},{"t":"TM1475","p":"R74","f":"R74b","j":false,"c":true},{"t":"TM1476","p":"S21","f":"S21d","j":false,"c":true},{"t":"TM1477","p":"R27","f":"R27c","j":false,"c":true},{"t":"TM1478","p":"S69","f":"S69a","j":false,"c":false},{"t":"TM1479","p":"S70","f":"S70a","j":false,"c":false},{"t":"TM1480","p":"S71","f":"S71a","j":false,"c":false},{"t":"TM1483","p":"S72","f":"S72a","j":false,"c":false},{"t":"TM1484","p":"C27","f":"C27a","j":false,"c":false},{"t":"TM1485","p":"C28","f":"C28a","j":false,"c":false},{"t":"TM1486","p":"C29","f":"C29a","j":false,"c":false},{"t":"TM1487","p":"C30","f":"C30a","j":false,"c":false},{"t":"TM1488","p":"C31","f":"C31a","j":false,"c":false},{"t":"TM1489","p":"C32","f":"C32a","j":false,"c":false},{"t":"TM1490","p":"C33","f":"C33a","j":false,"c":false},{"t":"TM1491","p":"C34","f":"C34a","j":false,"c":false},{"t":"TM1492","p":"C47","f":"C47a","j":false,"c":false},{"t":"TM1493","p":"C35","f":"C35a","j":false,"c":false},{"t":"TM1494","p":"C36","f":"C36a","j":false,"c":false},{"t":"TM1495","p":"C37","f":"C37a","j":false,"c":false},{"t":"TM1496","p":"C38","f":"C38a","j":false,"c":false},{"t":"TM1497","p":"C39","f":"C39a","j":false,"c":false},{"t":"TM1498","p":"C40","f":"C40a","j":false,"c":false},{"t":"TM1499","p":"C41","f":"C41a","j":false,"c":false},{"t":"TM1500","p":"C42","f":"C42a","j":false,"c":false},{"t":"TM1501","p":"C43","f":"C43a","j":false,"c":false},{"t":"TM1502","p":"C44","f":"C44a","j":false,"c":false},{"t":"TM1503","p":"C45","f":"C45a","j":false,"c":false},{"t":"TM1504","p":"C46","f":"C46a","j":false,"c":false},{"t":"TM1508","p":"C32","f":"C32b","j":false,"c":true},{"t":"TM1510","p":"C48","f":"C48a","j":false,"c":false},{"t":"TM1511","p":"C49","f":"C49a","j":false,"c":false},{"t":"TM1515","p":"R68","f":"R68b","j":false,"c":true},{"t":"TM1516","p":"C43","f":"C43b","j":false,"c":true},{"t":"TM1519","p":"C50","f":"C50a","j":false,"c":false},{"t":"TM1520","p":"S45","f":"S45b","j":false,"c":true},{"t":"TM1521","p":"C51","f":"C51a","j":false,"c":false}]
+    const SQL = `INSERT INTO teams (team_id, composer_prefix, composer_full_id, status, is_jup, has_cowriters)
+      VALUES ($1,$2,$3,'COMPLETE',$4,$5)
+      ON CONFLICT (team_id) DO NOTHING`
+    let inserted = 0
+    for (let i = 0; i < teams.length; i += 30) {
+      const results = await Promise.all(teams.slice(i, i+30).map(t =>
+        pgQ(SQL, [t.t, t.p, t.f, t.j, t.c]).catch(e => {
+          console.error(`[seedTeams] failed to insert team ${t.t}: ${e.message}`)
+          return null
+        })
+      ))
+      inserted += results.filter(r => Array.isArray(r)).length
+    }
+    console.log(`[seedTeams] seeded ${inserted}/${teams.length} teams`)
+  } catch (e) {
+    console.error(`[seedTeams] exception: ${e.message}`)
   }
-  console.log("[seedTeams] done:", teams.length, "teams")
 }
 
 async function seedCowriters() {
-  // Skip if cowriters already exist
-  const count = await pgQ('SELECT COUNT(*) as c FROM cowriters')
-  if (count && count[0]?.c > 0) { console.log('[seedCowriters] skipped, cowriters already exist'); return }
+  try {
+    // Skip if cowriters already exist
+    const count = await pgQ('SELECT COUNT(*) as c FROM cowriters')
+    if (Array.isArray(count) && count[0]?.c > 0) { console.log('[seedCowriters] skipped, cowriters already exist'); return }
+    if (!Array.isArray(count)) { console.error('[seedCowriters] failed to check cowriter count'); return }
 
-  const cws = [{"n":"Brandon Adams","f":"Brandon","l":"Adams","p":"BMI","i":"727060850"},{"n":"Gaelan Sebastian Aguado","f":"Gaelan","l":"Sebastian Aguado","p":"ASCAP","i":"645719814"},{"n":"Michael Aharon","f":"Michael","l":"Aharon","p":"SESAC","i":"243682268"},{"n":"Konstantine Aivaliotis","f":"Konstantine","l":"Aivaliotis","p":"SOCAN","i":"684988466"},{"n":"EL Hachani Ali","f":"EL","l":"Hachani Ali","p":"SACEM","i":"1029076-79"},{"n":"Jordan Allen","f":"Jordan","l":"Allen","p":"SOCAN","i":"587916392"},{"n":"Keith Joseph Anderson","f":"Keith","l":"Joseph Anderson","p":"BMI","i":"746479892"},{"n":"Christos Andreou","f":"Christos","l":"Andreou","p":"ASCAP","i":"605973336"},{"n":"Lacey Angerosa","f":"Lacey","l":"Angerosa","p":"ASCAP","i":"118758107"},{"n":"David Anson","f":"David","l":"Anson","p":"PRS","i":"702639751"},{"n":"Fernando Aponte","f":"Fernando","l":"Aponte","p":"ASCAP","i":"759851291"},{"n":"Melissa Arce","f":"Melissa","l":"Arce","p":"BMI","i":"672604737"},{"n":"Jake Atherton","f":"Jake","l":"Atherton","p":"ASCAP","i":"888010422"},{"n":"James Atin-Godden","f":"James","l":"Atin-Godden","p":"SOCAN","i":"683911616"},{"n":"Travis Bacon","f":"Travis","l":"Bacon","p":"BMI","i":"550141388"},{"n":"Christopher Bagnole","f":"Christopher","l":"Bagnole","p":"BMI","i":"352710876"},{"n":"Anthony George Balaskas","f":"Anthony","l":"George Balaskas","p":"ASCAP","i":"508596525"},{"n":"Ulrich Bannenberg","f":"Ulrich","l":"Bannenberg","p":"GEMA","i":"702091683"},{"n":"David Barenboim","f":"David","l":"Barenboim","p":"GEMA","i":"454864721"},{"n":"Andrew Barlow","f":"Andrew","l":"Barlow","p":"ASCAP","i":"422448966"},{"n":"Sara Barone","f":"Sara","l":"Barone","p":"ASCAP","i":"821027481"},{"n":"Tim Barr","f":"Tim","l":"Barr","p":"BMI","i":"515795039"},{"n":"Thomas Barth","f":"Thomas","l":"Barth","p":"BMI","i":"143989044"},{"n":"Jesse Baskin","f":"Jesse","l":"Baskin","p":"BMI","i":"767236022"},{"n":"Luigi Bayaert","f":"Luigi","l":"Bayaert","p":"SACEM","i":"1163198844"},{"n":"Shoshana Bean","f":"Shoshana","l":"Bean","p":"ASCAP","i":"560942249"},{"n":"David Ben-Porat","f":"David","l":"Ben-Porat","p":"ASCAP","i":"494088223"},{"n":"Romain Benabdelkader","f":"Romain","l":"Benabdelkader","p":"SACEM","i":"858126514"},{"n":"Anthony Bernardo","f":"Anthony","l":"Bernardo","p":"ASCAP","i":"485489201"},{"n":"Brendan Berry","f":"Brendan","l":"Berry","p":"ASCAP","i":"561004494"},{"n":"Brenden Berryn","f":"Brenden","l":"Berryn","p":"ASCAP","i":"561004494"},{"n":"Michi Besler","f":"Michi","l":"Besler","p":"GEMA","i":"281315580"},{"n":"Simon Bhatia","f":"Simon","l":"Bhatia","p":"ASCAP","i":"1220973865"},{"n":"Stephen Bigger","f":"Stephen","l":"Bigger","p":"ASCAP","i":"189798580"},{"n":"Maria Patricia Blyde","f":"Maria","l":"Patricia Blyde","p":"BMI","i":"1017914083"},{"n":"Pablo Andres Bodnar","f":"Pablo","l":"Andres Bodnar","p":"SADAIC","i":"873303929"},{"n":"Jeremy Bonarriba","f":"Jeremy","l":"Bonarriba","p":"BUMA","i":"447601459"},{"n":"Nathalie Bonin","f":"Nathalie","l":"Bonin","p":"SOCAN","i":"270312896"},{"n":"Jeremiah Bornfield","f":"Jeremiah","l":"Bornfield","p":"BMI","i":"550131128"},{"n":"Christopher Botta","f":"Christopher","l":"Botta","p":"BMI","i":"728308633"},{"n":"Marie-Christine Bourdon","f":"Marie-Christine","l":"Bourdon","p":"SOCAN","i":"796220617"},{"n":"JamesDustin Brayley","f":"JamesDustin","l":"Brayley","p":"SESAC","i":"768555489"},{"n":"Daniel Elias Brenner","f":"Daniel","l":"Elias Brenner","p":"GEMA","i":"573900050"},{"n":"Martin Briley","f":"Martin","l":"Briley","p":"ASCAP","i":"68299725"},{"n":"Olivia Broadfield","f":"Olivia","l":"Broadfield","p":"PRS","i":"511053509"},{"n":"Bob Brockmann","f":"Bob","l":"Brockmann","p":"ASCAP","i":"428961526"},{"n":"Brandon Brown","f":"Brandon","l":"Brown","p":"BMI","i":"459915409"},{"n":"Karlie Bruce","f":"Karlie","l":"Bruce","p":"SESAC","i":null},{"n":"Erin Brueggemann","f":"Erin","l":"Brueggemann","p":"ASCAP","i":"506747838"},{"n":"Andreas Bruhn","f":"Andreas","l":"Bruhn","p":"GEMA","i":"241583478"},{"n":"David Aaron Burger","f":"David","l":"Aaron Burger","p":"ASCAP","i":"339235752"},{"n":"Tobias Burger","f":"Tobias","l":"Burger","p":"GEMA","i":"265664048"},{"n":"Gail Bushy","f":"Gail","l":"Bushy","p":"BMI","i":"740333082"},{"n":"Ryan Byrne","f":"Ryan","l":"Byrne","p":"ASCAP","i":"782638995"},{"n":"Benedetto Caccavale","f":"Benedetto","l":"Caccavale","p":"ASCAP","i":"496970981"},{"n":"Yanni Caldas","f":"Yanni","l":"Caldas","p":"SOCAN","i":"820646452"},{"n":"Todd Caldwell","f":"Todd","l":"Caldwell","p":"BMI","i":"532412883"},{"n":"Sam Campoli","f":"Sam","l":"Campoli","p":"ASCAP","i":"1002917797"},{"n":"Emiko Carlin","f":"Emiko","l":"Carlin","p":"ASCAP","i":"289661607"},{"n":"Taylor Carson","f":"Taylor","l":"Carson","p":"ASCAP","i":"349228642"},{"n":"Steve Carter","f":"Steve","l":"Carter","p":"BMI","i":"613856835"},{"n":"Matthew Castelein","f":"Matthew","l":"Castelein","p":"ASCAP","i":"683486797"},{"n":"Franco Caviglia","f":"Franco","l":"Caviglia","p":"ASCAP","i":"667653403"},{"n":"Daniel Chait","f":"Daniel","l":"Chait","p":"ASCAP","i":"565207255"},{"n":"Spencer J. Charif","f":"Spencer","l":"J. Charif","p":"ASCAP","i":"530921183"},{"n":"Israel Charles","f":"Israel","l":"Charles","p":"BMI","i":"217945845"},{"n":"Konstantinos Chaveles","f":"Konstantinos","l":"Chaveles","p":"SOCAN","i":"815390736"},{"n":"Daniel Chen","f":"Daniel","l":"Chen","p":"ASCAP","i":"440872068"},{"n":"Kembo Cheng","f":"Kembo","l":"Cheng","p":"ASCAP","i":"778470001"},{"n":"Mohamad Noor Che\u2019ree","f":"Mohamad","l":"Noor Che\u2019ree","p":"ASCAP","i":"763756601"},{"n":"Mario Chow","f":"Mario","l":"Chow","p":"ASCAP","i":"778261995"},{"n":"Christopher Dale Chrisman","f":"Christopher","l":"Dale Chrisman","p":"ASCAP","i":"826271145"},{"n":"Christopher Chrisman","f":"Christopher","l":"Chrisman","p":"ASCAP","i":"826271145"},{"n":"Blake Christiana","f":"Blake","l":"Christiana","p":"BMI","i":"484362143"},{"n":"Julie Collings","f":"Julie","l":"Collings","p":"BMI","i":"489150035"},{"n":"Renee Cologne","f":"Renee","l":"Cologne","p":"ASCAP","i":"253824269"},{"n":"Kevin Comden","f":"Kevin","l":"Comden","p":"ASCAP","i":"601094590"},{"n":"Dario Comuzzi","f":"Dario","l":"Comuzzi","p":"BMI","i":"690243350"},{"n":"John Conte","f":"John","l":"Conte","p":"ASCAP","i":"1519265"},{"n":"Ian Cooney","f":"Ian","l":"Cooney","p":"ASCAP","i":"56517963"},{"n":"Garrett Thomas Corbran","f":"Garrett","l":"Thomas Corbran","p":"ASCAP","i":"849357689"},{"n":"Peter Cornell","f":"Peter","l":"Cornell","p":"ASCAP","i":"822478824"},{"n":"Robert Critchley","f":"Robert","l":"Critchley","p":"SOCAN","i":"135336196"},{"n":"Sean Croley","f":"Sean","l":"Croley","p":"SOCAN","i":"226013120"},{"n":"Matthew Cusson","f":"Matthew","l":"Cusson","p":"ASCAP","i":"548637807"},{"n":"Angie Dais","f":"Angie","l":"Dais","p":"ASCAP","i":"825312461"},{"n":"Geoff Deitch","f":"Geoff","l":"Deitch","p":"BMI","i":"760680140"},{"n":"Malia Delacruz","f":"Malia","l":"Delacruz","p":"ASCAP","i":"1186870025"},{"n":"Sean Dixon","f":"Sean","l":"Dixon","p":"BMI","i":"356114870"},{"n":"Stephen Doster","f":"Stephen","l":"Doster","p":"BMI","i":"240113137"},{"n":"Gregory Douglass","f":"Gregory","l":"Douglass","p":"BMI","i":"513578746"},{"n":"Linda Draper","f":"Linda","l":"Draper","p":"BMI","i":"402451602"},{"n":"Jonathan Drury","f":"Jonathan","l":"Drury","p":"ASCAP","i":"516078263"},{"n":"Brandon Duggins","f":"Brandon","l":"Duggins","p":"BMI","i":"532136486"},{"n":"Aaron Dunn","f":"Aaron","l":"Dunn","p":"SOCAN","i":"675164034"},{"n":"Philip D\u2019Agostino","f":"Philip","l":"D\u2019Agostino","p":"ASCAP","i":"572316456"},{"n":"Willie Eaglin","f":"Willie","l":"Eaglin","p":"BMI","i":"460689627"},{"n":"JonJoseph Ehlers","f":"JonJoseph","l":"Ehlers","p":"ASCAP","i":"775218421"},{"n":"Vitali Ehret","f":"Vitali","l":"Ehret","p":"GEMA","i":"806596611"},{"n":"William Eisele","f":"William","l":"Eisele","p":"BMI","i":"209327774"},{"n":"Karim Bachir Elezaar","f":"Karim","l":"Bachir Elezaar","p":"SACEM","i":"81457561"},{"n":"Austin Elkington","f":"Austin","l":"Elkington","p":"BMI","i":"753644917"},{"n":"Michael Ellery","f":"Michael","l":"Ellery","p":"APRA","i":"726160263"},{"n":"Sayuri Elsie","f":"Sayuri","l":"Elsie","p":"ASCAP","i":"626341462"},{"n":"Friday Famous Endurance","f":"Friday","l":"Famous Endurance","p":"BMI","i":"1153071591"},{"n":"Troy Engle","f":"Troy","l":"Engle","p":"BMI","i":"358693216"},{"n":"Fima Ephron","f":"Fima","l":"Ephron","p":"BMI","i":"244357274"},{"n":"Bryn-Troy Evans","f":"Bryn-Troy","l":"Evans","p":"APRA","i":"437473638"},{"n":"Tony Exford","f":"Tony","l":"Exford","p":"ASCAP","i":"516119181"},{"n":"Steven Faile","f":"Steven","l":"Faile","p":"ASCAP","i":"469623713"},{"n":"Steven Farella","f":"Steven","l":"Farella","p":"ASCAP","i":"344012800"},{"n":"Kevin Farrell","f":"Kevin","l":"Farrell","p":"ASCAP","i":"510471200"},{"n":"Koebi Faumui","f":"Koebi","l":"Faumui","p":"APRA","i":"01335268354"},{"n":"Philip Feit","f":"Philip","l":"Feit","p":"GEMA","i":"531194964"},{"n":"Daniel Alejandro Fernandez","f":"Daniel","l":"Alejandro Fernandez","p":"BMI","i":"834639710"},{"n":"Matthew Ferrone","f":"Matthew","l":"Ferrone","p":"ASCAP","i":"469609213"},{"n":"Lindsay Fialka","f":"Lindsay","l":"Fialka","p":"SOCAN","i":"1185882315"},{"n":"Matt Filler","f":"Matt","l":"Filler","p":"ASCAP","i":"510394092"},{"n":"Matthew Filler","f":"Matthew","l":"Filler","p":"ASCAP","i":"510394092"},{"n":"Achim Fischer","f":"Achim","l":"Fischer","p":"BMI","i":"247274556"},{"n":"Michael Sean Flannery","f":"Michael","l":"Sean Flannery","p":"ASCAP","i":"348685907"},{"n":"Ari Folman-Cohen","f":"Ari","l":"Folman-Cohen","p":"ASCAP","i":"542161384"},{"n":"Aron Forbes","f":"Aron","l":"Forbes","p":"ASCAP","i":"561507166"},{"n":"Colin Andrew Ford","f":"Colin","l":"Andrew Ford","p":"SOCAN","i":"97054181"},{"n":"David John Forlano","f":"David","l":"John Forlano","p":"BMI","i":"755642029"},{"n":"Ryan Foss","f":"Ryan","l":"Foss","p":"ASCAP","i":"777844284"},{"n":"Peter Russell Fox","f":"Peter","l":"Russell Fox","p":"BMI","i":"221883575"},{"n":"Jonathan Foy","f":"Jonathan","l":"Foy","p":"BMI","i":"631128972"},{"n":"Yohoshua Fruchter","f":"Yohoshua","l":"Fruchter","p":"ASCAP","i":"766584884"},{"n":"Yoshie Fruchter","f":"Yoshie","l":"Fruchter","p":"ASCAP","i":"766584884"},{"n":"Brian Fuller","f":"Brian","l":"Fuller","p":"BMI","i":"843899188"},{"n":"Frank Funaro","f":"Frank","l":"Funaro","p":"BMI","i":"247274556"},{"n":"Ingo Gabriel","f":"Ingo","l":"Gabriel","p":"GEMA","i":"869622883"},{"n":"Brent Gallant","f":"Brent","l":"Gallant","p":"SOCAN","i":"496540422"},{"n":"Elaine Gallant","f":"Elaine","l":"Gallant","p":"SOCAN","i":"836654215"},{"n":"Angelina Gargano","f":"Angelina","l":"Gargano","p":"ASCAP","i":"493999376"},{"n":"Devin Gati","f":"Devin","l":"Gati","p":"ASCAP","i":"504250696"},{"n":"Jonathan Gejtman","f":"Jonathan","l":"Gejtman","p":"SADAIC","i":"640084082"},{"n":"Philip Gibbs","f":"Philip","l":"Gibbs","p":"BMI","i":"355737241"},{"n":"Kory Leigh Glattman","f":"Kory","l":"Leigh Glattman","p":"BMI","i":"756811224"},{"n":"Jesse Glick","f":"Jesse","l":"Glick","p":"ASCAP","i":null},{"n":"Sean Goldman","f":"Sean","l":"Goldman","p":"SOCAN","i":"869200424"},{"n":"Lisette Gonzalez-Alea","f":"Lisette","l":"Gonzalez-Alea","p":"SACEM","i":"405475371"},{"n":"Jonathan Gordon","f":"Jonathan","l":"Gordon","p":"BMI","i":"57988318"},{"n":"Daniel Gray","f":"Daniel","l":"Gray","p":"ASCAP","i":"467297019"},{"n":"Danny Gray","f":"Danny","l":"Gray","p":"ASCAP","i":"467297019"},{"n":"Eddie Grey","f":"Eddie","l":"Grey","p":"ASCAP","i":"716903245"},{"n":"Alex Grinacoff","f":"Alex","l":"Grinacoff","p":"BMI","i":"1231726383"},{"n":"Gavi Grodsky","f":"Gavi","l":"Grodsky","p":"ASCAP","i":"639077912"},{"n":"Ulrich Guggenberger","f":"Ulrich","l":"Guggenberger","p":"ASCAP","i":"474680035"},{"n":"Sean Hagon","f":"Sean","l":"Hagon","p":"BMI","i":"550228693"},{"n":"Douglas W. Hall","f":"Douglas","l":"W. Hall","p":"SESAC","i":"380516"},{"n":"Medhat Hanbali","f":"Medhat","l":"Hanbali","p":"SOCAN","i":"683461523"},{"n":"Joanne Harris","f":"Joanne","l":"Harris","p":"ASCAP","i":"575913319"},{"n":"Jonathan Harter","f":"Jonathan","l":"Harter","p":"ASCAP","i":"516552558"},{"n":"Joshua Harter","f":"Joshua","l":"Harter","p":"ASCAP","i":"528694414"},{"n":"KeithAllen Harter","f":"KeithAllen","l":"Harter","p":"BMI","i":"186785020"},{"n":"Dane Hartsett","f":"Dane","l":"Hartsett","p":"SOCAN","i":"645303954"},{"n":"Chris Hartway","f":"Chris","l":"Hartway","p":"ASCAP","i":"507955432"},{"n":"Frederic Hau","f":"Frederic","l":"Hau","p":"GEMA","i":"456506154"},{"n":"Matthias Hauck","f":"Matthias","l":"Hauck","p":"GEMA","i":"496197303"},{"n":"Kyle Hauser","f":"Kyle","l":"Hauser","p":"ASCAP","i":"512070602"},{"n":"Evan Haymond","f":"Evan","l":"Haymond","p":"ASCAP","i":"731425860"},{"n":"Cosmos-Sunshine Heidtmann","f":"Cosmos-Sunshine","l":"Heidtmann","p":"BMI","i":"730879422"},{"n":"Nepomuk Heller","f":"Nepomuk","l":"Heller","p":"GEMA","i":"549787583"},{"n":"Matt Hendricks","f":"Matt","l":"Hendricks","p":"ASCAP","i":"747955979"},{"n":"Matthew Hendricks","f":"Matthew","l":"Hendricks","p":"ASCAP","i":"747955979"},{"n":"Lars Hesse","f":"Lars","l":"Hesse","p":"GEMA","i":"406448956"},{"n":"Simon Hesselein","f":"Simon","l":"Hesselein","p":"GEMA","i":"252362094"},{"n":"Braxton Raymond Hicks","f":"Braxton","l":"Raymond Hicks","p":"SOCAN","i":"858318799"},{"n":"Stewart Joseph Hidalgo","f":"Stewart","l":"Joseph Hidalgo","p":"BMI","i":"680267631"},{"n":"Lou Hill","f":"Lou","l":"Hill","p":"BMI","i":"503936657"},{"n":"Andrew Hind","f":"Andrew","l":"Hind","p":"ASCAP","i":"871578104"},{"n":"Stephen Hoevertsz","f":"Stephen","l":"Hoevertsz","p":"SESAC","i":"288542133"},{"n":"Michael Holland","f":"Michael","l":"Holland","p":"ASCAP","i":"602336685"},{"n":"Matthew Hollingsworth","f":"Matthew","l":"Hollingsworth","p":"ASCAP","i":"646597204"},{"n":"Daniel Hollman","f":"Daniel","l":"Hollman","p":"BMI","i":"218160984"},{"n":"Philip Horn","f":"Philip","l":"Horn","p":"BMI","i":"773529117"},{"n":"Chaun Horton","f":"Chaun","l":"Horton","p":"ASCAP","i":"698141607"},{"n":"Loren Humphrey","f":"Loren","l":"Humphrey","p":"ASCAP","i":"349365336"},{"n":"Adam Iorfida","f":"Adam","l":"Iorfida","p":"ASCAP","i":"858694862"},{"n":"Sinisa Itskovich","f":"Sinisa","l":"Itskovich","p":"GEMA","i":"282972431"},{"n":"Joanna Iwanowicz","f":"Joanna","l":"Iwanowicz","p":"ASCAP","i":"634874715"},{"n":"Benjamin Jacobs","f":"Benjamin","l":"Jacobs","p":"BMI","i":"587049707"},{"n":"David Janus","f":"David","l":"Janus","p":"GEMA","i":"611986928"},{"n":"Richard Jay","f":"Richard","l":"Jay","p":"ASCAP","i":"346555642"},{"n":"Bryan Jennings","f":"Bryan","l":"Jennings","p":"ASCAP","i":"503812780"},{"n":"Jan Jirasek","f":"Jan","l":"Jirasek","p":"GEMA","i":"201785784"},{"n":"Christopher Johanson","f":"Christopher","l":"Johanson","p":"BMI","i":"371276753"},{"n":"Irv Johnson","f":"Irv","l":"Johnson","p":"BMI","i":"223528881"},{"n":"Irvin Johnson","f":"Irvin","l":"Johnson","p":"BMI","i":"223528881"},{"n":"Jeremy Johnson","f":"Jeremy","l":"Johnson","p":"BMI","i":"496847193"},{"n":"Michael Glynn Johnson","f":"Michael","l":"Glynn Johnson","p":"SOCAN","i":"217180394"},{"n":"Steven Wayne Johnson","f":"Steven","l":"Wayne Johnson","p":"BMI","i":"816530450"},{"n":"Elyse J Jones","f":"Elyse","l":"J Jones","p":"ASCAP","i":"1077531258"},{"n":"Anthony Clint, Jr","f":"Anthony","l":"Clint, Jr","p":"SESAC","i":"564107462"},{"n":"Kenneth Lamont Washington Jr","f":"Kenneth","l":"Lamont Washington Jr","p":"BMI","i":"780454430"},{"n":"Diego Fernando Juantorena","f":"Diego","l":"Fernando Juantorena","p":"SADAIC","i":"1018633479"},{"n":"Tamara Kachelmeier","f":"Tamara","l":"Kachelmeier","p":"ASCAP","i":"677144030"},{"n":"Michael Kadelbach","f":"Michael","l":"Kadelbach","p":"GEMA","i":"271717757"},{"n":"Stylianos Michael Kalisperides","f":"Stylianos","l":"Michael Kalisperides","p":"ASCAP","i":"295973207"},{"n":"Katherine Rose Kaplan","f":"Katherine","l":"Rose Kaplan","p":"ASCAP","i":"689822287"},{"n":"Matt Kassell","f":"Matt","l":"Kassell","p":"PRS","i":"614319175"},{"n":"Tamera Katchelmeyer","f":"Tamera","l":"Katchelmeyer","p":"ASCAP","i":"677144030"},{"n":"Matt Keating","f":"Matt","l":"Keating","p":"ASCAP","i":"129175470"},{"n":"Christopher Keene","f":"Christopher","l":"Keene","p":"ASCAP","i":"530970460"},{"n":"Stephen Kellogg","f":"Stephen","l":"Kellogg","p":"ASCAP","i":"344682940"},{"n":"Dominic Kelly","f":"Dominic","l":"Kelly","p":"ASCAP","i":"338412667"},{"n":"Michael Kenny","f":"Michael","l":"Kenny","p":"BMI","i":"87221867"},{"n":"James Karl Kernick","f":"James","l":"Karl Kernick","p":"ASCAP","i":"348621257"},{"n":"James Kyle Kernick","f":"James","l":"Kyle Kernick","p":"ASCAP","i":"348621257"},{"n":"John Kewen","f":"John","l":"Kewen","p":"SUISA","i":"89946700"},{"n":"Florian Kiermaier","f":"Florian","l":"Kiermaier","p":"GEMA","i":"653754524"},{"n":"Derek Kintz","f":"Derek","l":"Kintz","p":"BMI","i":"753644819"},{"n":"James Klein","f":"James","l":"Klein","p":"ASCAP","i":"143375286"},{"n":"Adam Knobloch","f":"Adam","l":"Knobloch","p":"ASCAP","i":"1176815335"},{"n":"Michael Koch","f":"Michael","l":"Koch","p":"GEMA","i":"282791728"},{"n":"Jonas Krag","f":"Jonas","l":"Krag","p":"KODA","i":"2199469446"},{"n":"Jonathan Krimstock","f":"Jonathan","l":"Krimstock","p":"ASCAP","i":"339679018"},{"n":"Dan Krochmal","f":"Dan","l":"Krochmal","p":"APRA","i":"663839211"},{"n":"Phil Kullmann","f":"Phil","l":"Kullmann","p":"GEMA","i":"432915367"},{"n":"Mathias Kunzli","f":"Mathias","l":"Kunzli","p":"BMI","i":"505057287"},{"n":"Timothy Kvasnosky","f":"Timothy","l":"Kvasnosky","p":"ASCAP","i":"349729026"},{"n":"Michael LaMorte","f":"Michael","l":"LaMorte","p":"SESAC","i":"3392458465"},{"n":"Garrett Lamp","f":"Garrett","l":"Lamp","p":"ASCAP","i":"760707930"},{"n":"Blaise Lanzetta","f":"Blaise","l":"Lanzetta","p":"BMI","i":"550105585"},{"n":"Jacob Lawson","f":"Jacob","l":"Lawson","p":"BMI","i":"550319624"},{"n":"Ronnie Lawson","f":"Ronnie","l":"Lawson","p":"BMI","i":"246120400"},{"n":"Amy Marie Layou","f":"Amy","l":"Marie Layou","p":"ASCAP","i":"396038729"},{"n":"Mitch Lee","f":"Mitch","l":"Lee","p":"SOCAN","i":"459066725"},{"n":"Paul Levasseur","f":"Paul","l":"Levasseur","p":"SOCAN","i":"871163927"},{"n":"Daniel Levasseur","f":"Daniel","l":"Levasseur","p":"SOCAN","i":"1070647273"},{"n":"Michael Levine","f":"Michael","l":"Levine","p":"ASCAP","i":"336631762"},{"n":"Holden Lewis","f":"Holden","l":"Lewis","p":"ASCAP","i":"547034656"},{"n":"Lejon Lewis","f":"Lejon","l":"Lewis","p":"BMI","i":"768912886"},{"n":"Richard Lewis","f":"Richard","l":"Lewis","p":"PRS","i":"477553613"},{"n":"Dennis Lichtman","f":"Dennis","l":"Lichtman","p":"ASCAP","i":"468976580"},{"n":"Eric Liljestrand","f":"Eric","l":"Liljestrand","p":"BMI","i":"193960240"},{"n":"Arizona Lindsey","f":"Arizona","l":"Lindsey","p":"BMI","i":"550619524"},{"n":"Ralf Lippmann","f":"Ralf","l":"Lippmann","p":"GEMA","i":"557926406"},{"n":"Dong Liu","f":"Dong","l":"Liu","p":"ASCAP","i":"734055262"},{"n":"Peter Lobo","f":"Peter","l":"Lobo","p":"ASCAP","i":"476561817"},{"n":"Leon Lohmann","f":"Leon","l":"Lohmann","p":"BMI","i":"1061750972"},{"n":"Mario Lopez","f":"Mario","l":"Lopez","p":"BMI","i":"753644623"},{"n":"Ben Loshin","f":"Ben","l":"Loshin","p":"ASCAP","i":"777088296"},{"n":"Kolbrynn Vahn Lowdell","f":"Kolbrynn","l":"Vahn Lowdell","p":"BMI","i":"390222973"},{"n":"Bryant Lowry","f":"Bryant","l":"Lowry","p":"BMI","i":"756875093"},{"n":"Jonathan Luis","f":"Jonathan","l":"Luis","p":"BMI","i":"1147251376"},{"n":"Jon Madof","f":"Jon","l":"Madof","p":"BMI","i":"355676527"},{"n":"Jonathan Madof","f":"Jonathan","l":"Madof","p":"BMI","i":"355676527"},{"n":"Bill Maier","f":"Bill","l":"Maier","p":"ASCAP","i":"181950851"},{"n":"Robert Mangano","f":"Robert","l":"Mangano","p":"BMI","i":"572689502"},{"n":"Tim Mann","f":"Tim","l":"Mann","p":"SOCAN","i":"471114682"},{"n":"Scot Manwiller","f":"Scot","l":"Manwiller","p":"BMI","i":"182664550"},{"n":"Senne Van Marissing","f":"Senne","l":"Van Marissing","p":"BMI","i":"887864163"},{"n":"Mark Marshall","f":"Mark","l":"Marshall","p":"ASCAP","i":"553341859"},{"n":"Ariel Marx","f":"Ariel","l":"Marx","p":"ASCAP","i":"747263327"},{"n":"Juan Masotta","f":"Juan","l":"Masotta","p":"BMI","i":"492323455"},{"n":"Stefano Mastronardi","f":"Stefano","l":"Mastronardi","p":"BMI","i":"430488857"},{"n":"Kincheloe Jackson Matthew","f":"Kincheloe","l":"Jackson Matthew","p":"BMI","i":"756897079"},{"n":"Steve Mayone","f":"Steve","l":"Mayone","p":"SESAC","i":"291601378"},{"n":"Brooke Maytorena","f":"Brooke","l":"Maytorena","p":"BMI","i":"1080732868"},{"n":"Francisco Perez Mazon","f":"Francisco","l":"Perez Mazon","p":"AKM","i":"487232338"},{"n":"Raphael McGregor","f":"Raphael","l":"McGregor","p":"ASCAP","i":"549934994"},{"n":"Taylor McLam","f":"Taylor","l":"McLam","p":"ASCAP","i":"341161207"},{"n":"Hugo McLaughlin","f":"Hugo","l":"McLaughlin","p":"SOCAN","i":"296552820"},{"n":"Marvin Benjamin McMahon","f":"Marvin","l":"Benjamin McMahon","p":"PRS","i":"717630251"},{"n":"Sean McMillion","f":"Sean","l":"McMillion","p":"ASCAP","i":"446247451"},{"n":"Sean McMillon","f":"Sean","l":"McMillon","p":"ASCAP","i":"446247451"},{"n":"David McNally","f":"David","l":"McNally","p":"BMI","i":"592715915"},{"n":"Zach McNees","f":"Zach","l":"McNees","p":"ASCAP","i":"670838911"},{"n":"Jeff McQuilkin","f":"Jeff","l":"McQuilkin","p":"ASCAP","i":"424081979"},{"n":"Jeffrey McQuilkin","f":"Jeffrey","l":"McQuilkin","p":"ASCAP","i":"424081979"},{"n":"Kelley McRae","f":"Kelley","l":"McRae","p":"ASCAP","i":"680452248"},{"n":"Ethan Meixsell","f":"Ethan","l":"Meixsell","p":"BMI","i":"514451186"},{"n":"Justin Meli","f":"Justin","l":"Meli","p":"SOCAN","i":"637706038"},{"n":"Kevin Mello","f":"Kevin","l":"Mello","p":"BMI","i":"550404685"},{"n":"Jeremy Mendicino","f":"Jeremy","l":"Mendicino","p":"ASCAP","i":"565167040"},{"n":"Julian Menkin","f":"Julian","l":"Menkin","p":"ASCAP","i":"738413730"},{"n":"Danielle Merlis","f":"Danielle","l":"Merlis","p":"ASCAP","i":"751817922"},{"n":"Thierry Christophe Meyer","f":"Thierry","l":"Christophe Meyer","p":"SACEM","i":"150936966"},{"n":"Paul Micca","f":"Paul","l":"Micca","p":"ASCAP","i":"1128605176"},{"n":"Pietro Milanesi","f":"Pietro","l":"Milanesi","p":"ASCAP","i":"713867036"},{"n":"Olivier Militon","f":"Olivier","l":"Militon","p":"SACEM","i":"676016733"},{"n":"Braden Miller","f":"Braden","l":"Miller","p":"ASCAP","i":"502865169"},{"n":"Jeff Miller","f":"Jeff","l":"Miller","p":"ASCAP","i":"339529239"},{"n":"Robin Lewis Miller","f":"Robin","l":"Lewis Miller","p":"ASCAP","i":"417647642"},{"n":"Tamara R Miller","f":"Tamara","l":"R Miller","p":"SOCAN","i":"433229674"},{"n":"Peter Min","f":"Peter","l":"Min","p":"ASCAP","i":"335592844"},{"n":"Adam Daniel Minkoff","f":"Adam","l":"Daniel Minkoff","p":"ASCAP","i":"705942833"},{"n":"Paul Mitch","f":"Paul","l":"Mitch","p":"BMI","i":"495988273"},{"n":"John Moore","f":"John","l":"Moore","p":"ASCAP","i":"713296547"},{"n":"JohnJay Moore","f":"JohnJay","l":"Moore","p":"ASCAP","i":"713296547"},{"n":"Karl Moore","f":"Karl","l":"Moore","p":"BMI","i":"572525739"},{"n":"David Moreno","f":"David","l":"Moreno","p":"ASCAP","i":"772628905"},{"n":"Rod Morgenstein","f":"Rod","l":"Morgenstein","p":"BMI","i":"229408564"},{"n":"Stephan Moritz","f":"Stephan","l":"Moritz","p":"GEMA","i":"287516041"},{"n":"Jonathan Morrow","f":"Jonathan","l":"Morrow","p":"ASCAP","i":"444589328"},{"n":"Jason Mraz","f":"Jason","l":"Mraz","p":"ASCAP","i":"344456264"},{"n":"David Mueller","f":"David","l":"Mueller","p":"GEMA","i":"468052936"},{"n":"Florian Mueller","f":"Florian","l":"Mueller","p":"GEMA","i":"735229246"},{"n":"James Mulvale","f":"James","l":"Mulvale","p":"SOCAN","i":"67809909"},{"n":"Jennifer Mulvale","f":"Jennifer","l":"Mulvale","p":"SOCAN","i":"670386334"},{"n":"Jonathan Munoz","f":"Jonathan","l":"Munoz","p":"BMI","i":"550414722"},{"n":"Nate Myotte","f":"Nate","l":"Myotte","p":"BMI","i":"807242554"},{"n":"Ryan Nach","f":"Ryan","l":"Nach","p":"ASCAP","i":"621624770"},{"n":"Scott Neubert","f":"Scott","l":"Neubert","p":"ASCAP","i":"337352662"},{"n":"Oliver Nicholson","f":"Oliver","l":"Nicholson","p":"PRS","i":"1175517546"},{"n":"Derek Nievergelt","f":"Derek","l":"Nievergelt","p":"SESAC","i":"514607276"},{"n":"Antonio Nico Nieves","f":"Antonio","l":"Nico Nieves","p":"ASCAP","i":"834264341"},{"n":"Tjeerd Nijhof","f":"Tjeerd","l":"Nijhof","p":"BMI BUMA","i":"804373944"},{"n":"Eric Nolan","f":"Eric","l":"Nolan","p":"BMI","i":"744461635"},{"n":"Michael Norris","f":"Michael","l":"Norris","p":"ASCAP","i":"786469378"},{"n":"David Stepan Norris","f":"David","l":"Stepan Norris","p":"ASCAP","i":"760961620"},{"n":"Devin Stepan Norris","f":"Devin","l":"Stepan Norris","p":"ASCAP","i":"760961620"},{"n":"Christopher North","f":"Christopher","l":"North","p":"BMI","i":"183270572"},{"n":"Tim Nowack","f":"Tim","l":"Nowack","p":"GEMA","i":"254482167"},{"n":"Tim-Ryan O'Kane","f":"Tim-Ryan","l":"O'Kane","p":"ASCAP","i":"630951163"},{"n":"Emmett Claran O'Malley","f":"Emmett","l":"Claran O'Malley","p":"BMI","i":"289441429"},{"n":"Emmett O'Malley","f":"Emmett","l":"O'Malley","p":"BMI","i":"289441429"},{"n":"Oisin O'Malley","f":"Oisin","l":"O'Malley","p":"BMI","i":"457630051"},{"n":"Clark Oler","f":"Clark","l":"Oler","p":"BMI","i":"120775592"},{"n":"Clarke Kim Oler","f":"Clarke","l":"Kim Oler","p":"BMI","i":"120775592"},{"n":"Aren G. Olsen","f":"Aren","l":"G. Olsen","p":"ASCAP","i":"345512281"},{"n":"Seth Ondracek","f":"Seth","l":"Ondracek","p":"SESAC","i":"1057842348"},{"n":"Roy Oommen","f":"Roy","l":"Oommen","p":"SOCAN","i":"531236193"},{"n":"Andrew Osborn","f":"Andrew","l":"Osborn","p":"BMI","i":"506178755"},{"n":"Jonathan Ososki","f":"Jonathan","l":"Ososki","p":"ASCAP","i":"474468225"},{"n":"Aurore Ounjian","f":"Aurore","l":"Ounjian","p":"ASCAP","i":"583877296"},{"n":"Dylan Owens","f":"Dylan","l":"Owens","p":"SESAC","i":"684951499"},{"n":"Matt Owens","f":"Matt","l":"Owens","p":"PRS","i":"425162581"},{"n":"Matthew Owens","f":"Matthew","l":"Owens","p":"PRS","i":"425162581"},{"n":"Pete Palestina","f":"Pete","l":"Palestina","p":"BMI","i":"535605654"},{"n":"Steven Parry","f":"Steven","l":"Parry","p":"SUISA","i":"548456910"},{"n":"Ronald Passaro","f":"Ronald","l":"Passaro","p":"ASCAP","i":"340503407"},{"n":"Leah Paul","f":"Leah","l":"Paul","p":"BMI","i":"601921190"},{"n":"Christopher Paulson","f":"Christopher","l":"Paulson","p":"SOCAN","i":"716261066"},{"n":"Dennis Frank Pedula","f":"Dennis","l":"Frank Pedula","p":"ASCAP","i":"464375732"},{"n":"Remy Perrin","f":"Remy","l":"Perrin","p":"BMI","i":"566062642"},{"n":"Marco Pesci","f":"Marco","l":"Pesci","p":"BMI","i":"559673006"},{"n":"Aaron Di Piazza","f":"Aaron","l":"Di Piazza","p":"ASCAP","i":"732724058"},{"n":"Greg Pliska","f":"Greg","l":"Pliska","p":"ASCAP","i":"465967991"},{"n":"Gregory Pliska","f":"Gregory","l":"Pliska","p":"ASCAP","i":"465967991"},{"n":"Simon Poole","f":"Simon","l":"Poole","p":"SOCAN","i":"460154287"},{"n":"Wagner Previato","f":"Wagner","l":"Previato","p":"ASCAP","i":"507851449"},{"n":"Marc Pueschl","f":"Marc","l":"Pueschl","p":"GEMA","i":"364346945"},{"n":"Kyle Querec","f":"Kyle","l":"Querec","p":"ASCAP","i":"481294344"},{"n":"Ken Ramm","f":"Ken","l":"Ramm","p":"SOCAN","i":"3488962"},{"n":"Derek Randle","f":"Derek","l":"Randle","p":"BMI","i":"11567741648"},{"n":"Jason Reeves","f":"Jason","l":"Reeves","p":"ASCAP","i":"526741352"},{"n":"Michael Reinmueller","f":"Michael","l":"Reinmueller","p":"SOCAN","i":"45586363"},{"n":"James Richardson","f":"James","l":"Richardson","p":"SESAC","i":"612101222"},{"n":"Peter Riese","f":"Peter","l":"Riese","p":"GEMA","i":"225726179"},{"n":"Marcus Von Rittberg","f":"Marcus","l":"Von Rittberg","p":"ASCAP","i":"579405906"},{"n":"Jake Rivlin","f":"Jake","l":"Rivlin","p":"ASCAP","i":"643109272"},{"n":"Brent Robitaille","f":"Brent","l":"Robitaille","p":"SOCAN","i":"718453140"},{"n":"Rouvan Gus Roman","f":"Rouvan","l":"Gus Roman","p":"ASCAP","i":"488510331"},{"n":"Mark Roos","f":"Mark","l":"Roos","p":"ASCAP","i":"337948716"},{"n":"Daniel Roselle","f":"Daniel","l":"Roselle","p":"ASCAP","i":"581318645"},{"n":"Danny Roselle","f":"Danny","l":"Roselle","p":"ASCAP","i":"581318645"},{"n":"Justin Rosin","f":"Justin","l":"Rosin","p":"BMI","i":"635066257"},{"n":"Amber Rubarth","f":"Amber","l":"Rubarth","p":"ASCAP","i":"465956211"},{"n":"Mike Rubino","f":"Mike","l":"Rubino","p":"ASCAP","i":"346836926"},{"n":"Shawn Russell","f":"Shawn","l":"Russell","p":"ASCAP","i":"649719104"},{"n":"Elaine Ryan","f":"Elaine","l":"Ryan","p":"SOCAN","i":"529559904"},{"n":"Joshua SadlierBrown","f":"Joshua","l":"SadlierBrown","p":"ASCAP","i":"655963011"},{"n":"Ariel Salerno","f":"Ariel","l":"Salerno","p":"BMI","i":"1212866664"},{"n":"Aaron Saloman","f":"Aaron","l":"Saloman","p":"SOCAN","i":"290230885"},{"n":"Ramiro Alvarez Sanchez","f":"Ramiro","l":"Alvarez Sanchez","p":"SADAIC","i":"847849478"},{"n":"Sergio Perez Sanchez","f":"Sergio","l":"Perez Sanchez","p":"SGAE","i":"395971205"},{"n":"Darko Saric","f":"Darko","l":"Saric","p":"ASCAP","i":"421161213"},{"n":"Kelli Scarr","f":"Kelli","l":"Scarr","p":"ASCAP","i":"497055912"},{"n":"Stephan Schelens","f":"Stephan","l":"Schelens","p":"GEMA","i":"654670135"},{"n":"Jeffrey Schiller","f":"Jeffrey","l":"Schiller","p":"ASCAP","i":"453688227"},{"n":"Garett Schmidt","f":"Garett","l":"Schmidt","p":"SOCAN","i":"96964095"},{"n":"Frank Schwillewski","f":"Frank","l":"Schwillewski","p":"GEMA","i":"254975431"},{"n":"Daniel Scording","f":"Daniel","l":"Scording","p":"BMI","i":"522748061"},{"n":"Wolfgang Setik","f":"Wolfgang","l":"Setik","p":"GEMA","i":"245650764"},{"n":"Johannes Seywald","f":"Johannes","l":"Seywald","p":"AKM","i":"1024089"},{"n":"Michael Shaaf","f":"Michael","l":"Shaaf","p":"GEMA","i":"210926400"},{"n":"Rahul Shah","f":"Rahul","l":"Shah","p":"BMI","i":"774282417"},{"n":"Riza Azeer Shahid","f":"Riza","l":"Azeer Shahid","p":"ASCAP","i":"1049410185"},{"n":"Justin Shearn","f":"Justin","l":"Shearn","p":"PRS","i":"568403533"},{"n":"James Sheehan","f":"James","l":"Sheehan","p":"SOCAN","i":"609921534"},{"n":"Alexander Sherba","f":"Alexander","l":"Sherba","p":"ASCAP","i":"758129709"},{"n":"Anthony Shipman","f":"Anthony","l":"Shipman","p":"BMI","i":"358819906"},{"n":"Aldo Shllaku","f":"Aldo","l":"Shllaku","p":"BMI","i":"280316191"},{"n":"Kevin Shoemaker","f":"Kevin","l":"Shoemaker","p":"ASCAP","i":"776201538"},{"n":"Andrew Shoniker","f":"Andrew","l":"Shoniker","p":"SOCAN","i":"685689472"},{"n":"Khwezi Sifunda","f":"Khwezi","l":"Sifunda","p":"ASCAP","i":"891121445"},{"n":"Sergio Silva","f":"Sergio","l":"Silva","p":"ASCAP","i":"778469961"},{"n":"Rashod Singleton","f":"Rashod","l":"Singleton","p":"BMI","i":"621879823"},{"n":"Samuel Skinner","f":"Samuel","l":"Skinner","p":"BMI","i":"573759898"},{"n":"Stephen Skinner","f":"Stephen","l":"Skinner","p":"BMI","i":"144989430"},{"n":"Steve Skinner","f":"Steve","l":"Skinner","p":"BMI","i":"144989430"},{"n":"Darren Smith","f":"Darren","l":"Smith","p":"SESAC","i":"504069087"},{"n":"Armin Solo","f":"Armin","l":"Solo","p":"ASCAP","i":"779534095"},{"n":"Maya Solovey","f":"Maya","l":"Solovey","p":"SESAC","i":"479009824"},{"n":"Maya Solov\u00e9y","f":"Maya","l":"Solov\u00e9y","p":"SESAC","i":"479010063"},{"n":"Shane Spaulding","f":"Shane","l":"Spaulding","p":"ASCAP","i":"567355126"},{"n":"Alexander Bernhardt Spiegelman","f":"Alexander","l":"Bernhardt Spiegelman","p":"ASCAP","i":"600988249"},{"n":"Sebastian Arno Sprenger","f":"Sebastian","l":"Arno Sprenger","p":"GEMA","i":"785210144"},{"n":"Andrew Stamp","f":"Andrew","l":"Stamp","p":"PRS","i":"755933309"},{"n":"Andrew Stanton","f":"Andrew","l":"Stanton","p":"BMI","i":"584342045"},{"n":"Matthew Stein","f":"Matthew","l":"Stein","p":"BMI","i":"194213966"},{"n":"Erik Steinert","f":"Erik","l":"Steinert","p":"ASCAP","i":"129651955"},{"n":"Kari Steinert","f":"Kari","l":"Steinert","p":"BMI","i":"230978754"},{"n":"Benjamin William Sturley","f":"Benjamin","l":"William Sturley","p":"ASCAP","i":"748783781"},{"n":"Maurice Stute","f":"Maurice","l":"Stute","p":"GEMA","i":"906286426"},{"n":"William Sullivan","f":"William","l":"Sullivan","p":"ASCAP","i":"516587237"},{"n":"Henry Sullivant","f":"Henry","l":"Sullivant","p":"ASCAP","i":"476539903"},{"n":"Thomas Swindell","f":"Thomas","l":"Swindell","p":"PRS","i":"484093241"},{"n":"Thomas Swindells","f":"Thomas","l":"Swindells","p":"PRS","i":"484093241"},{"n":"Nicolas Sylvestre","f":"Nicolas","l":"Sylvestre","p":"SOCAN","i":"577555305"},{"n":"Marian Szymczk","f":"Marian","l":"Szymczk","p":"GEMA","i":"14657000"},{"n":"Kim Taylor","f":"Kim","l":"Taylor","p":"ASCAP","i":"478045140"},{"n":"Lizzi Taylor","f":"Lizzi","l":"Taylor","p":"PRS","i":"683955199"},{"n":"Mark Taylor","f":"Mark","l":"Taylor","p":"ASCAP","i":"337161083"},{"n":"Eduard Telik","f":"Eduard","l":"Telik","p":"GEMA","i":"708990703"},{"n":"Todd Thibaud","f":"Todd","l":"Thibaud","p":"ASCAP","i":"338420473"},{"n":"Theodore Thomas","f":"Theodore","l":"Thomas","p":"BMI","i":"496593001"},{"n":"Tayib Thomas","f":"Tayib","l":"Thomas","p":"GEMA","i":"01103920503"},{"n":"Scott Thompson","f":"Scott","l":"Thompson","p":"SOCAN","i":"737885489"},{"n":"Matt Thorne","f":"Matt","l":"Thorne","p":"ASCAP","i":"126052507"},{"n":"Christopher Toland","f":"Christopher","l":"Toland","p":"BMI","i":"196031374"},{"n":"Michael Toland","f":"Michael","l":"Toland","p":"ASCAP","i":"339072755"},{"n":"Roberto Joaquin Rodriguez Del Toro","f":"Roberto","l":"Joaquin Rodriguez Del Toro","p":"BMI","i":"846645996"},{"n":"Luis Ricardo Torres","f":"Luis","l":"Ricardo Torres","p":"SESAC","i":"612993535"},{"n":"Jordan Trabue","f":"Jordan","l":"Trabue","p":"SESAC","i":"692404831"},{"n":"Toshi Trebess","f":"Toshi","l":"Trebess","p":"GEMA","i":"242172006"},{"n":"Ryan Trebilcock","f":"Ryan","l":"Trebilcock","p":"PRS","i":"869040712"},{"n":"Matthew Trivigno","f":"Matthew","l":"Trivigno","p":"ASCAP","i":"643293543"},{"n":"Adonis Tsilimparis","f":"Adonis","l":"Tsilimparis","p":"ASCAP","i":"336947529"},{"n":"Jacob Turner","f":"Jacob","l":"Turner","p":"BMI","i":"674031066"},{"n":"Nicholas Jonathan Tyler","f":"Nicholas","l":"Jonathan Tyler","p":"ASCAP","i":"420236211"},{"n":"Natasha Tyrimos","f":"Natasha","l":"Tyrimos","p":"PRS","i":"745525040"},{"n":"Mathieu Vachon","f":"Mathieu","l":"Vachon","p":"SOCAN","i":"531252491"},{"n":"Lucas De Valdivia","f":"Lucas","l":"De Valdivia","p":"ASCAP","i":"871735903"},{"n":"Ken Vandevrie","f":"Ken","l":"Vandevrie","p":"SOCAN","i":"226456176"},{"n":"Kurtis Vandevrie","f":"Kurtis","l":"Vandevrie","p":"SOCAN","i":"1010577798"},{"n":"Quentin Vandevrie","f":"Quentin","l":"Vandevrie","p":"SOCAN","i":"1059924039"},{"n":"Russel Vandevrie","f":"Russel","l":"Vandevrie","p":"SOCAN","i":"384727034"},{"n":"Russell Vandevrie","f":"Russell","l":"Vandevrie","p":"SOCAN","i":"384727034"},{"n":"Eric Varnell","f":"Eric","l":"Varnell","p":"ASCAP","i":"602014123"},{"n":"Jonathan Vergara","f":"Jonathan","l":"Vergara","p":"ASCAP","i":"612227978"},{"n":"Jonathan Vieira","f":"Jonathan","l":"Vieira","p":"BMI","i":"523399836"},{"n":"Lucas Villemur","f":"Lucas","l":"Villemur","p":"BMI","i":"642269641"},{"n":"Tobias Vogel","f":"Tobias","l":"Vogel","p":"GEMA","i":"597251024"},{"n":"Marc VonMolnar","f":"Marc","l":"VonMolnar","p":"ASCAP","i":"335296847"},{"n":"Marcus VonRittberg","f":"Marcus","l":"VonRittberg","p":"ASCAP","i":"579405906"},{"n":"William Bradley Vosburg","f":"William","l":"Bradley Vosburg","p":"BMI","i":"187026560"},{"n":"Michail Votzaropoulos","f":"Michail","l":"Votzaropoulos","p":"PRS","i":"756468794"},{"n":"Lars Wallem","f":"Lars","l":"Wallem","p":"GEMA","i":"258984"},{"n":"Jake Warren","f":"Jake","l":"Warren","p":"PRS","i":"573174050"},{"n":"Bart Warshaw","f":"Bart","l":"Warshaw","p":"PRS","i":"648099505"},{"n":"Terrence Watkin","f":"Terrence","l":"Watkin","p":"ASCAP","i":"510468871"},{"n":"Richard Webster","f":"Richard","l":"Webster","p":"ASCAP","i":"464553540"},{"n":"Gabrielle Coral Weinberger","f":"Gabrielle","l":"Coral Weinberger","p":"BMI","i":"617492827"},{"n":"Heide Weisse","f":"Heide","l":"Weisse","p":"ASCAP","i":"385591322"},{"n":"Stacy Marie Werdin","f":"Stacy","l":"Marie Werdin","p":"BMI","i":"368252640"},{"n":"Alex Whalen","f":"Alex","l":"Whalen","p":"BMI","i":"819361819"},{"n":"Kevin Wideman","f":"Kevin","l":"Wideman","p":"SOCAN","i":"666148815"},{"n":"Jimmie Williams","f":"Jimmie","l":"Williams","p":"ASCAP","i":"341923964"},{"n":"Mark Williams","f":"Mark","l":"Williams","p":"ASCAP","i":"347476630"},{"n":"Mike Williams","f":"Mike","l":"Williams","p":"ASCAP","i":"338929225"},{"n":"Brandon Wilson","f":"Brandon","l":"Wilson","p":"BMI","i":"815957407"},{"n":"Tony Wilson","f":"Tony","l":"Wilson","p":"PRS","i":"225955846"},{"n":"Ta-Ri Charles Wendell Wilson","f":"Ta-Ri","l":"Charles Wendell Wilson","p":"BMI","i":"650559145"},{"n":"Alexander Wittkowski","f":"Alexander","l":"Wittkowski","p":"GEMA","i":"525597330"},{"n":"Kevin Won","f":"Kevin","l":"Won","p":"SOCAN","i":"804556737"},{"n":"Alex Wong","f":"Alex","l":"Wong","p":"ASCAP","i":"439767800"},{"n":"Walter Woods","f":"Walter","l":"Woods","p":"BMI","i":"513503397"},{"n":"Ross Geoffrey Woolridge","f":"Ross","l":"Geoffrey Woolridge","p":"SOCAN","i":"131932986"},{"n":"Erik Wormwood","f":"Erik","l":"Wormwood","p":"ASCAP","i":"591175829"},{"n":"Semih Kadir Yanyali","f":"Semih","l":"Kadir Yanyali","p":"ASCAP","i":"822432956"},{"n":"Sven Zumbrock","f":"Sven","l":"Zumbrock","p":"GEMA","i":"735650437"},{"n":"Ben Zwerin","f":"Ben","l":"Zwerin","p":"ASCAP","i":"451532478"},{"n":"Michael Scott kettner","f":"Michael","l":"Scott kettner","p":"ASCAP","i":"485843411"}]
-  // Pass 1: update existing rows that are missing ipi/pro/names
-  const UPD = `UPDATE cowriters
-    SET first_name=COALESCE(NULLIF(first_name,''),$2),
-        last_name =COALESCE(NULLIF(last_name,''),$3),
-        pro       =COALESCE(NULLIF(pro,''),$4),
-        ipi       =COALESCE(NULLIF(ipi,''),$5)
-    WHERE cowriter_name=$1`
-  // Pass 2: insert rows that don't exist yet
-  const INS = `INSERT INTO cowriters (cowriter_name,first_name,last_name,pro,ipi)
-    VALUES ($1,$2,$3,$4,$5)
-    ON CONFLICT (cowriter_name) DO NOTHING`
-  for (let i = 0; i < cws.length; i += 30) {
-    const chunk = cws.slice(i, i+30)
-    await Promise.all(chunk.map(cw => pgQ(UPD,[cw.n,cw.f,cw.l,cw.p,cw.i]).catch(()=>{}) ))
-    await Promise.all(chunk.map(cw => pgQ(INS,[cw.n,cw.f,cw.l,cw.p,cw.i]).catch(()=>{}) ))
+    const cws = [{"n":"Brandon Adams","f":"Brandon","l":"Adams","p":"BMI","i":"727060850"},{"n":"Gaelan Sebastian Aguado","f":"Gaelan","l":"Sebastian Aguado","p":"ASCAP","i":"645719814"},{"n":"Michael Aharon","f":"Michael","l":"Aharon","p":"SESAC","i":"243682268"},{"n":"Konstantine Aivaliotis","f":"Konstantine","l":"Aivaliotis","p":"SOCAN","i":"684988466"},{"n":"EL Hachani Ali","f":"EL","l":"Hachani Ali","p":"SACEM","i":"1029076-79"},{"n":"Jordan Allen","f":"Jordan","l":"Allen","p":"SOCAN","i":"587916392"},{"n":"Keith Joseph Anderson","f":"Keith","l":"Joseph Anderson","p":"BMI","i":"746479892"},{"n":"Christos Andreou","f":"Christos","l":"Andreou","p":"ASCAP","i":"605973336"},{"n":"Lacey Angerosa","f":"Lacey","l":"Angerosa","p":"ASCAP","i":"118758107"},{"n":"David Anson","f":"David","l":"Anson","p":"PRS","i":"702639751"},{"n":"Fernando Aponte","f":"Fernando","l":"Aponte","p":"ASCAP","i":"759851291"},{"n":"Melissa Arce","f":"Melissa","l":"Arce","p":"BMI","i":"672604737"},{"n":"Jake Atherton","f":"Jake","l":"Atherton","p":"ASCAP","i":"888010422"},{"n":"James Atin-Godden","f":"James","l":"Atin-Godden","p":"SOCAN","i":"683911616"},{"n":"Travis Bacon","f":"Travis","l":"Bacon","p":"BMI","i":"550141388"},{"n":"Christopher Bagnole","f":"Christopher","l":"Bagnole","p":"BMI","i":"352710876"},{"n":"Anthony George Balaskas","f":"Anthony","l":"George Balaskas","p":"ASCAP","i":"508596525"},{"n":"Ulrich Bannenberg","f":"Ulrich","l":"Bannenberg","p":"GEMA","i":"702091683"},{"n":"David Barenboim","f":"David","l":"Barenboim","p":"GEMA","i":"454864721"},{"n":"Andrew Barlow","f":"Andrew","l":"Barlow","p":"ASCAP","i":"422448966"},{"n":"Sara Barone","f":"Sara","l":"Barone","p":"ASCAP","i":"821027481"},{"n":"Tim Barr","f":"Tim","l":"Barr","p":"BMI","i":"515795039"},{"n":"Thomas Barth","f":"Thomas","l":"Barth","p":"BMI","i":"143989044"},{"n":"Jesse Baskin","f":"Jesse","l":"Baskin","p":"BMI","i":"767236022"},{"n":"Luigi Bayaert","f":"Luigi","l":"Bayaert","p":"SACEM","i":"1163198844"},{"n":"Shoshana Bean","f":"Shoshana","l":"Bean","p":"ASCAP","i":"560942249"},{"n":"David Ben-Porat","f":"David","l":"Ben-Porat","p":"ASCAP","i":"494088223"},{"n":"Romain Benabdelkader","f":"Romain","l":"Benabdelkader","p":"SACEM","i":"858126514"},{"n":"Anthony Bernardo","f":"Anthony","l":"Bernardo","p":"ASCAP","i":"485489201"},{"n":"Brendan Berry","f":"Brendan","l":"Berry","p":"ASCAP","i":"561004494"},{"n":"Brenden Berryn","f":"Brenden","l":"Berryn","p":"ASCAP","i":"561004494"},{"n":"Michi Besler","f":"Michi","l":"Besler","p":"GEMA","i":"281315580"},{"n":"Simon Bhatia","f":"Simon","l":"Bhatia","p":"ASCAP","i":"1220973865"},{"n":"Stephen Bigger","f":"Stephen","l":"Bigger","p":"ASCAP","i":"189798580"},{"n":"Maria Patricia Blyde","f":"Maria","l":"Patricia Blyde","p":"BMI","i":"1017914083"},{"n":"Pablo Andres Bodnar","f":"Pablo","l":"Andres Bodnar","p":"SADAIC","i":"873303929"},{"n":"Jeremy Bonarriba","f":"Jeremy","l":"Bonarriba","p":"BUMA","i":"447601459"},{"n":"Nathalie Bonin","f":"Nathalie","l":"Bonin","p":"SOCAN","i":"270312896"},{"n":"Jeremiah Bornfield","f":"Jeremiah","l":"Bornfield","p":"BMI","i":"550131128"},{"n":"Christopher Botta","f":"Christopher","l":"Botta","p":"BMI","i":"728308633"},{"n":"Marie-Christine Bourdon","f":"Marie-Christine","l":"Bourdon","p":"SOCAN","i":"796220617"},{"n":"JamesDustin Brayley","f":"JamesDustin","l":"Brayley","p":"SESAC","i":"768555489"},{"n":"Daniel Elias Brenner","f":"Daniel","l":"Elias Brenner","p":"GEMA","i":"573900050"},{"n":"Martin Briley","f":"Martin","l":"Briley","p":"ASCAP","i":"68299725"},{"n":"Olivia Broadfield","f":"Olivia","l":"Broadfield","p":"PRS","i":"511053509"},{"n":"Bob Brockmann","f":"Bob","l":"Brockmann","p":"ASCAP","i":"428961526"},{"n":"Brandon Brown","f":"Brandon","l":"Brown","p":"BMI","i":"459915409"},{"n":"Karlie Bruce","f":"Karlie","l":"Bruce","p":"SESAC","i":null},{"n":"Erin Brueggemann","f":"Erin","l":"Brueggemann","p":"ASCAP","i":"506747838"},{"n":"Andreas Bruhn","f":"Andreas","l":"Bruhn","p":"GEMA","i":"241583478"},{"n":"David Aaron Burger","f":"David","l":"Aaron Burger","p":"ASCAP","i":"339235752"},{"n":"Tobias Burger","f":"Tobias","l":"Burger","p":"GEMA","i":"265664048"},{"n":"Gail Bushy","f":"Gail","l":"Bushy","p":"BMI","i":"740333082"},{"n":"Ryan Byrne","f":"Ryan","l":"Byrne","p":"ASCAP","i":"782638995"},{"n":"Benedetto Caccavale","f":"Benedetto","l":"Caccavale","p":"ASCAP","i":"496970981"},{"n":"Yanni Caldas","f":"Yanni","l":"Caldas","p":"SOCAN","i":"820646452"},{"n":"Todd Caldwell","f":"Todd","l":"Caldwell","p":"BMI","i":"532412883"},{"n":"Sam Campoli","f":"Sam","l":"Campoli","p":"ASCAP","i":"1002917797"},{"n":"Emiko Carlin","f":"Emiko","l":"Carlin","p":"ASCAP","i":"289661607"},{"n":"Taylor Carson","f":"Taylor","l":"Carson","p":"ASCAP","i":"349228642"},{"n":"Steve Carter","f":"Steve","l":"Carter","p":"BMI","i":"613856835"},{"n":"Matthew Castelein","f":"Matthew","l":"Castelein","p":"ASCAP","i":"683486797"},{"n":"Franco Caviglia","f":"Franco","l":"Caviglia","p":"ASCAP","i":"667653403"},{"n":"Daniel Chait","f":"Daniel","l":"Chait","p":"ASCAP","i":"565207255"},{"n":"Spencer J. Charif","f":"Spencer","l":"J. Charif","p":"ASCAP","i":"530921183"},{"n":"Israel Charles","f":"Israel","l":"Charles","p":"BMI","i":"217945845"},{"n":"Konstantinos Chaveles","f":"Konstantinos","l":"Chaveles","p":"SOCAN","i":"815390736"},{"n":"Daniel Chen","f":"Daniel","l":"Chen","p":"ASCAP","i":"440872068"},{"n":"Kembo Cheng","f":"Kembo","l":"Cheng","p":"ASCAP","i":"778470001"},{"n":"Mohamad Noor Che\u2019ree","f":"Mohamad","l":"Noor Che\u2019ree","p":"ASCAP","i":"763756601"},{"n":"Mario Chow","f":"Mario","l":"Chow","p":"ASCAP","i":"778261995"},{"n":"Christopher Dale Chrisman","f":"Christopher","l":"Dale Chrisman","p":"ASCAP","i":"826271145"},{"n":"Christopher Chrisman","f":"Christopher","l":"Chrisman","p":"ASCAP","i":"826271145"},{"n":"Blake Christiana","f":"Blake","l":"Christiana","p":"BMI","i":"484362143"},{"n":"Julie Collings","f":"Julie","l":"Collings","p":"BMI","i":"489150035"},{"n":"Renee Cologne","f":"Renee","l":"Cologne","p":"ASCAP","i":"253824269"},{"n":"Kevin Comden","f":"Kevin","l":"Comden","p":"ASCAP","i":"601094590"},{"n":"Dario Comuzzi","f":"Dario","l":"Comuzzi","p":"BMI","i":"690243350"},{"n":"John Conte","f":"John","l":"Conte","p":"ASCAP","i":"1519265"},{"n":"Ian Cooney","f":"Ian","l":"Cooney","p":"ASCAP","i":"56517963"},{"n":"Garrett Thomas Corbran","f":"Garrett","l":"Thomas Corbran","p":"ASCAP","i":"849357689"},{"n":"Peter Cornell","f":"Peter","l":"Cornell","p":"ASCAP","i":"822478824"},{"n":"Robert Critchley","f":"Robert","l":"Critchley","p":"SOCAN","i":"135336196"},{"n":"Sean Croley","f":"Sean","l":"Croley","p":"SOCAN","i":"226013120"},{"n":"Matthew Cusson","f":"Matthew","l":"Cusson","p":"ASCAP","i":"548637807"},{"n":"Angie Dais","f":"Angie","l":"Dais","p":"ASCAP","i":"825312461"},{"n":"Geoff Deitch","f":"Geoff","l":"Deitch","p":"BMI","i":"760680140"},{"n":"Malia Delacruz","f":"Malia","l":"Delacruz","p":"ASCAP","i":"1186870025"},{"n":"Sean Dixon","f":"Sean","l":"Dixon","p":"BMI","i":"356114870"},{"n":"Stephen Doster","f":"Stephen","l":"Doster","p":"BMI","i":"240113137"},{"n":"Gregory Douglass","f":"Gregory","l":"Douglass","p":"BMI","i":"513578746"},{"n":"Linda Draper","f":"Linda","l":"Draper","p":"BMI","i":"402451602"},{"n":"Jonathan Drury","f":"Jonathan","l":"Drury","p":"ASCAP","i":"516078263"},{"n":"Brandon Duggins","f":"Brandon","l":"Duggins","p":"BMI","i":"532136486"},{"n":"Aaron Dunn","f":"Aaron","l":"Dunn","p":"SOCAN","i":"675164034"},{"n":"Philip D\u2019Agostino","f":"Philip","l":"D\u2019Agostino","p":"ASCAP","i":"572316456"},{"n":"Willie Eaglin","f":"Willie","l":"Eaglin","p":"BMI","i":"460689627"},{"n":"JonJoseph Ehlers","f":"JonJoseph","l":"Ehlers","p":"ASCAP","i":"775218421"},{"n":"Vitali Ehret","f":"Vitali","l":"Ehret","p":"GEMA","i":"806596611"},{"n":"William Eisele","f":"William","l":"Eisele","p":"BMI","i":"209327774"},{"n":"Karim Bachir Elezaar","f":"Karim","l":"Bachir Elezaar","p":"SACEM","i":"81457561"},{"n":"Austin Elkington","f":"Austin","l":"Elkington","p":"BMI","i":"753644917"},{"n":"Michael Ellery","f":"Michael","l":"Ellery","p":"APRA","i":"726160263"},{"n":"Sayuri Elsie","f":"Sayuri","l":"Elsie","p":"ASCAP","i":"626341462"},{"n":"Friday Famous Endurance","f":"Friday","l":"Famous Endurance","p":"BMI","i":"1153071591"},{"n":"Troy Engle","f":"Troy","l":"Engle","p":"BMI","i":"358693216"},{"n":"Fima Ephron","f":"Fima","l":"Ephron","p":"BMI","i":"244357274"},{"n":"Bryn-Troy Evans","f":"Bryn-Troy","l":"Evans","p":"APRA","i":"437473638"},{"n":"Tony Exford","f":"Tony","l":"Exford","p":"ASCAP","i":"516119181"},{"n":"Steven Faile","f":"Steven","l":"Faile","p":"ASCAP","i":"469623713"},{"n":"Steven Farella","f":"Steven","l":"Farella","p":"ASCAP","i":"344012800"},{"n":"Kevin Farrell","f":"Kevin","l":"Farrell","p":"ASCAP","i":"510471200"},{"n":"Koebi Faumui","f":"Koebi","l":"Faumui","p":"APRA","i":"01335268354"},{"n":"Philip Feit","f":"Philip","l":"Feit","p":"GEMA","i":"531194964"},{"n":"Daniel Alejandro Fernandez","f":"Daniel","l":"Alejandro Fernandez","p":"BMI","i":"834639710"},{"n":"Matthew Ferrone","f":"Matthew","l":"Ferrone","p":"ASCAP","i":"469609213"},{"n":"Lindsay Fialka","f":"Lindsay","l":"Fialka","p":"SOCAN","i":"1185882315"},{"n":"Matt Filler","f":"Matt","l":"Filler","p":"ASCAP","i":"510394092"},{"n":"Matthew Filler","f":"Matthew","l":"Filler","p":"ASCAP","i":"510394092"},{"n":"Achim Fischer","f":"Achim","l":"Fischer","p":"BMI","i":"247274556"},{"n":"Michael Sean Flannery","f":"Michael","l":"Sean Flannery","p":"ASCAP","i":"348685907"},{"n":"Ari Folman-Cohen","f":"Ari","l":"Folman-Cohen","p":"ASCAP","i":"542161384"},{"n":"Aron Forbes","f":"Aron","l":"Forbes","p":"ASCAP","i":"561507166"},{"n":"Colin Andrew Ford","f":"Colin","l":"Andrew Ford","p":"SOCAN","i":"97054181"},{"n":"David John Forlano","f":"David","l":"John Forlano","p":"BMI","i":"755642029"},{"n":"Ryan Foss","f":"Ryan","l":"Foss","p":"ASCAP","i":"777844284"},{"n":"Peter Russell Fox","f":"Peter","l":"Russell Fox","p":"BMI","i":"221883575"},{"n":"Jonathan Foy","f":"Jonathan","l":"Foy","p":"BMI","i":"631128972"},{"n":"Yohoshua Fruchter","f":"Yohoshua","l":"Fruchter","p":"ASCAP","i":"766584884"},{"n":"Yoshie Fruchter","f":"Yoshie","l":"Fruchter","p":"ASCAP","i":"766584884"},{"n":"Brian Fuller","f":"Brian","l":"Fuller","p":"BMI","i":"843899188"},{"n":"Frank Funaro","f":"Frank","l":"Funaro","p":"BMI","i":"247274556"},{"n":"Ingo Gabriel","f":"Ingo","l":"Gabriel","p":"GEMA","i":"869622883"},{"n":"Brent Gallant","f":"Brent","l":"Gallant","p":"SOCAN","i":"496540422"},{"n":"Elaine Gallant","f":"Elaine","l":"Gallant","p":"SOCAN","i":"836654215"},{"n":"Angelina Gargano","f":"Angelina","l":"Gargano","p":"ASCAP","i":"493999376"},{"n":"Devin Gati","f":"Devin","l":"Gati","p":"ASCAP","i":"504250696"},{"n":"Jonathan Gejtman","f":"Jonathan","l":"Gejtman","p":"SADAIC","i":"640084082"},{"n":"Philip Gibbs","f":"Philip","l":"Gibbs","p":"BMI","i":"355737241"},{"n":"Kory Leigh Glattman","f":"Kory","l":"Leigh Glattman","p":"BMI","i":"756811224"},{"n":"Jesse Glick","f":"Jesse","l":"Glick","p":"ASCAP","i":null},{"n":"Sean Goldman","f":"Sean","l":"Goldman","p":"SOCAN","i":"869200424"},{"n":"Lisette Gonzalez-Alea","f":"Lisette","l":"Gonzalez-Alea","p":"SACEM","i":"405475371"},{"n":"Jonathan Gordon","f":"Jonathan","l":"Gordon","p":"BMI","i":"57988318"},{"n":"Daniel Gray","f":"Daniel","l":"Gray","p":"ASCAP","i":"467297019"},{"n":"Danny Gray","f":"Danny","l":"Gray","p":"ASCAP","i":"467297019"},{"n":"Eddie Grey","f":"Eddie","l":"Grey","p":"ASCAP","i":"716903245"},{"n":"Alex Grinacoff","f":"Alex","l":"Grinacoff","p":"BMI","i":"1231726383"},{"n":"Gavi Grodsky","f":"Gavi","l":"Grodsky","p":"ASCAP","i":"639077912"},{"n":"Ulrich Guggenberger","f":"Ulrich","l":"Guggenberger","p":"ASCAP","i":"474680035"},{"n":"Sean Hagon","f":"Sean","l":"Hagon","p":"BMI","i":"550228693"},{"n":"Douglas W. Hall","f":"Douglas","l":"W. Hall","p":"SESAC","i":"380516"},{"n":"Medhat Hanbali","f":"Medhat","l":"Hanbali","p":"SOCAN","i":"683461523"},{"n":"Joanne Harris","f":"Joanne","l":"Harris","p":"ASCAP","i":"575913319"},{"n":"Jonathan Harter","f":"Jonathan","l":"Harter","p":"ASCAP","i":"516552558"},{"n":"Joshua Harter","f":"Joshua","l":"Harter","p":"ASCAP","i":"528694414"},{"n":"KeithAllen Harter","f":"KeithAllen","l":"Harter","p":"BMI","i":"186785020"},{"n":"Dane Hartsett","f":"Dane","l":"Hartsett","p":"SOCAN","i":"645303954"},{"n":"Chris Hartway","f":"Chris","l":"Hartway","p":"ASCAP","i":"507955432"},{"n":"Frederic Hau","f":"Frederic","l":"Hau","p":"GEMA","i":"456506154"},{"n":"Matthias Hauck","f":"Matthias","l":"Hauck","p":"GEMA","i":"496197303"},{"n":"Kyle Hauser","f":"Kyle","l":"Hauser","p":"ASCAP","i":"512070602"},{"n":"Evan Haymond","f":"Evan","l":"Haymond","p":"ASCAP","i":"731425860"},{"n":"Cosmos-Sunshine Heidtmann","f":"Cosmos-Sunshine","l":"Heidtmann","p":"BMI","i":"730879422"},{"n":"Nepomuk Heller","f":"Nepomuk","l":"Heller","p":"GEMA","i":"549787583"},{"n":"Matt Hendricks","f":"Matt","l":"Hendricks","p":"ASCAP","i":"747955979"},{"n":"Matthew Hendricks","f":"Matthew","l":"Hendricks","p":"ASCAP","i":"747955979"},{"n":"Lars Hesse","f":"Lars","l":"Hesse","p":"GEMA","i":"406448956"},{"n":"Simon Hesselein","f":"Simon","l":"Hesselein","p":"GEMA","i":"252362094"},{"n":"Braxton Raymond Hicks","f":"Braxton","l":"Raymond Hicks","p":"SOCAN","i":"858318799"},{"n":"Stewart Joseph Hidalgo","f":"Stewart","l":"Joseph Hidalgo","p":"BMI","i":"680267631"},{"n":"Lou Hill","f":"Lou","l":"Hill","p":"BMI","i":"503936657"},{"n":"Andrew Hind","f":"Andrew","l":"Hind","p":"ASCAP","i":"871578104"},{"n":"Stephen Hoevertsz","f":"Stephen","l":"Hoevertsz","p":"SESAC","i":"288542133"},{"n":"Michael Holland","f":"Michael","l":"Holland","p":"ASCAP","i":"602336685"},{"n":"Matthew Hollingsworth","f":"Matthew","l":"Hollingsworth","p":"ASCAP","i":"646597204"},{"n":"Daniel Hollman","f":"Daniel","l":"Hollman","p":"BMI","i":"218160984"},{"n":"Philip Horn","f":"Philip","l":"Horn","p":"BMI","i":"773529117"},{"n":"Chaun Horton","f":"Chaun","l":"Horton","p":"ASCAP","i":"698141607"},{"n":"Loren Humphrey","f":"Loren","l":"Humphrey","p":"ASCAP","i":"349365336"},{"n":"Adam Iorfida","f":"Adam","l":"Iorfida","p":"ASCAP","i":"858694862"},{"n":"Sinisa Itskovich","f":"Sinisa","l":"Itskovich","p":"GEMA","i":"282972431"},{"n":"Joanna Iwanowicz","f":"Joanna","l":"Iwanowicz","p":"ASCAP","i":"634874715"},{"n":"Benjamin Jacobs","f":"Benjamin","l":"Jacobs","p":"BMI","i":"587049707"},{"n":"David Janus","f":"David","l":"Janus","p":"GEMA","i":"611986928"},{"n":"Richard Jay","f":"Richard","l":"Jay","p":"ASCAP","i":"346555642"},{"n":"Bryan Jennings","f":"Bryan","l":"Jennings","p":"ASCAP","i":"503812780"},{"n":"Jan Jirasek","f":"Jan","l":"Jirasek","p":"GEMA","i":"201785784"},{"n":"Christopher Johanson","f":"Christopher","l":"Johanson","p":"BMI","i":"371276753"},{"n":"Irv Johnson","f":"Irv","l":"Johnson","p":"BMI","i":"223528881"},{"n":"Irvin Johnson","f":"Irvin","l":"Johnson","p":"BMI","i":"223528881"},{"n":"Jeremy Johnson","f":"Jeremy","l":"Johnson","p":"BMI","i":"496847193"},{"n":"Michael Glynn Johnson","f":"Michael","l":"Glynn Johnson","p":"SOCAN","i":"217180394"},{"n":"Steven Wayne Johnson","f":"Steven","l":"Wayne Johnson","p":"BMI","i":"816530450"},{"n":"Elyse J Jones","f":"Elyse","l":"J Jones","p":"ASCAP","i":"1077531258"},{"n":"Anthony Clint, Jr","f":"Anthony","l":"Clint, Jr","p":"SESAC","i":"564107462"},{"n":"Kenneth Lamont Washington Jr","f":"Kenneth","l":"Lamont Washington Jr","p":"BMI","i":"780454430"},{"n":"Diego Fernando Juantorena","f":"Diego","l":"Fernando Juantorena","p":"SADAIC","i":"1018633479"},{"n":"Tamara Kachelmeier","f":"Tamara","l":"Kachelmeier","p":"ASCAP","i":"677144030"},{"n":"Michael Kadelbach","f":"Michael","l":"Kadelbach","p":"GEMA","i":"271717757"},{"n":"Stylianos Michael Kalisperides","f":"Stylianos","l":"Michael Kalisperides","p":"ASCAP","i":"295973207"},{"n":"Katherine Rose Kaplan","f":"Katherine","l":"Rose Kaplan","p":"ASCAP","i":"689822287"},{"n":"Matt Kassell","f":"Matt","l":"Kassell","p":"PRS","i":"614319175"},{"n":"Tamera Katchelmeyer","f":"Tamera","l":"Katchelmeyer","p":"ASCAP","i":"677144030"},{"n":"Matt Keating","f":"Matt","l":"Keating","p":"ASCAP","i":"129175470"},{"n":"Christopher Keene","f":"Christopher","l":"Keene","p":"ASCAP","i":"530970460"},{"n":"Stephen Kellogg","f":"Stephen","l":"Kellogg","p":"ASCAP","i":"344682940"},{"n":"Dominic Kelly","f":"Dominic","l":"Kelly","p":"ASCAP","i":"338412667"},{"n":"Michael Kenny","f":"Michael","l":"Kenny","p":"BMI","i":"87221867"},{"n":"James Karl Kernick","f":"James","l":"Karl Kernick","p":"ASCAP","i":"348621257"},{"n":"James Kyle Kernick","f":"James","l":"Kyle Kernick","p":"ASCAP","i":"348621257"},{"n":"John Kewen","f":"John","l":"Kewen","p":"SUISA","i":"89946700"},{"n":"Florian Kiermaier","f":"Florian","l":"Kiermaier","p":"GEMA","i":"653754524"},{"n":"Derek Kintz","f":"Derek","l":"Kintz","p":"BMI","i":"753644819"},{"n":"James Klein","f":"James","l":"Klein","p":"ASCAP","i":"143375286"},{"n":"Adam Knobloch","f":"Adam","l":"Knobloch","p":"ASCAP","i":"1176815335"},{"n":"Michael Koch","f":"Michael","l":"Koch","p":"GEMA","i":"282791728"},{"n":"Jonas Krag","f":"Jonas","l":"Krag","p":"KODA","i":"2199469446"},{"n":"Jonathan Krimstock","f":"Jonathan","l":"Krimstock","p":"ASCAP","i":"339679018"},{"n":"Dan Krochmal","f":"Dan","l":"Krochmal","p":"APRA","i":"663839211"},{"n":"Phil Kullmann","f":"Phil","l":"Kullmann","p":"GEMA","i":"432915367"},{"n":"Mathias Kunzli","f":"Mathias","l":"Kunzli","p":"BMI","i":"505057287"},{"n":"Timothy Kvasnosky","f":"Timothy","l":"Kvasnosky","p":"ASCAP","i":"349729026"},{"n":"Michael LaMorte","f":"Michael","l":"LaMorte","p":"SESAC","i":"3392458465"},{"n":"Garrett Lamp","f":"Garrett","l":"Lamp","p":"ASCAP","i":"760707930"},{"n":"Blaise Lanzetta","f":"Blaise","l":"Lanzetta","p":"BMI","i":"550105585"},{"n":"Jacob Lawson","f":"Jacob","l":"Lawson","p":"BMI","i":"550319624"},{"n":"Ronnie Lawson","f":"Ronnie","l":"Lawson","p":"BMI","i":"246120400"},{"n":"Amy Marie Layou","f":"Amy","l":"Marie Layou","p":"ASCAP","i":"396038729"},{"n":"Mitch Lee","f":"Mitch","l":"Lee","p":"SOCAN","i":"459066725"},{"n":"Paul Levasseur","f":"Paul","l":"Levasseur","p":"SOCAN","i":"871163927"},{"n":"Daniel Levasseur","f":"Daniel","l":"Levasseur","p":"SOCAN","i":"1070647273"},{"n":"Michael Levine","f":"Michael","l":"Levine","p":"ASCAP","i":"336631762"},{"n":"Holden Lewis","f":"Holden","l":"Lewis","p":"ASCAP","i":"547034656"},{"n":"Lejon Lewis","f":"Lejon","l":"Lewis","p":"BMI","i":"768912886"},{"n":"Richard Lewis","f":"Richard","l":"Lewis","p":"PRS","i":"477553613"},{"n":"Dennis Lichtman","f":"Dennis","l":"Lichtman","p":"ASCAP","i":"468976580"},{"n":"Eric Liljestrand","f":"Eric","l":"Liljestrand","p":"BMI","i":"193960240"},{"n":"Arizona Lindsey","f":"Arizona","l":"Lindsey","p":"BMI","i":"550619524"},{"n":"Ralf Lippmann","f":"Ralf","l":"Lippmann","p":"GEMA","i":"557926406"},{"n":"Dong Liu","f":"Dong","l":"Liu","p":"ASCAP","i":"734055262"},{"n":"Peter Lobo","f":"Peter","l":"Lobo","p":"ASCAP","i":"476561817"},{"n":"Leon Lohmann","f":"Leon","l":"Lohmann","p":"BMI","i":"1061750972"},{"n":"Mario Lopez","f":"Mario","l":"Lopez","p":"BMI","i":"753644623"},{"n":"Ben Loshin","f":"Ben","l":"Loshin","p":"ASCAP","i":"777088296"},{"n":"Kolbrynn Vahn Lowdell","f":"Kolbrynn","l":"Vahn Lowdell","p":"BMI","i":"390222973"},{"n":"Bryant Lowry","f":"Bryant","l":"Lowry","p":"BMI","i":"756875093"},{"n":"Jonathan Luis","f":"Jonathan","l":"Luis","p":"BMI","i":"1147251376"},{"n":"Jon Madof","f":"Jon","l":"Madof","p":"BMI","i":"355676527"},{"n":"Jonathan Madof","f":"Jonathan","l":"Madof","p":"BMI","i":"355676527"},{"n":"Bill Maier","f":"Bill","l":"Maier","p":"ASCAP","i":"181950851"},{"n":"Robert Mangano","f":"Robert","l":"Mangano","p":"BMI","i":"572689502"},{"n":"Tim Mann","f":"Tim","l":"Mann","p":"SOCAN","i":"471114682"},{"n":"Scot Manwiller","f":"Scot","l":"Manwiller","p":"BMI","i":"182664550"},{"n":"Senne Van Marissing","f":"Senne","l":"Van Marissing","p":"BMI","i":"887864163"},{"n":"Mark Marshall","f":"Mark","l":"Marshall","p":"ASCAP","i":"553341859"},{"n":"Ariel Marx","f":"Ariel","l":"Marx","p":"ASCAP","i":"747263327"},{"n":"Juan Masotta","f":"Juan","l":"Masotta","p":"BMI","i":"492323455"},{"n":"Stefano Mastronardi","f":"Stefano","l":"Mastronardi","p":"BMI","i":"430488857"},{"n":"Kincheloe Jackson Matthew","f":"Kincheloe","l":"Jackson Matthew","p":"BMI","i":"756897079"},{"n":"Steve Mayone","f":"Steve","l":"Mayone","p":"SESAC","i":"291601378"},{"n":"Brooke Maytorena","f":"Brooke","l":"Maytorena","p":"BMI","i":"1080732868"},{"n":"Francisco Perez Mazon","f":"Francisco","l":"Perez Mazon","p":"AKM","i":"487232338"},{"n":"Raphael McGregor","f":"Raphael","l":"McGregor","p":"ASCAP","i":"549934994"},{"n":"Taylor McLam","f":"Taylor","l":"McLam","p":"ASCAP","i":"341161207"},{"n":"Hugo McLaughlin","f":"Hugo","l":"McLaughlin","p":"SOCAN","i":"296552820"},{"n":"Marvin Benjamin McMahon","f":"Marvin","l":"Benjamin McMahon","p":"PRS","i":"717630251"},{"n":"Sean McMillion","f":"Sean","l":"McMillion","p":"ASCAP","i":"446247451"},{"n":"Sean McMillon","f":"Sean","l":"McMillon","p":"ASCAP","i":"446247451"},{"n":"David McNally","f":"David","l":"McNally","p":"BMI","i":"592715915"},{"n":"Zach McNees","f":"Zach","l":"McNees","p":"ASCAP","i":"670838911"},{"n":"Jeff McQuilkin","f":"Jeff","l":"McQuilkin","p":"ASCAP","i":"424081979"},{"n":"Jeffrey McQuilkin","f":"Jeffrey","l":"McQuilkin","p":"ASCAP","i":"424081979"},{"n":"Kelley McRae","f":"Kelley","l":"McRae","p":"ASCAP","i":"680452248"},{"n":"Ethan Meixsell","f":"Ethan","l":"Meixsell","p":"BMI","i":"514451186"},{"n":"Justin Meli","f":"Justin","l":"Meli","p":"SOCAN","i":"637706038"},{"n":"Kevin Mello","f":"Kevin","l":"Mello","p":"BMI","i":"550404685"},{"n":"Jeremy Mendicino","f":"Jeremy","l":"Mendicino","p":"ASCAP","i":"565167040"},{"n":"Julian Menkin","f":"Julian","l":"Menkin","p":"ASCAP","i":"738413730"},{"n":"Danielle Merlis","f":"Danielle","l":"Merlis","p":"ASCAP","i":"751817922"},{"n":"Thierry Christophe Meyer","f":"Thierry","l":"Christophe Meyer","p":"SACEM","i":"150936966"},{"n":"Paul Micca","f":"Paul","l":"Micca","p":"ASCAP","i":"1128605176"},{"n":"Pietro Milanesi","f":"Pietro","l":"Milanesi","p":"ASCAP","i":"713867036"},{"n":"Olivier Militon","f":"Olivier","l":"Militon","p":"SACEM","i":"676016733"},{"n":"Braden Miller","f":"Braden","l":"Miller","p":"ASCAP","i":"502865169"},{"n":"Jeff Miller","f":"Jeff","l":"Miller","p":"ASCAP","i":"339529239"},{"n":"Robin Lewis Miller","f":"Robin","l":"Lewis Miller","p":"ASCAP","i":"417647642"},{"n":"Tamara R Miller","f":"Tamara","l":"R Miller","p":"SOCAN","i":"433229674"},{"n":"Peter Min","f":"Peter","l":"Min","p":"ASCAP","i":"335592844"},{"n":"Adam Daniel Minkoff","f":"Adam","l":"Daniel Minkoff","p":"ASCAP","i":"705942833"},{"n":"Paul Mitch","f":"Paul","l":"Mitch","p":"BMI","i":"495988273"},{"n":"John Moore","f":"John","l":"Moore","p":"ASCAP","i":"713296547"},{"n":"JohnJay Moore","f":"JohnJay","l":"Moore","p":"ASCAP","i":"713296547"},{"n":"Karl Moore","f":"Karl","l":"Moore","p":"BMI","i":"572525739"},{"n":"David Moreno","f":"David","l":"Moreno","p":"ASCAP","i":"772628905"},{"n":"Rod Morgenstein","f":"Rod","l":"Morgenstein","p":"BMI","i":"229408564"},{"n":"Stephan Moritz","f":"Stephan","l":"Moritz","p":"GEMA","i":"287516041"},{"n":"Jonathan Morrow","f":"Jonathan","l":"Morrow","p":"ASCAP","i":"444589328"},{"n":"Jason Mraz","f":"Jason","l":"Mraz","p":"ASCAP","i":"344456264"},{"n":"David Mueller","f":"David","l":"Mueller","p":"GEMA","i":"468052936"},{"n":"Florian Mueller","f":"Florian","l":"Mueller","p":"GEMA","i":"735229246"},{"n":"James Mulvale","f":"James","l":"Mulvale","p":"SOCAN","i":"67809909"},{"n":"Jennifer Mulvale","f":"Jennifer","l":"Mulvale","p":"SOCAN","i":"670386334"},{"n":"Jonathan Munoz","f":"Jonathan","l":"Munoz","p":"BMI","i":"550414722"},{"n":"Nate Myotte","f":"Nate","l":"Myotte","p":"BMI","i":"807242554"},{"n":"Ryan Nach","f":"Ryan","l":"Nach","p":"ASCAP","i":"621624770"},{"n":"Scott Neubert","f":"Scott","l":"Neubert","p":"ASCAP","i":"337352662"},{"n":"Oliver Nicholson","f":"Oliver","l":"Nicholson","p":"PRS","i":"1175517546"},{"n":"Derek Nievergelt","f":"Derek","l":"Nievergelt","p":"SESAC","i":"514607276"},{"n":"Antonio Nico Nieves","f":"Antonio","l":"Nico Nieves","p":"ASCAP","i":"834264341"},{"n":"Tjeerd Nijhof","f":"Tjeerd","l":"Nijhof","p":"BMI BUMA","i":"804373944"},{"n":"Eric Nolan","f":"Eric","l":"Nolan","p":"BMI","i":"744461635"},{"n":"Michael Norris","f":"Michael","l":"Norris","p":"ASCAP","i":"786469378"},{"n":"David Stepan Norris","f":"David","l":"Stepan Norris","p":"ASCAP","i":"760961620"},{"n":"Devin Stepan Norris","f":"Devin","l":"Stepan Norris","p":"ASCAP","i":"760961620"},{"n":"Christopher North","f":"Christopher","l":"North","p":"BMI","i":"183270572"},{"n":"Tim Nowack","f":"Tim","l":"Nowack","p":"GEMA","i":"254482167"},{"n":"Tim-Ryan O'Kane","f":"Tim-Ryan","l":"O'Kane","p":"ASCAP","i":"630951163"},{"n":"Emmett Claran O'Malley","f":"Emmett","l":"Claran O'Malley","p":"BMI","i":"289441429"},{"n":"Emmett O'Malley","f":"Emmett","l":"O'Malley","p":"BMI","i":"289441429"},{"n":"Oisin O'Malley","f":"Oisin","l":"O'Malley","p":"BMI","i":"457630051"},{"n":"Clark Oler","f":"Clark","l":"Oler","p":"BMI","i":"120775592"},{"n":"Clarke Kim Oler","f":"Clarke","l":"Kim Oler","p":"BMI","i":"120775592"},{"n":"Aren G. Olsen","f":"Aren","l":"G. Olsen","p":"ASCAP","i":"345512281"},{"n":"Seth Ondracek","f":"Seth","l":"Ondracek","p":"SESAC","i":"1057842348"},{"n":"Roy Oommen","f":"Roy","l":"Oommen","p":"SOCAN","i":"531236193"},{"n":"Andrew Osborn","f":"Andrew","l":"Osborn","p":"BMI","i":"506178755"},{"n":"Jonathan Ososki","f":"Jonathan","l":"Ososki","p":"ASCAP","i":"474468225"},{"n":"Aurore Ounjian","f":"Aurore","l":"Ounjian","p":"ASCAP","i":"583877296"},{"n":"Dylan Owens","f":"Dylan","l":"Owens","p":"SESAC","i":"684951499"},{"n":"Matt Owens","f":"Matt","l":"Owens","p":"PRS","i":"425162581"},{"n":"Matthew Owens","f":"Matthew","l":"Owens","p":"PRS","i":"425162581"},{"n":"Pete Palestina","f":"Pete","l":"Palestina","p":"BMI","i":"535605654"},{"n":"Steven Parry","f":"Steven","l":"Parry","p":"SUISA","i":"548456910"},{"n":"Ronald Passaro","f":"Ronald","l":"Passaro","p":"ASCAP","i":"340503407"},{"n":"Leah Paul","f":"Leah","l":"Paul","p":"BMI","i":"601921190"},{"n":"Christopher Paulson","f":"Christopher","l":"Paulson","p":"SOCAN","i":"716261066"},{"n":"Dennis Frank Pedula","f":"Dennis","l":"Frank Pedula","p":"ASCAP","i":"464375732"},{"n":"Remy Perrin","f":"Remy","l":"Perrin","p":"BMI","i":"566062642"},{"n":"Marco Pesci","f":"Marco","l":"Pesci","p":"BMI","i":"559673006"},{"n":"Aaron Di Piazza","f":"Aaron","l":"Di Piazza","p":"ASCAP","i":"732724058"},{"n":"Greg Pliska","f":"Greg","l":"Pliska","p":"ASCAP","i":"465967991"},{"n":"Gregory Pliska","f":"Gregory","l":"Pliska","p":"ASCAP","i":"465967991"},{"n":"Simon Poole","f":"Simon","l":"Poole","p":"SOCAN","i":"460154287"},{"n":"Wagner Previato","f":"Wagner","l":"Previato","p":"ASCAP","i":"507851449"},{"n":"Marc Pueschl","f":"Marc","l":"Pueschl","p":"GEMA","i":"364346945"},{"n":"Kyle Querec","f":"Kyle","l":"Querec","p":"ASCAP","i":"481294344"},{"n":"Ken Ramm","f":"Ken","l":"Ramm","p":"SOCAN","i":"3488962"},{"n":"Derek Randle","f":"Derek","l":"Randle","p":"BMI","i":"11567741648"},{"n":"Jason Reeves","f":"Jason","l":"Reeves","p":"ASCAP","i":"526741352"},{"n":"Michael Reinmueller","f":"Michael","l":"Reinmueller","p":"SOCAN","i":"45586363"},{"n":"James Richardson","f":"James","l":"Richardson","p":"SESAC","i":"612101222"},{"n":"Peter Riese","f":"Peter","l":"Riese","p":"GEMA","i":"225726179"},{"n":"Marcus Von Rittberg","f":"Marcus","l":"Von Rittberg","p":"ASCAP","i":"579405906"},{"n":"Jake Rivlin","f":"Jake","l":"Rivlin","p":"ASCAP","i":"643109272"},{"n":"Brent Robitaille","f":"Brent","l":"Robitaille","p":"SOCAN","i":"718453140"},{"n":"Rouvan Gus Roman","f":"Rouvan","l":"Gus Roman","p":"ASCAP","i":"488510331"},{"n":"Mark Roos","f":"Mark","l":"Roos","p":"ASCAP","i":"337948716"},{"n":"Daniel Roselle","f":"Daniel","l":"Roselle","p":"ASCAP","i":"581318645"},{"n":"Danny Roselle","f":"Danny","l":"Roselle","p":"ASCAP","i":"581318645"},{"n":"Justin Rosin","f":"Justin","l":"Rosin","p":"BMI","i":"635066257"},{"n":"Amber Rubarth","f":"Amber","l":"Rubarth","p":"ASCAP","i":"465956211"},{"n":"Mike Rubino","f":"Mike","l":"Rubino","p":"ASCAP","i":"346836926"},{"n":"Shawn Russell","f":"Shawn","l":"Russell","p":"ASCAP","i":"649719104"},{"n":"Elaine Ryan","f":"Elaine","l":"Ryan","p":"SOCAN","i":"529559904"},{"n":"Joshua SadlierBrown","f":"Joshua","l":"SadlierBrown","p":"ASCAP","i":"655963011"},{"n":"Ariel Salerno","f":"Ariel","l":"Salerno","p":"BMI","i":"1212866664"},{"n":"Aaron Saloman","f":"Aaron","l":"Saloman","p":"SOCAN","i":"290230885"},{"n":"Ramiro Alvarez Sanchez","f":"Ramiro","l":"Alvarez Sanchez","p":"SADAIC","i":"847849478"},{"n":"Sergio Perez Sanchez","f":"Sergio","l":"Perez Sanchez","p":"SGAE","i":"395971205"},{"n":"Darko Saric","f":"Darko","l":"Saric","p":"ASCAP","i":"421161213"},{"n":"Kelli Scarr","f":"Kelli","l":"Scarr","p":"ASCAP","i":"497055912"},{"n":"Stephan Schelens","f":"Stephan","l":"Schelens","p":"GEMA","i":"654670135"},{"n":"Jeffrey Schiller","f":"Jeffrey","l":"Schiller","p":"ASCAP","i":"453688227"},{"n":"Garett Schmidt","f":"Garett","l":"Schmidt","p":"SOCAN","i":"96964095"},{"n":"Frank Schwillewski","f":"Frank","l":"Schwillewski","p":"GEMA","i":"254975431"},{"n":"Daniel Scording","f":"Daniel","l":"Scording","p":"BMI","i":"522748061"},{"n":"Wolfgang Setik","f":"Wolfgang","l":"Setik","p":"GEMA","i":"245650764"},{"n":"Johannes Seywald","f":"Johannes","l":"Seywald","p":"AKM","i":"1024089"},{"n":"Michael Shaaf","f":"Michael","l":"Shaaf","p":"GEMA","i":"210926400"},{"n":"Rahul Shah","f":"Rahul","l":"Shah","p":"BMI","i":"774282417"},{"n":"Riza Azeer Shahid","f":"Riza","l":"Azeer Shahid","p":"ASCAP","i":"1049410185"},{"n":"Justin Shearn","f":"Justin","l":"Shearn","p":"PRS","i":"568403533"},{"n":"James Sheehan","f":"James","l":"Sheehan","p":"SOCAN","i":"609921534"},{"n":"Alexander Sherba","f":"Alexander","l":"Sherba","p":"ASCAP","i":"758129709"},{"n":"Anthony Shipman","f":"Anthony","l":"Shipman","p":"BMI","i":"358819906"},{"n":"Aldo Shllaku","f":"Aldo","l":"Shllaku","p":"BMI","i":"280316191"},{"n":"Kevin Shoemaker","f":"Kevin","l":"Shoemaker","p":"ASCAP","i":"776201538"},{"n":"Andrew Shoniker","f":"Andrew","l":"Shoniker","p":"SOCAN","i":"685689472"},{"n":"Khwezi Sifunda","f":"Khwezi","l":"Sifunda","p":"ASCAP","i":"891121445"},{"n":"Sergio Silva","f":"Sergio","l":"Silva","p":"ASCAP","i":"778469961"},{"n":"Rashod Singleton","f":"Rashod","l":"Singleton","p":"BMI","i":"621879823"},{"n":"Samuel Skinner","f":"Samuel","l":"Skinner","p":"BMI","i":"573759898"},{"n":"Stephen Skinner","f":"Stephen","l":"Skinner","p":"BMI","i":"144989430"},{"n":"Steve Skinner","f":"Steve","l":"Skinner","p":"BMI","i":"144989430"},{"n":"Darren Smith","f":"Darren","l":"Smith","p":"SESAC","i":"504069087"},{"n":"Armin Solo","f":"Armin","l":"Solo","p":"ASCAP","i":"779534095"},{"n":"Maya Solovey","f":"Maya","l":"Solovey","p":"SESAC","i":"479009824"},{"n":"Maya Solov\u00e9y","f":"Maya","l":"Solov\u00e9y","p":"SESAC","i":"479010063"},{"n":"Shane Spaulding","f":"Shane","l":"Spaulding","p":"ASCAP","i":"567355126"},{"n":"Alexander Bernhardt Spiegelman","f":"Alexander","l":"Bernhardt Spiegelman","p":"ASCAP","i":"600988249"},{"n":"Sebastian Arno Sprenger","f":"Sebastian","l":"Arno Sprenger","p":"GEMA","i":"785210144"},{"n":"Andrew Stamp","f":"Andrew","l":"Stamp","p":"PRS","i":"755933309"},{"n":"Andrew Stanton","f":"Andrew","l":"Stanton","p":"BMI","i":"584342045"},{"n":"Matthew Stein","f":"Matthew","l":"Stein","p":"BMI","i":"194213966"},{"n":"Erik Steinert","f":"Erik","l":"Steinert","p":"ASCAP","i":"129651955"},{"n":"Kari Steinert","f":"Kari","l":"Steinert","p":"BMI","i":"230978754"},{"n":"Benjamin William Sturley","f":"Benjamin","l":"William Sturley","p":"ASCAP","i":"748783781"},{"n":"Maurice Stute","f":"Maurice","l":"Stute","p":"GEMA","i":"906286426"},{"n":"William Sullivan","f":"William","l":"Sullivan","p":"ASCAP","i":"516587237"},{"n":"Henry Sullivant","f":"Henry","l":"Sullivant","p":"ASCAP","i":"476539903"},{"n":"Thomas Swindell","f":"Thomas","l":"Swindell","p":"PRS","i":"484093241"},{"n":"Thomas Swindells","f":"Thomas","l":"Swindells","p":"PRS","i":"484093241"},{"n":"Nicolas Sylvestre","f":"Nicolas","l":"Sylvestre","p":"SOCAN","i":"577555305"},{"n":"Marian Szymczk","f":"Marian","l":"Szymczk","p":"GEMA","i":"14657000"},{"n":"Kim Taylor","f":"Kim","l":"Taylor","p":"ASCAP","i":"478045140"},{"n":"Lizzi Taylor","f":"Lizzi","l":"Taylor","p":"PRS","i":"683955199"},{"n":"Mark Taylor","f":"Mark","l":"Taylor","p":"ASCAP","i":"337161083"},{"n":"Eduard Telik","f":"Eduard","l":"Telik","p":"GEMA","i":"708990703"},{"n":"Todd Thibaud","f":"Todd","l":"Thibaud","p":"ASCAP","i":"338420473"},{"n":"Theodore Thomas","f":"Theodore","l":"Thomas","p":"BMI","i":"496593001"},{"n":"Tayib Thomas","f":"Tayib","l":"Thomas","p":"GEMA","i":"01103920503"},{"n":"Scott Thompson","f":"Scott","l":"Thompson","p":"SOCAN","i":"737885489"},{"n":"Matt Thorne","f":"Matt","l":"Thorne","p":"ASCAP","i":"126052507"},{"n":"Christopher Toland","f":"Christopher","l":"Toland","p":"BMI","i":"196031374"},{"n":"Michael Toland","f":"Michael","l":"Toland","p":"ASCAP","i":"339072755"},{"n":"Roberto Joaquin Rodriguez Del Toro","f":"Roberto","l":"Joaquin Rodriguez Del Toro","p":"BMI","i":"846645996"},{"n":"Luis Ricardo Torres","f":"Luis","l":"Ricardo Torres","p":"SESAC","i":"612993535"},{"n":"Jordan Trabue","f":"Jordan","l":"Trabue","p":"SESAC","i":"692404831"},{"n":"Toshi Trebess","f":"Toshi","l":"Trebess","p":"GEMA","i":"242172006"},{"n":"Ryan Trebilcock","f":"Ryan","l":"Trebilcock","p":"PRS","i":"869040712"},{"n":"Matthew Trivigno","f":"Matthew","l":"Trivigno","p":"ASCAP","i":"643293543"},{"n":"Adonis Tsilimparis","f":"Adonis","l":"Tsilimparis","p":"ASCAP","i":"336947529"},{"n":"Jacob Turner","f":"Jacob","l":"Turner","p":"BMI","i":"674031066"},{"n":"Nicholas Jonathan Tyler","f":"Nicholas","l":"Jonathan Tyler","p":"ASCAP","i":"420236211"},{"n":"Natasha Tyrimos","f":"Natasha","l":"Tyrimos","p":"PRS","i":"745525040"},{"n":"Mathieu Vachon","f":"Mathieu","l":"Vachon","p":"SOCAN","i":"531252491"},{"n":"Lucas De Valdivia","f":"Lucas","l":"De Valdivia","p":"ASCAP","i":"871735903"},{"n":"Ken Vandevrie","f":"Ken","l":"Vandevrie","p":"SOCAN","i":"226456176"},{"n":"Kurtis Vandevrie","f":"Kurtis","l":"Vandevrie","p":"SOCAN","i":"1010577798"},{"n":"Quentin Vandevrie","f":"Quentin","l":"Vandevrie","p":"SOCAN","i":"1059924039"},{"n":"Russel Vandevrie","f":"Russel","l":"Vandevrie","p":"SOCAN","i":"384727034"},{"n":"Russell Vandevrie","f":"Russell","l":"Vandevrie","p":"SOCAN","i":"384727034"},{"n":"Eric Varnell","f":"Eric","l":"Varnell","p":"ASCAP","i":"602014123"},{"n":"Jonathan Vergara","f":"Jonathan","l":"Vergara","p":"ASCAP","i":"612227978"},{"n":"Jonathan Vieira","f":"Jonathan","l":"Vieira","p":"BMI","i":"523399836"},{"n":"Lucas Villemur","f":"Lucas","l":"Villemur","p":"BMI","i":"642269641"},{"n":"Tobias Vogel","f":"Tobias","l":"Vogel","p":"GEMA","i":"597251024"},{"n":"Marc VonMolnar","f":"Marc","l":"VonMolnar","p":"ASCAP","i":"335296847"},{"n":"Marcus VonRittberg","f":"Marcus","l":"VonRittberg","p":"ASCAP","i":"579405906"},{"n":"William Bradley Vosburg","f":"William","l":"Bradley Vosburg","p":"BMI","i":"187026560"},{"n":"Michail Votzaropoulos","f":"Michail","l":"Votzaropoulos","p":"PRS","i":"756468794"},{"n":"Lars Wallem","f":"Lars","l":"Wallem","p":"GEMA","i":"258984"},{"n":"Jake Warren","f":"Jake","l":"Warren","p":"PRS","i":"573174050"},{"n":"Bart Warshaw","f":"Bart","l":"Warshaw","p":"PRS","i":"648099505"},{"n":"Terrence Watkin","f":"Terrence","l":"Watkin","p":"ASCAP","i":"510468871"},{"n":"Richard Webster","f":"Richard","l":"Webster","p":"ASCAP","i":"464553540"},{"n":"Gabrielle Coral Weinberger","f":"Gabrielle","l":"Coral Weinberger","p":"BMI","i":"617492827"},{"n":"Heide Weisse","f":"Heide","l":"Weisse","p":"ASCAP","i":"385591322"},{"n":"Stacy Marie Werdin","f":"Stacy","l":"Marie Werdin","p":"BMI","i":"368252640"},{"n":"Alex Whalen","f":"Alex","l":"Whalen","p":"BMI","i":"819361819"},{"n":"Kevin Wideman","f":"Kevin","l":"Wideman","p":"SOCAN","i":"666148815"},{"n":"Jimmie Williams","f":"Jimmie","l":"Williams","p":"ASCAP","i":"341923964"},{"n":"Mark Williams","f":"Mark","l":"Williams","p":"ASCAP","i":"347476630"},{"n":"Mike Williams","f":"Mike","l":"Williams","p":"ASCAP","i":"338929225"},{"n":"Brandon Wilson","f":"Brandon","l":"Wilson","p":"BMI","i":"815957407"},{"n":"Tony Wilson","f":"Tony","l":"Wilson","p":"PRS","i":"225955846"},{"n":"Ta-Ri Charles Wendell Wilson","f":"Ta-Ri","l":"Charles Wendell Wilson","p":"BMI","i":"650559145"},{"n":"Alexander Wittkowski","f":"Alexander","l":"Wittkowski","p":"GEMA","i":"525597330"},{"n":"Kevin Won","f":"Kevin","l":"Won","p":"SOCAN","i":"804556737"},{"n":"Alex Wong","f":"Alex","l":"Wong","p":"ASCAP","i":"439767800"},{"n":"Walter Woods","f":"Walter","l":"Woods","p":"BMI","i":"513503397"},{"n":"Ross Geoffrey Woolridge","f":"Ross","l":"Geoffrey Woolridge","p":"SOCAN","i":"131932986"},{"n":"Erik Wormwood","f":"Erik","l":"Wormwood","p":"ASCAP","i":"591175829"},{"n":"Semih Kadir Yanyali","f":"Semih","l":"Kadir Yanyali","p":"ASCAP","i":"822432956"},{"n":"Sven Zumbrock","f":"Sven","l":"Zumbrock","p":"GEMA","i":"735650437"},{"n":"Ben Zwerin","f":"Ben","l":"Zwerin","p":"ASCAP","i":"451532478"},{"n":"Michael Scott kettner","f":"Michael","l":"Scott kettner","p":"ASCAP","i":"485843411"}]
+    // Pass 1: update existing rows that are missing ipi/pro/names
+    const UPD = `UPDATE cowriters
+      SET first_name=COALESCE(NULLIF(first_name,''),$2),
+          last_name =COALESCE(NULLIF(last_name,''),$3),
+          pro       =COALESCE(NULLIF(pro,''),$4),
+          ipi       =COALESCE(NULLIF(ipi,''),$5)
+      WHERE cowriter_name=$1`
+    // Pass 2: insert rows that don't exist yet
+    const INS = `INSERT INTO cowriters (cowriter_name,first_name,last_name,pro,ipi)
+      VALUES ($1,$2,$3,$4,$5)
+      ON CONFLICT (cowriter_name) DO NOTHING`
+    let inserted = 0
+    for (let i = 0; i < cws.length; i += 30) {
+      const chunk = cws.slice(i, i+30)
+      const updResults = await Promise.all(chunk.map(cw =>
+        pgQ(UPD,[cw.n,cw.f,cw.l,cw.p,cw.i]).catch(e => {
+          console.error(`[seedCowriters] UPDATE failed for ${cw.n}: ${e.message}`)
+          return null
+        })
+      ))
+      const insResults = await Promise.all(chunk.map(cw =>
+        pgQ(INS,[cw.n,cw.f,cw.l,cw.p,cw.i]).catch(e => {
+          console.error(`[seedCowriters] INSERT failed for ${cw.n}: ${e.message}`)
+          return null
+        })
+      ))
+      inserted += insResults.filter(r => Array.isArray(r)).length
+    }
+    console.log(`[seedCowriters] seeded ${inserted}/${cws.length} cowriters`)
+  } catch (e) {
+    console.error(`[seedCowriters] exception: ${e.message}`)
   }
-  console.log("[seedCowriters] done:", cws.length, "rows")
+}
 }
 
 // ─── IP Dashboard ───────────────────────────────────────────
@@ -5477,55 +5555,61 @@ async function loadCatalogPG() {
   const countLabel = document.getElementById('track-count-label')
   if (countLabel) countLabel.textContent = 'Loading from database…'
   const badge = document.getElementById('pg-catalog-badge')
-  const rows = await pgQ(
-    `SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.description,
-            c.full_name,
-            pg.primary_genre_name,
-            sg.secondary_genre_name,
-            m1.mood_1_name,
-            l.lot_name
-     FROM titles t
-     LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
-     LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
-     LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
-     LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
-     LEFT JOIN lot_titles       lt  ON lt.sku_root           = t.sku_root
-     LEFT JOIN lots             l   ON l.lot_id              = lt.lot_id
-     WHERE COALESCE(t.status, 'active') = 'active'
-     ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
-  )
-  if (!rows) { if (countLabel) countLabel.textContent = 'DB error'; return }
-  allTracks = rows.map(r => ({
-    composerID:   r.composer_id           || '—',
-    composerName: r.full_name             || '',
-    title:        r.title,
-    key:          r.key                   || '—',
-    bpm:          r.bpm                   || null,
-    primaryGenre: r.primary_genre_name    || '',
-    subGenre:     r.secondary_genre_name  || '',
-    genre:        r.primary_genre_name
-                    ? (r.secondary_genre_name
-                        ? `${r.primary_genre_name}_${r.secondary_genre_name}`
-                        : r.primary_genre_name)
-                    : '—',
-    mood1:        r.mood_1_name           || '',
-    mood2:        '',  // simplified query — no longer loaded from DB
-    ksl:          '',  // simplified query — no longer loaded from DB
-    rmo:          '',  // simplified query — no longer loaded from DB
-    description:  r.description           || '',
-    mmw:          '',
-    sku:          r.sku_root              || '',
-    isJup:        false,
-    lot:          r.lot_name              || '',
-    dateAdded:    null,
-    titleId:      r.sku_root,
-    folder: '', path: '', files: [], versions: []
-  }))
-  if (badge) badge.textContent = '● DB'
-  if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
+  try {
+    const rows = await pgQ(
+      `SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.description,
+              c.full_name,
+              pg.primary_genre_name,
+              sg.secondary_genre_name,
+              m1.mood_1_name,
+              l.lot_name
+       FROM titles t
+       LEFT JOIN composers        c   ON c.composer_id         = regexp_replace(t.composer_id, '[a-z]+$', '')
+       LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
+       LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
+       LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
+       LEFT JOIN lot_titles       lt  ON lt.sku_root           = t.sku_root
+       LEFT JOIN lots             l   ON l.lot_id              = lt.lot_id
+       WHERE COALESCE(t.status, 'active') = 'active'
+       ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
+    )
+    if (!Array.isArray(rows)) {
+      console.error('[loadCatalogPG] failed to fetch rows')
+      if (countLabel) countLabel.textContent = 'DB error loading collection'
+      return
+    }
+    allTracks = rows.map(r => ({
+      composerID:   r.composer_id           || '—',
+      composerName: r.full_name             || '',
+      title:        r.title,
+      key:          r.key                   || '—',
+      bpm:          r.bpm                   || null,
+      primaryGenre: r.primary_genre_name    || '',
+      subGenre:     r.secondary_genre_name  || '',
+      genre:        r.primary_genre_name
+                      ? (r.secondary_genre_name
+                          ? `${r.primary_genre_name}_${r.secondary_genre_name}`
+                          : r.primary_genre_name)
+                      : '—',
+      mood1:        r.mood_1_name           || '',
+      mood2:        '',  // simplified query — no longer loaded from DB
+      ksl:          '',  // simplified query — no longer loaded from DB
+      rmo:          '',  // simplified query — no longer loaded from DB
+      description:  r.description           || '',
+      mmw:          '',
+      sku:          r.sku_root              || '',
+      isJup:        false,
+      lot:          r.lot_name              || '',
+      dateAdded:    null,
+      titleId:      r.sku_root,
+      folder: '', path: '', files: [], versions: []
+    }))
+    if (badge) badge.textContent = '● DB'
+    if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
+    console.log(`[loadCatalogPG] loaded ${allTracks.length} tracks`)
 
-  // Load secondary data (mood2, ksl, rmo) async in background
-  loadCollectionSecondaryData(rows)
+    // Load secondary data (mood2, ksl, rmo) async in background
+    loadCollectionSecondaryData(rows)
 
   // Only update catalog UI if we're in the catalog section
   if (document.getElementById('track-count-label')) {
@@ -5553,6 +5637,10 @@ async function loadCatalogPG() {
     if (_prevMood)  { const el = document.getElementById('catalog-mood-filter');       if (el) el.value = _prevMood }
     if (_prevKsl)   { const el = document.getElementById('catalog-ksl-filter');        if (el) el.value = _prevKsl }
     filterTracks(_prevQ)
+  }
+  } catch (e) {
+    console.error(`[loadCatalogPG] exception: ${e.message}`)
+    if (countLabel) countLabel.textContent = `DB error: ${e.message}`
   }
 }
 
@@ -6210,72 +6298,115 @@ async function exportCatalogCSV() {
 
 // Load mood2/ksl/rmo data asynchronously after main Collection is displayed
 async function loadCollectionSecondaryData(rows) {
-  if (!rows || !rows.length) return
-  const skus = rows.map(r => r.sku_root)
+  try {
+    if (!Array.isArray(rows) || !rows.length) {
+      console.warn('[loadCollectionSecondaryData] rows not an array or empty')
+      return
+    }
+    const skus = rows.map(r => r.sku_root)
 
-  // Load all secondary data in parallel
-  const [mood2Map, kslMap, rmoMap] = await Promise.all([
-    loadMood2Map(skus),
-    loadKslMap(skus),
-    loadRmoMap(skus)
-  ])
+    // Load all secondary data in parallel
+    const [mood2Map, kslMap, rmoMap] = await Promise.all([
+      loadMood2Map(skus),
+      loadKslMap(skus),
+      loadRmoMap(skus)
+    ])
 
-  // Update allTracks with secondary data
-  allTracks.forEach(track => {
-    if (mood2Map[track.sku]) track.mood2 = mood2Map[track.sku] || ''
-    if (kslMap[track.sku]) track.ksl = kslMap[track.sku] || ''
-    if (rmoMap[track.sku]) track.rmo = rmoMap[track.sku] || ''
-  })
+    // Verify maps are valid before updating
+    if (!mood2Map || !kslMap || !rmoMap) {
+      console.error('[loadCollectionSecondaryData] one or more maps failed to load')
+      return
+    }
 
-  // Refresh the displayed Collection to show updated data
-  renderTrackList(allTracks)
+    // Update allTracks with secondary data
+    allTracks.forEach(track => {
+      if (mood2Map[track.sku]) track.mood2 = mood2Map[track.sku] || ''
+      if (kslMap[track.sku]) track.ksl = kslMap[track.sku] || ''
+      if (rmoMap[track.sku]) track.rmo = rmoMap[track.sku] || ''
+    })
+
+    console.log('[loadCollectionSecondaryData] updated secondary data for ' + allTracks.length + ' tracks')
+    // Refresh the displayed Collection to show updated data (preserve label set by filterTracks)
+    if (currentDisplayTracks.length > 0) {
+      renderTrackList(currentDisplayTracks, true)  // skipLabelUpdate=true
+    }
+  } catch (e) {
+    console.error(`[loadCollectionSecondaryData] exception: ${e.message}`)
+  }
 }
 
 async function loadMood2Map(skus) {
-  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
-  const rows = await pgQ(
-    `SELECT t.sku_root, string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name) as mood2
-     FROM titles t
-     LEFT JOIN title_moods tm ON tm.sku_root = t.sku_root
-     LEFT JOIN moods mo ON mo.mood_id = tm.mood_id
-     WHERE t.sku_root IN (${placeholders})
-     GROUP BY t.sku_root`,
-    skus
-  )
-  const map = {}
-  rows?.forEach(r => { map[r.sku_root] = r.mood2 || '' })
-  return map
+  try {
+    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    const rows = await pgQ(
+      `SELECT t.sku_root, string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name) as mood2
+       FROM titles t
+       LEFT JOIN title_moods tm ON tm.sku_root = t.sku_root
+       LEFT JOIN moods mo ON mo.mood_id = tm.mood_id
+       WHERE t.sku_root IN (${placeholders})
+       GROUP BY t.sku_root`,
+      skus
+    )
+    const map = {}
+    if (Array.isArray(rows)) {
+      rows.forEach(r => { map[r.sku_root] = r.mood2 || '' })
+    } else {
+      console.error('[loadMood2Map] rows not an array')
+    }
+    return map
+  } catch (e) {
+    console.error(`[loadMood2Map] exception: ${e.message}`)
+    return {}
+  }
 }
 
 async function loadKslMap(skus) {
-  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
-  const rows = await pgQ(
-    `SELECT t.sku_root, string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name) as ksl
-     FROM titles t
-     LEFT JOIN ksl k ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
-     WHERE t.sku_root IN (${placeholders})
-     GROUP BY t.sku_root`,
-    skus
-  )
-  const map = {}
-  rows?.forEach(r => { map[r.sku_root] = r.ksl || '' })
-  return map
+  try {
+    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    const rows = await pgQ(
+      `SELECT t.sku_root, string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name) as ksl
+       FROM titles t
+       LEFT JOIN ksl k ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
+       WHERE t.sku_root IN (${placeholders})
+       GROUP BY t.sku_root`,
+      skus
+    )
+    const map = {}
+    if (Array.isArray(rows)) {
+      rows.forEach(r => { map[r.sku_root] = r.ksl || '' })
+    } else {
+      console.error('[loadKslMap] rows not an array')
+    }
+    return map
+  } catch (e) {
+    console.error(`[loadKslMap] exception: ${e.message}`)
+    return {}
+  }
 }
 
 async function loadRmoMap(skus) {
-  const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
-  const rows = await pgQ(
-    `SELECT t.sku_root, string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name) as rmo
-     FROM titles t
-     LEFT JOIN title_rmo tr ON tr.sku_root = t.sku_root
-     LEFT JOIN rmo r ON r.rmo_id = tr.rmo_id
-     WHERE t.sku_root IN (${placeholders})
-     GROUP BY t.sku_root`,
-    skus
-  )
-  const map = {}
-  rows?.forEach(r => { map[r.sku_root] = r.rmo || '' })
-  return map
+  try {
+    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    const rows = await pgQ(
+      `SELECT t.sku_root, string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name) as rmo
+       FROM titles t
+       LEFT JOIN title_rmo tr ON tr.sku_root = t.sku_root
+       LEFT JOIN rmo r ON r.rmo_id = tr.rmo_id
+       WHERE t.sku_root IN (${placeholders})
+       GROUP BY t.sku_root`,
+      skus
+    )
+    const map = {}
+    if (Array.isArray(rows)) {
+      rows.forEach(r => { map[r.sku_root] = r.rmo || '' })
+    } else {
+      console.error('[loadRmoMap] rows not an array')
+    }
+    return map
+  } catch (e) {
+    console.error(`[loadRmoMap] exception: ${e.message}`)
+    return {}
+  }
 }
 
 async function loadCatalogFM() {
@@ -6329,11 +6460,17 @@ async function loadCatalogFiles() {
   renderTrackList(allTracks)
 }
 
-function renderTrackList(tracks) {
-  currentDisplayTracks = tracks
-  document.getElementById('track-count-label').textContent = `${tracks.length} tracks`
+function renderTrackList(tracks, skipLabelUpdate = false) {
+  // Render only up to CATALOG_DISPLAY_LIMIT to prevent UI freeze
+  const displayTracks = tracks.slice(0, CATALOG_DISPLAY_LIMIT)
+  const total = tracks.length
+
+  currentDisplayTracks = tracks  // Keep full list for filtering
+
   const list = document.getElementById('track-list')
-  list.innerHTML = tracks.map((t, i) => {
+  if (!list) return
+
+  list.innerHTML = displayTracks.map((t, i) => {
     const sku = t.sku || t.titleId || ''
     const flagged = flaggedSkus.has(sku)
     const inPlaylist = activePlaylistSkus.has(sku)
@@ -6353,6 +6490,16 @@ function renderTrackList(tracks) {
       </button>
     </div>`
   }).join('')
+
+  // Only update label if not called from filterTracks() which manages its own label
+  if (!skipLabelUpdate) {
+    const label = document.getElementById('track-count-label')
+    if (label) {
+      label.textContent = total > CATALOG_DISPLAY_LIMIT
+        ? `Showing ${CATALOG_DISPLAY_LIMIT.toLocaleString()} of ${total.toLocaleString()} — refine filters`
+        : `${total.toLocaleString()} track${total !== 1 ? 's' : ''}`
+    }
+  }
 }
 
 let flaggedSkus = new Set(JSON.parse(localStorage.getItem('haus_flagged_skus') || '[]'))
@@ -6360,11 +6507,23 @@ let activePlaylistSkus = new Set()   // tracks already in the currently-targeted
 let activePlaylistName = ''          // for the catalog indicator label
 
 async function loadActivePlaylistSkus(playlistId, playlistName) {
-  activePlaylistName = playlistName || ''
-  if (!playlistId) { activePlaylistSkus = new Set(); updatePlaylistIndicator(); return }
-  const rows = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [playlistId])
-  activePlaylistSkus = new Set((rows || []).map(r => r.sku_root))
-  updatePlaylistIndicator()
+  try {
+    activePlaylistName = playlistName || ''
+    if (!playlistId) { activePlaylistSkus = new Set(); updatePlaylistIndicator(); return }
+    const rows = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [playlistId])
+    if (!Array.isArray(rows)) {
+      console.error(`[loadActivePlaylistSkus] failed to load tracks for playlist ${playlistId}`)
+      activePlaylistSkus = new Set()
+    } else {
+      activePlaylistSkus = new Set(rows.map(r => r.sku_root))
+    }
+    console.log(`[loadActivePlaylistSkus] loaded ${activePlaylistSkus.size} tracks for playlist ${playlistId}`)
+    updatePlaylistIndicator()
+  } catch (e) {
+    console.error(`[loadActivePlaylistSkus] exception: ${e.message}`)
+    activePlaylistSkus = new Set()
+    updatePlaylistIndicator()
+  }
 }
 
 function updatePlaylistIndicator() {
@@ -6716,34 +6875,65 @@ async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
   document.querySelector('[style*="position:fixed"][style*="z-index:9999"]')?.remove()
   toLotId = parseInt(toLotId)
 
-  // Update DB: remove from old lot (if moving), add to new lot
-  if (fromLotId) {
-    await pgQ(`DELETE FROM lot_titles WHERE lot_id = $1 AND (sku_root = $2 OR (length(sku_root)=7 AND $2 LIKE sku_root || '_'))`, [fromLotId, skuRoot])
-  }
-  await pgQ(`INSERT INTO lot_titles (lot_id, sku_root) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [toLotId, skuRoot])
+  try {
+    // PHASE 1: Check for conflicts before committing
+    const hausjup = cfg.hausjup
+    let filesToMove = []
 
-  // Move physical files if in shipping folder
-  const hausjup = cfg.hausjup
-  if (hausjup && fromLotId) {
-    const fromLot = await pgQ(`SELECT lot_name FROM lots WHERE lot_id = $1`, [fromLotId])
-    const fromName = fromLot?.[0]?.lot_name
-    if (fromName) {
-      const fromPath = `${hausjup}/${fromName}`
-      const toPath   = `${hausjup}/${toLotName}`
-      // Find files matching this sku in the old lot folder
-      const findResult = await window.haus.shell.exec(`find "${fromPath}" -name "${skuRoot}*" -maxdepth 2 2>/dev/null`)
-      const files = (findResult?.stdout || '').trim().split('\n').filter(Boolean)
-      if (files.length) {
-        await window.haus.shell.exec(`mkdir -p "${toPath}"`)
-        for (const f of files) {
-          const fname = f.split('/').pop()
-          await window.haus.shell.exec(`mv "${f}" "${toPath}/${fname}"`)
+    if (hausjup && fromLotId) {
+      const fromLot = await pgQ(`SELECT lot_name FROM lots WHERE lot_id = $1`, [fromLotId])
+      const fromName = fromLot?.[0]?.lot_name
+      if (fromName) {
+        const fromPath = `${hausjup}/${fromName}`
+        const toPath   = `${hausjup}/${toLotName}`
+
+        // Find files matching this sku
+        const findResult = await window.haus.shell.exec(`find "${fromPath}" -name "${skuRoot}*" -maxdepth 2 2>/dev/null`)
+        const files = (findResult?.stdout || '').trim().split('\n').filter(Boolean)
+
+        // Check for conflicts at destination
+        if (files.length > 0) {
+          for (const f of files) {
+            const fname = f.split('/').pop()
+            const destFile = `${toPath}/${fname}`
+            const checkConflict = await window.haus.shell.exec(`test -f "${destFile}" && echo "exists" || echo "ok"`)
+            if (checkConflict?.stdout?.trim() === 'exists') {
+              console.warn(`[confirmMoveLot] conflict detected: ${destFile} already exists`)
+              alert(`File conflict: ${fname} already exists in ${toLotName}. Move cancelled.`)
+              return
+            }
+          }
+          filesToMove = files.map(f => ({ src: f, dest: `${toPath}/${f.split('/').pop()}` }))
         }
       }
     }
-  }
 
-  loadTrackLotHistory(skuRoot)
+    // PHASE 2: Update database (commit point)
+    if (fromLotId) {
+      await pgQ(`DELETE FROM lot_titles WHERE lot_id = $1 AND (sku_root = $2 OR (length(sku_root)=7 AND $2 LIKE sku_root || '_'))`, [fromLotId, skuRoot])
+    }
+    await pgQ(`INSERT INTO lot_titles (lot_id, sku_root) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [toLotId, skuRoot])
+    console.log(`[confirmMoveLot] DB updated: ${skuRoot} moved from lot ${fromLotId} to ${toLotId}`)
+
+    // PHASE 3: Move physical files (if DB succeeded)
+    if (filesToMove.length > 0) {
+      const toPath = `${hausjup}/${toLotName}`
+      await window.haus.shell.exec(`mkdir -p "${toPath}"`)
+
+      for (const { src, dest } of filesToMove) {
+        await window.haus.shell.exec(`mv "${src}" "${dest}"`)
+        console.log(`[confirmMoveLot] file moved: ${src.split('/').pop()} → ${toLotName}`)
+      }
+
+      // Log the movement for audit trail
+      console.log(`[confirmMoveLot] completed: ${filesToMove.length} file(s) moved for ${skuRoot}`)
+    }
+
+    loadTrackLotHistory(skuRoot)
+  } catch (e) {
+    console.error(`[confirmMoveLot] failed: ${e.message}`)
+    alert(`Error moving track: ${e.message}`)
+  }
 }
 
 const CATALOG_DISPLAY_LIMIT = 500
@@ -6786,8 +6976,7 @@ function filterTracks(q) {
     )
 
     const total   = filtered.length
-    const display = filtered.slice(0, CATALOG_DISPLAY_LIMIT)
-    renderTrackList(display)
+    renderTrackList(filtered, true)  // skipLabelUpdate=true, we manage label below
 
     const label = document.getElementById('track-count-label')
     if (label) {
@@ -6797,6 +6986,7 @@ function filterTracks(q) {
     }
 
     // FM server-side search
+    // NOTE: window.haus.fm.query() returns {ok, records} format (not pgQ arrays)
     if (catalogSource === 'fm' && cfg.fmHost && lq.length >= 2) {
       const fmFilter = { [cfg.fmTitleField]: `=*${q}*` }
       const res = await window.haus.fm.query(cfg.fmDatabase, cfg.fmLayout, fmFilter, { limit: 100 })
@@ -6891,51 +7081,53 @@ let _intakeMetaWarned = false  // set to true after user acknowledges missing-me
 
 async function loadIntakeMetadata() {
   if (!pgConnected) return
-  if (!_intakeGenres.length) {
-    const g = await pgQ('SELECT DISTINCT ON (primary_genre_name) primary_genre_id, primary_genre_name FROM primary_genres ORDER BY primary_genre_name')
-    _intakeGenres = g || []
-  }
-  if (!Object.keys(_intakeSubGenres).length) {
-    const sg = await pgQ('SELECT DISTINCT ON (sg.primary_genre_id, sg.secondary_genre_name) sg.secondary_genre_id, sg.primary_genre_id, sg.secondary_genre_name FROM secondary_genres sg ORDER BY sg.primary_genre_id, sg.secondary_genre_name')
-    if (sg) {
-      for (const row of sg) {
-        if (!_intakeSubGenres[row.primary_genre_id]) _intakeSubGenres[row.primary_genre_id] = []
-        _intakeSubGenres[row.primary_genre_id].push(row.secondary_genre_name)
+  try {
+    if (!_intakeGenres.length) {
+      const g = await pgQ('SELECT DISTINCT ON (primary_genre_name) primary_genre_id, primary_genre_name FROM primary_genres ORDER BY primary_genre_name')
+      _intakeGenres = g || []
+    }
+    if (!Object.keys(_intakeSubGenres).length) {
+      const sg = await pgQ('SELECT DISTINCT ON (sg.primary_genre_id, sg.secondary_genre_name) sg.secondary_genre_id, sg.primary_genre_id, sg.secondary_genre_name FROM secondary_genres sg ORDER BY sg.primary_genre_id, sg.secondary_genre_name')
+      if (sg && sg.length) {
+        for (const row of sg) {
+          if (!_intakeSubGenres[row.primary_genre_id]) _intakeSubGenres[row.primary_genre_id] = []
+          _intakeSubGenres[row.primary_genre_id].push(row.secondary_genre_name)
+        }
       }
     }
-  }
-  if (!_intakeMoods.length) {
-    const m = await pgQ('SELECT DISTINCT ON (mood_name) mood_id, mood_name FROM moods ORDER BY mood_name')
-    _intakeMoods = m || []
-  }
-  if (!_intakeMood1.length) {
-    const m1 = await pgQ('SELECT DISTINCT ON (mood_1_name) mood_1_id, mood_1_name FROM mood_1 ORDER BY mood_1_name')
-    _intakeMood1 = m1 || []
-  }
-  if (!_intakeComposers.length) {
-    // DISTINCT ON (composer_full_id) — teams table may still have duplicates.
-    // Without this, the intake composer dropdown shows every team 3x.
-    const c = await pgQ(`
-      SELECT DISTINCT ON (t.composer_full_id)
-             t.composer_full_id, t.team_id, t.writer_detail, t.pub_detail, t.has_cowriters, t.is_jup,
-             c.full_name
-      FROM teams t
-      LEFT JOIN composers c ON c.composer_id = t.composer_prefix
-      WHERE t.composer_full_id IS NOT NULL AND t.composer_full_id != ''
-      ORDER BY t.composer_full_id, t.team_id
-    `)
-    _intakeComposers = c || []
-  }
-  // Always reload RMO — don't cache empty result
-  const rmoRows = await pgQ('SELECT DISTINCT ON (rmo_name) rmo_id, rmo_name FROM rmo ORDER BY rmo_name')
-  if (rmoRows) _intakeRmo = rmoRows
-  if (!_intakeKsl.length) {
-    const k = await pgQ('SELECT DISTINCT ON (ksl_name) ksl_id, ksl_name FROM ksl ORDER BY ksl_name')
-    _intakeKsl = k || []
-  }
-  if (!_intakeCowriters.length) {
-    const cw = await pgQ('SELECT cowriter_id, cowriter_name, pro FROM cowriters ORDER BY cowriter_name')
-    _intakeCowriters = cw || []
+    if (!_intakeMoods.length) {
+      const m = await pgQ('SELECT DISTINCT ON (mood_name) mood_id, mood_name FROM moods ORDER BY mood_name')
+      _intakeMoods = m || []
+    }
+    if (!_intakeMood1.length) {
+      const m1 = await pgQ('SELECT DISTINCT ON (mood_1_name) mood_1_id, mood_1_name FROM mood_1 ORDER BY mood_1_name')
+      _intakeMood1 = m1 || []
+    }
+    if (!_intakeComposers.length) {
+      const c = await pgQ(`
+        SELECT DISTINCT ON (t.composer_full_id)
+               t.composer_full_id, t.team_id, t.writer_detail, t.pub_detail, t.has_cowriters, t.is_jup,
+               c.full_name
+        FROM teams t
+        LEFT JOIN composers c ON c.composer_id = t.composer_prefix
+        WHERE t.composer_full_id IS NOT NULL AND t.composer_full_id != ''
+        ORDER BY t.composer_full_id, t.team_id
+      `)
+      _intakeComposers = c || []
+    }
+    const rmoRows = await pgQ('SELECT DISTINCT ON (rmo_name) rmo_id, rmo_name FROM rmo ORDER BY rmo_name')
+    if (rmoRows && rmoRows.length) _intakeRmo = rmoRows
+    if (!_intakeKsl.length) {
+      const k = await pgQ('SELECT DISTINCT ON (ksl_name) ksl_id, ksl_name FROM ksl ORDER BY ksl_name')
+      _intakeKsl = k || []
+    }
+    if (!_intakeCowriters.length) {
+      const cw = await pgQ('SELECT cowriter_id, cowriter_name, pro FROM cowriters ORDER BY cowriter_name')
+      _intakeCowriters = cw || []
+    }
+  } catch (e) {
+    console.error('[loadIntakeMetadata] failed:', e.message)
+    // Defaults already set to empty arrays, form will still work
   }
   // _intakeMetapaks is pre-loaded from MMW_METAPAKS constant — no DB query needed
 }
@@ -7196,7 +7388,7 @@ function addMetapak(i) {
     const tag = document.createElement('span')
     tag.dataset.tag = phrase
     tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:var(--accent);color:#fff;padding:3px 10px;border-radius:20px;font-size:12px'
-    tag.innerHTML = `${esc(phrase)} <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">&times;</button>`
+    tag.innerHTML = `${esc(phrase)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">&times;</button>`
     container.appendChild(tag)
   }
   markUnsavedChanges()
@@ -7214,7 +7406,7 @@ function addMmwPhrase(i) {
   const tag = document.createElement('span')
   tag.dataset.tag = phrase
   tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:var(--bg2);color:var(--text1);padding:3px 10px;border-radius:20px;font-size:12px;border:1px solid var(--border)'
-  tag.innerHTML = `${esc(phrase)} <button onclick="this.parentElement.remove()" style="background:none;border:none;cursor:pointer;padding:0;font-size:14px;line-height:1;color:var(--text2)">&times;</button>`
+  tag.innerHTML = `${esc(phrase)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;cursor:pointer;padding:0;font-size:14px;line-height:1;color:var(--text2)">&times;</button>`
   container.appendChild(tag)
   markUnsavedChanges()
 }
@@ -7241,7 +7433,7 @@ function addIntakeMoodTag(i) {
   const tag = document.createElement('span')
   tag.dataset.tag = name
   tag.style.cssText = 'display:inline-flex;align-items:center;gap:4px;padding:3px 10px;background:var(--accent);color:#fff;border-radius:20px;font-size:12px'
-  tag.innerHTML = `${esc(name)} <button onclick="this.parentElement.remove()" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">×</button>`
+  tag.innerHTML = `${esc(name)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;color:#fff;cursor:pointer;padding:0;font-size:14px;line-height:1">×</button>`
   container.appendChild(tag)
   inp.value = ''
   markUnsavedChanges()
@@ -8468,10 +8660,9 @@ function collectIntakeFormData(i) {
 
 function autoSaveIntakeDraft(i) {
   const data = collectIntakeFormData(i)
+  const meta = getIntakeMeta(i)
   const draft = {
-    clientName: window.intakeClient || 'unknown',
-    dropIndex: i,
-    dropName: window.intakeDrops?.[i]?.name || `Drop ${i + 1}`,
+    ...meta,
     formData: data,
     timestamp: Date.now()
   }
@@ -8496,22 +8687,32 @@ function enableIntakeFormTracking(i) {
   fieldIds.forEach(id => {
     const el = document.getElementById(id)
     if (el) {
-      el.addEventListener('change', () => {
-        markUnsavedChanges()
-      })
-      el.addEventListener('input', () => {
-        markUnsavedChanges()
+      ['change', 'input'].forEach(event => {
+        el.addEventListener(event, markUnsavedChanges)
       })
     }
   })
 }
 
+// ── Intake Helper Functions ──────────────────────────────
+function getIntakeMeta(i) {
+  return {
+    clientName: window.intakeClient || 'unknown',
+    dropName: window.intakeDrops?.[i]?.name || `Drop ${i + 1}`,
+    dropIndex: i
+  }
+}
+
+function removeIntakeTag(btn) {
+  btn.parentElement.remove()
+  markUnsavedChanges()
+}
+
 async function saveDraftToDatabase(i) {
   const data = collectIntakeFormData(i)
+  const meta = getIntakeMeta(i)
   const draft = {
-    clientName: window.intakeClient || 'unknown',
-    dropIndex: i,
-    dropName: window.intakeDrops?.[i]?.name || `Drop ${i + 1}`,
+    ...meta,
     formData: data,
     timestamp: new Date().toISOString()
   }
@@ -12270,17 +12471,39 @@ async function deleteProject(id) {
 
 async function createPlaylist(projectId) {
   hausPrompt('Playlist name:', async name => {
-    if (!name || !name.trim()) return
-    await pgQ('INSERT INTO playlists (project_id, name) VALUES ($1,$2)', [projectId, name.trim()])
-    loadPlaylistsForProject(projectId)
+    try {
+      if (!name || !name.trim()) return
+      const r = await pgQ('INSERT INTO playlists (project_id, name) VALUES ($1,$2)', [projectId, name.trim()])
+      if (!Array.isArray(r)) {
+        console.error('[createPlaylist] INSERT failed')
+        alert('Error creating playlist')
+        return
+      }
+      console.log(`[createPlaylist] created playlist "${name.trim()}" in project ${projectId}`)
+      loadPlaylistsForProject(projectId)
+    } catch (e) {
+      console.error(`[createPlaylist] exception: ${e.message}`)
+      alert(`Error creating playlist: ${e.message}`)
+    }
   })
 }
 
 async function deletePlaylist(id) {
   hausConfirm('Delete this playlist?', async () => {
-    await pgQ('DELETE FROM playlists WHERE id=$1', [id])
-    if (currentPlaylistId === id) { currentPlaylistId = null; clearPlaylistPane() }
-    if (currentProjectId) loadPlaylistsForProject(currentProjectId)
+    try {
+      const r = await pgQ('DELETE FROM playlists WHERE id=$1', [id])
+      if (!Array.isArray(r)) {
+        console.error(`[deletePlaylist] DELETE failed for playlist ${id}`)
+        alert('Error deleting playlist')
+        return
+      }
+      console.log(`[deletePlaylist] deleted playlist ${id}`)
+      if (currentPlaylistId === id) { currentPlaylistId = null; clearPlaylistPane() }
+      if (currentProjectId) loadPlaylistsForProject(currentProjectId)
+    } catch (e) {
+      console.error(`[deletePlaylist] exception: ${e.message}`)
+      alert(`Error deleting playlist: ${e.message}`)
+    }
   })
 }
 
@@ -12296,43 +12519,55 @@ function clearPlaylistPane() {
 }
 
 async function selectProjectLot(lotId) {
-  currentLotId = lotId
-  currentPlaylistId = null
-  document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
-  document.querySelectorAll('.proj-lot-item').forEach(el => el.classList.remove('plt-active'))
-  document.getElementById(`proj-lot-${lotId}`)?.classList.add('plt-active')
-  document.getElementById('playlist-add-btn').style.display = 'none'
-  document.getElementById('playlist-export-btn').style.display = 'none'
-  document.getElementById('playlist-avid-btn').style.display = 'none'
+  try {
+    currentLotId = lotId
+    currentPlaylistId = null
+    document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
+    document.querySelectorAll('.proj-lot-item').forEach(el => el.classList.remove('plt-active'))
+    document.getElementById(`proj-lot-${lotId}`)?.classList.add('plt-active')
+    document.getElementById('playlist-add-btn').style.display = 'none'
+    document.getElementById('playlist-export-btn').style.display = 'none'
+    document.getElementById('playlist-avid-btn').style.display = 'none'
 
-  const [lotRows, trackRows] = await Promise.all([
-    pgQ('SELECT lot_name, sent_date, notes FROM lots WHERE lot_id=$1', [lotId]),
-    pgQ(`SELECT lt.sku_root, t.title, t.bpm, t.key, t.composer_id, t.vocals,
-               c.full_name AS composer_name,
-               pg.primary_genre_name AS genre,
-               sg.secondary_genre_name AS sub_genre
-         FROM lot_titles lt
-         JOIN titles t ON t.sku_root = lt.sku_root
-         LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-         LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-         WHERE lt.lot_id = $1
-         ORDER BY lt.added_at, lt.sku_root`, [lotId])
-  ])
+    const [lotRows, trackRows] = await Promise.all([
+      pgQ('SELECT lot_name, sent_date, notes FROM lots WHERE lot_id=$1', [lotId]),
+      pgQ(`SELECT lt.sku_root, t.title, t.bpm, t.key, t.composer_id, t.vocals,
+                 c.full_name AS composer_name,
+                 pg.primary_genre_name AS genre,
+                 sg.secondary_genre_name AS sub_genre
+           FROM lot_titles lt
+           JOIN titles t ON t.sku_root = lt.sku_root
+           LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+           LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+           LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+           WHERE lt.lot_id = $1
+           ORDER BY lt.added_at, lt.sku_root`, [lotId])
+    ])
 
-  const lot = lotRows?.[0]
-  playlistTracks = (trackRows || []).map(r => ({ ...r, _isLotTrack: true }))
-  playlistCurrentIdx = -1
+    if (!Array.isArray(lotRows) || !Array.isArray(trackRows)) {
+      console.error(`[selectProjectLot] failed to load lot ${lotId}: lotRows=${Array.isArray(lotRows)}, trackRows=${Array.isArray(trackRows)}`)
+      alert('Error loading lot tracks')
+      return
+    }
 
-  const countEl = document.getElementById('playlist-track-count')
-  if (countEl) {
-    const badge = lot?.sent_date
-      ? `<span style="background:#4a7c5930;color:#4a7c59;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Sent ${String(lot.sent_date).slice(0,10)}</span>`
-      : `<span style="background:#c17a5e20;color:#c17a5e;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Open</span>`
-    countEl.innerHTML = `<span style="font-weight:600">${lot?.lot_name||'Lot'}</span> · ${playlistTracks.length} tracks${badge}`
+    const lot = lotRows?.[0]
+    playlistTracks = (trackRows || []).map(r => ({ ...r, _isLotTrack: true }))
+    playlistCurrentIdx = -1
+
+    const countEl = document.getElementById('playlist-track-count')
+    if (countEl) {
+      const badge = lot?.sent_date
+        ? `<span style="background:#4a7c5930;color:#4a7c59;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Sent ${String(lot.sent_date).slice(0,10)}</span>`
+        : `<span style="background:#c17a5e20;color:#c17a5e;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Open</span>`
+      countEl.innerHTML = `<span style="font-weight:600">${lot?.lot_name||'Lot'}</span> · ${playlistTracks.length} tracks${badge}`
+    }
+
+    console.log(`[selectProjectLot] loaded ${playlistTracks.length} tracks for lot ${lotId}`)
+    renderPlaylistTrackList()
+  } catch (e) {
+    console.error(`[selectProjectLot] exception: ${e.message}`)
+    alert(`Error loading lot: ${e.message}`)
   }
-
-  renderPlaylistTrackList()
 }
 
 function showLotCtxMenu(e, lotId, lotName, projId) {
@@ -12348,29 +12583,40 @@ function showLotCtxMenu(e, lotId, lotName, projId) {
 }
 
 async function selectPlaylist(id) {
-  currentPlaylistId = id
-  document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
-  document.getElementById(`pl-${id}`)?.classList.add('active')
-  document.getElementById('playlist-add-btn').style.display = ''
-  document.getElementById('playlist-export-btn').style.display = ''
-  document.getElementById('playlist-avid-btn').style.display = ''
-  const rows = await pgQ(`
-    SELECT pt.id as pt_id, pt.position, pt.sku_root,
-           t.title, t.bpm, t.key, t.composer_id,
-           c.full_name as composer_name,
-           pg.primary_genre_name AS genre,
-           sg.secondary_genre_name AS sub_genre
-    FROM playlist_tracks pt
-    JOIN titles t ON t.sku_root = pt.sku_root
-    LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-    LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-    LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-    WHERE pt.playlist_id = $1
-    ORDER BY pt.position, pt.id
-  `, [id])
-  playlistTracks = rows || []
-  playlistCurrentIdx = -1
-  renderPlaylistTrackList()
+  try {
+    currentPlaylistId = id
+    document.querySelectorAll('.playlist-item').forEach(el => el.classList.remove('active'))
+    document.getElementById(`pl-${id}`)?.classList.add('active')
+    document.getElementById('playlist-add-btn').style.display = ''
+    document.getElementById('playlist-export-btn').style.display = ''
+    document.getElementById('playlist-avid-btn').style.display = ''
+    const rows = await pgQ(`
+      SELECT pt.id as pt_id, pt.position, pt.sku_root,
+             t.title, t.bpm, t.key, t.composer_id,
+             c.full_name as composer_name,
+             pg.primary_genre_name AS genre,
+             sg.secondary_genre_name AS sub_genre
+      FROM playlist_tracks pt
+      JOIN titles t ON t.sku_root = pt.sku_root
+      LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+      WHERE pt.playlist_id = $1
+      ORDER BY pt.position, pt.id
+    `, [id])
+    if (!Array.isArray(rows)) {
+      console.error(`[selectPlaylist] failed to load tracks for playlist ${id}`)
+      alert('Error loading playlist tracks')
+      return
+    }
+    playlistTracks = rows
+    playlistCurrentIdx = -1
+    console.log(`[selectPlaylist] loaded playlist ${id} with ${playlistTracks.length} tracks`)
+    renderPlaylistTrackList()
+  } catch (e) {
+    console.error(`[selectPlaylist] exception: ${e.message}`)
+    alert(`Error loading playlist: ${e.message}`)
+  }
 }
 
 function renderPlaylistTrackList() {
@@ -12424,7 +12670,13 @@ async function selectPlaylistTrack(idx) {
   `
   // Auto-advance to next track when current ends
   const audio = document.getElementById('playlist-detail-audio')
-  if (audio) audio.addEventListener('ended', () => selectPlaylistTrack(idx+1), {once:true})
+  if (audio) {
+    // Remove any previous 'ended' listeners to prevent accumulation
+    const newAudio = audio.cloneNode(true)
+    audio.parentNode?.replaceChild(newAudio, audio)
+    const freshAudio = document.getElementById('playlist-detail-audio')
+    if (freshAudio) freshAudio.addEventListener('ended', () => selectPlaylistTrack(idx+1), {once:true})
+  }
   
   // Load B2 audio
   if (b2Connected && b2DownloadUrl) {
@@ -12692,37 +12944,64 @@ function renderAddTracksList(tracks) {
 }
 
 async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
-  if (!currentPlaylistId) return
-  const ex = window._addTracksExisting
-  if (ex?.has(skuRoot)) return
-  const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
-  const pos = maxRes?.[0]?.next || 1
-  await pgQ('INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1,$2,$3) ON CONFLICT (playlist_id,sku_root) DO NOTHING', [currentPlaylistId, skuRoot, pos])
-  ex?.add(skuRoot)
-  const btn = rowEl?.querySelector('button')
-  if (btn) { btn.textContent='Added'; btn.style.opacity='0.4'; btn.disabled=true; btn.style.pointerEvents='none' }
-  // Refresh track list in background
-  const rows = await pgQ(`
-    SELECT pt.id as pt_id, pt.position, pt.sku_root,
-           t.title, t.bpm, t.key,
-           c.full_name as composer_name,
-           CASE WHEN pg.primary_genre_name IS NOT NULL AND sg.secondary_genre_name IS NOT NULL
-                THEN pg.primary_genre_name || '_' || sg.secondary_genre_name
-                WHEN pg.primary_genre_name IS NOT NULL THEN pg.primary_genre_name
-                ELSE '' END as genre
-    FROM playlist_tracks pt
-    JOIN titles t ON t.sku_root = pt.sku_root
-    LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-    LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-    LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-    WHERE pt.playlist_id = $1
-    ORDER BY pt.position, pt.id
-  `, [currentPlaylistId])
-  playlistTracks = rows || []
-  renderPlaylistTrackList()
-  // Update sidebar with simplified track data
-  const sidebarData = (rows || []).map(r => ({ title: r.title, composerName: r.composer_name, composerId: r.composer_id }))
-  updatePlaylistSidebar(sidebarData)
+  try {
+    if (!currentPlaylistId) return
+    const ex = window._addTracksExisting
+    if (ex?.has(skuRoot)) return
+
+    // Get next position
+    const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
+    if (!Array.isArray(maxRes)) {
+      console.error(`[addTrackToCurrentPlaylist] failed to fetch max position for playlist ${currentPlaylistId}`)
+      alert('Error adding track')
+      return
+    }
+    const pos = maxRes?.[0]?.next || 1
+
+    // Insert track
+    const insertRes = await pgQ('INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1,$2,$3) ON CONFLICT (playlist_id,sku_root) DO NOTHING', [currentPlaylistId, skuRoot, pos])
+    if (!Array.isArray(insertRes)) {
+      console.error(`[addTrackToCurrentPlaylist] INSERT failed for ${skuRoot} in playlist ${currentPlaylistId}`)
+      alert('Error adding track to playlist')
+      return
+    }
+
+    // Only update UI if INSERT succeeded
+    ex?.add(skuRoot)
+    const btn = rowEl?.querySelector('button')
+    if (btn) { btn.textContent='Added'; btn.style.opacity='0.4'; btn.disabled=true; btn.style.pointerEvents='none' }
+
+    // Refresh track list in background
+    const rows = await pgQ(`
+      SELECT pt.id as pt_id, pt.position, pt.sku_root,
+             t.title, t.bpm, t.key,
+             c.full_name as composer_name,
+             CASE WHEN pg.primary_genre_name IS NOT NULL AND sg.secondary_genre_name IS NOT NULL
+                  THEN pg.primary_genre_name || '_' || sg.secondary_genre_name
+                  WHEN pg.primary_genre_name IS NOT NULL THEN pg.primary_genre_name
+                  ELSE '' END as genre
+      FROM playlist_tracks pt
+      JOIN titles t ON t.sku_root = pt.sku_root
+      LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
+      WHERE pt.playlist_id = $1
+      ORDER BY pt.position, pt.id
+    `, [currentPlaylistId])
+    if (!Array.isArray(rows)) {
+      console.error(`[addTrackToCurrentPlaylist] failed to refresh playlist ${currentPlaylistId}`)
+      return
+    }
+    playlistTracks = rows
+    renderPlaylistTrackList()
+    // Update sidebar with simplified track data
+    const sidebarData = rows.map(r => ({ title: r.title, composerName: r.composer_name, composerId: r.composer_id }))
+    updatePlaylistSidebar(sidebarData)
+    console.log(`[addTrackToCurrentPlaylist] added ${skuRoot} to playlist ${currentPlaylistId}`)
+  } catch (e) {
+    console.error(`[addTrackToCurrentPlaylist] exception: ${e.message}`)
+    alert(`Error adding track: ${e.message}`)
+  }
 }
 
 
@@ -12737,21 +13016,24 @@ async function showAddToPlaylistModal(skuRoot) {
     if (alreadyIn) { showQuickToast('Already in playlist'); return }
 
     try {
-      console.log('[fast-add] currentPlaylistId:', currentPlaylistId, 'skuRoot:', skuRoot, 'type:', typeof skuRoot)
+      // Get next position
       const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
+      if (!Array.isArray(maxRes)) {
+        console.error('[fast-add] failed to fetch max position')
+        showQuickToast('Error: could not get position')
+        return
+      }
       const pos = maxRes?.[0]?.next || 1
-      console.log('[fast-add] max position:', pos, 'playlist_id type:', typeof currentPlaylistId)
 
-      // Try insert with detailed error reporting
-      const insertSql = `INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1, $2, $3)`
-      console.log('[fast-add] About to INSERT:', insertSql, 'params:', [currentPlaylistId, skuRoot, pos])
-      const result = await pgQ(insertSql, [currentPlaylistId, skuRoot, pos])
-      console.log('[fast-add] Insert result:', result, 'for sku:', skuRoot, 'playlist:', currentPlaylistId)
-
-      if (!result) {
-        console.warn('[fast-add] Insert returned null - may have failed silently')
+      // Insert track into playlist
+      const result = await pgQ(`INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1, $2, $3)`, [currentPlaylistId, skuRoot, pos])
+      if (!Array.isArray(result)) {
+        console.error(`[fast-add] INSERT failed for ${skuRoot}`)
+        showQuickToast(`Error: could not add track`)
+        return
       }
 
+      // Only update local state if INSERT succeeded
       activePlaylistSkus.add(skuRoot)
       const safeId = skuRoot.replace(/[^a-zA-Z0-9]/g,'_')
       const row = document.getElementById('track-row-' + safeId)
@@ -12759,6 +13041,7 @@ async function showAddToPlaylistModal(skuRoot) {
       const countEl = document.getElementById('playlist-indicator-count')
       if (countEl) { const n = activePlaylistSkus.size; countEl.textContent = `${n} track${n !== 1 ? 's' : ''}` }
       showQuickToast(`Added to ${activePlaylistName}`)
+      console.log(`[fast-add] added ${skuRoot} to playlist ${currentPlaylistId}`)
 
       // Update sidebar in real-time with the new track
       const updatedTracks = await pgQ(`
@@ -12768,8 +13051,11 @@ async function showAddToPlaylistModal(skuRoot) {
         LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR LENGTH(t.composer_id)-1)
         WHERE pt.playlist_id = $1
         ORDER BY t.title
-      `, [currentPlaylistId]).catch(() => [])
-      if (updatedTracks) {
+      `, [currentPlaylistId]).catch(e => {
+        console.error('[fast-add] failed to update sidebar:', e.message)
+        return []
+      })
+      if (Array.isArray(updatedTracks) && updatedTracks.length) {
         updatePlaylistSidebar(updatedTracks)
       }
 
@@ -12781,30 +13067,35 @@ async function showAddToPlaylistModal(skuRoot) {
           JOIN titles t ON t.sku_root = pt.sku_root
           WHERE pt.playlist_id = $1
           ORDER BY t.title
-        `, [window._currentPlaylistId]).catch(() => [])
-        const tracks = trackData || []
-        const detailDiv = document.getElementById('clients-detail')
-        if (detailDiv) {
-          const tracksList = detailDiv.querySelector('div[id*="track"]') || detailDiv.firstElementChild?.querySelector('div')
-          if (tracksList) {
-            tracksList.innerHTML = tracks.length > 0 ? tracks.map((t, i) => `
-              <div style="padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);font-size:12px">
-                <div style="font-weight:500;margin-bottom:4px">${i + 1}. ${t.title}</div>
-                <div style="color:var(--text3);font-size:11px">${t.key || '—'}</div>
-              </div>
-            `).join('') : '<div style="font-size:12px;color:var(--text3);padding:16px;text-align:center;background:var(--bg2);border-radius:6px">No tracks in this playlist</div>'
+        `, [window._currentPlaylistId]).catch(e => {
+          console.error('[fast-add] failed to fetch track data:', e.message)
+          return []
+        })
+        const tracks = Array.isArray(trackData) ? trackData : []
+        if (tracks.length > 0) {
+          const detailDiv = document.getElementById('clients-detail')
+          if (detailDiv) {
+            const tracksList = detailDiv.querySelector('div[id*="track"]') || detailDiv.firstElementChild?.querySelector('div')
+            if (tracksList) {
+              tracksList.innerHTML = tracks.map((t, i) => `
+                <div style="padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);font-size:12px">
+                  <div style="font-weight:500;margin-bottom:4px">${i + 1}. ${t.title}</div>
+                  <div style="color:var(--text3);font-size:11px">${t.key || '—'}</div>
+                </div>
+              `).join('')
+            }
           }
         }
       }
     } catch (err) {
-      console.error('[fast-add] Error adding track:', err)
+      console.error('[fast-add] exception:', err.message)
       showQuickToast(`Error: ${err.message}`)
     }
     return
   }
 
   const projects = await pgQ('SELECT id, name FROM projects ORDER BY name')
-  if (!projects || !projects.length) { alert('No projects yet — create one in the Projects section first.'); return }
+  if (!Array.isArray(projects) || !projects.length) { alert('No projects yet — create one in the Projects section first.'); return }
 
   const modal = document.createElement('div')
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;display:flex;align-items:center;justify-content:center'
