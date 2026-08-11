@@ -3929,7 +3929,7 @@ async function togglePlayTrack(skuRoot, buttonEl) {
 
 async function selectClientPlaylist(playlistId, playlistName) {
   try {
-    window._currentPlaylistId = playlistId  // Track current playlist for refresh after add
+    currentPlaylistId = playlistId  // Track current playlist for refresh after add
     const [playlistMeta, trackData] = await Promise.all([
       pgQ(`SELECT * FROM playlists WHERE playlist_id=$1`, [playlistId]).catch(() => []),
       pgQ(`
@@ -5605,14 +5605,16 @@ async function loadCatalogPG() {
       folder: '', path: '', files: [], versions: []
     }))
     if (badge) badge.textContent = '● DB'
+    console.log(`[loadCatalogPG] loaded ${allTracks.length} tracks, loading secondary data...`)
+
+    // Load secondary data (mood2, ksl, rmo) - WAIT for completion before rendering
+    // This prevents UI flicker and ensures filters have complete data
+    await loadCollectionSecondaryData(rows)
+
     if (countLabel) countLabel.textContent = `${allTracks.length} tracks`
-    console.log(`[loadCatalogPG] loaded ${allTracks.length} tracks`)
 
-    // Load secondary data (mood2, ksl, rmo) async in background
-    loadCollectionSecondaryData(rows)
-
-  // Only update catalog UI if we're in the catalog section
-  if (document.getElementById('track-count-label')) {
+    // Only update catalog UI if we're in the catalog section
+    if (document.getElementById('track-count-label')) {
     // Snapshot current filter values before repopulating (so user selections survive a reload)
     const _prevProd    = document.getElementById('catalog-production-filter')?.value || ''
     const _prevGenre   = document.getElementById('catalog-genre-filter')?.value || ''
@@ -6430,10 +6432,21 @@ async function loadCatalogFM() {
     const f = rec.fieldData || {}
     const title      = f[cfg.fmTitleField]    || f['Title']      || f['Name'] || '—'
     const composerID = f[cfg.fmComposerField] || f['ComposerID'] || f['Composer'] || '—'
+    const composerName = composerID  // Use ID as name since FM may not have full name
     const key        = f[cfg.fmKeyField]      || f['Key']        || '—'
     const genre      = f[cfg.fmGenreField]    || f['Genre']      || f['Type'] || '—'
-    return { composerID, title, key, genre, folder: '', path: '', files: [], versions: [], fmRecord: rec, recordId: rec.recordId }
+    const bpm        = parseInt(f['BPM'] || f['Tempo']) || null
+    const description = f['Notes'] || f['Description'] || ''
+    return {
+      composerID, composerName, title, key, bpm, description,
+      genre, primaryGenre: genre, subGenre: '',  // FM doesn't distinguish primary/secondary
+      mood1: '', mood2: '', ksl: '', rmo: '',  // Will be filled by secondary data if needed
+      sku: '', titleId: '', lot: '', isJup: false,
+      folder: '', path: '', files: [], versions: [],
+      fmRecord: rec, recordId: rec.recordId  // Keep FM metadata
+    }
   }).filter(t => t.title !== '—')
+  currentDisplayTracks = allTracks  // Set for filtering
   renderTrackList(allTracks)
   document.getElementById('track-count-label').textContent = `${allTracks.length} tracks (FileMaker)`
 }
@@ -6455,8 +6468,15 @@ async function loadCatalogFiles() {
     const title = parts.slice(1, -2).join(' ') || folder.name
     const key = parts[parts.length - 1] || ''
     const genre = parts[parts.length - 2] || ''
-    allTracks.push({ composerID, title, key, genre, folder: folder.name, path: folder.path, files: audioFiles, versions: audioFiles.map(f => f.name.split('_').pop().replace(/\.[^.]+$/,'')) })
+    allTracks.push({
+      composerID, composerName: '', title, key, bpm: null, description: '',
+      genre, primaryGenre: genre, subGenre: '',
+      mood1: '', mood2: '', ksl: '', rmo: '',
+      sku: '', titleId: '', lot: '', isJup: false,
+      folder: folder.name, path: folder.path, files: audioFiles, versions: audioFiles.map(f => f.name.split('_').pop().replace(/\.[^.]+$/,''))
+    })
   }
+  currentDisplayTracks = allTracks  // Set for filtering
   renderTrackList(allTracks)
 }
 
@@ -12529,6 +12549,10 @@ async function selectProjectLot(lotId) {
     document.getElementById('playlist-export-btn').style.display = 'none'
     document.getElementById('playlist-avid-btn').style.display = 'none'
 
+    // Clear playlist indicator since we're viewing a lot, not a playlist
+    activePlaylistSkus = new Set()
+    updatePlaylistIndicator()
+
     const [lotRows, trackRows] = await Promise.all([
       pgQ('SELECT lot_name, sent_date, notes FROM lots WHERE lot_id=$1', [lotId]),
       pgQ(`SELECT lt.sku_root, t.title, t.bpm, t.key, t.composer_id, t.vocals,
@@ -12609,8 +12633,17 @@ async function selectPlaylist(id) {
       alert('Error loading playlist tracks')
       return
     }
-    playlistTracks = rows
+    // Mark these as playlist tracks (not lot tracks) for rendering consistency
+    playlistTracks = rows.map(r => ({ ...r, _isPlaylistTrack: true }))
     playlistCurrentIdx = -1
+
+    // Get playlist name for indicator (assume it exists - could be cached)
+    const plNameRows = await pgQ(`SELECT name FROM playlists WHERE id=$1`, [id])
+    const plName = Array.isArray(plNameRows) && plNameRows[0] ? plNameRows[0].name : 'Playlist'
+
+    // Load which tracks are in this playlist for green-dot indicator in collection
+    await loadActivePlaylistSkus(id, plName)
+
     console.log(`[selectPlaylist] loaded playlist ${id} with ${playlistTracks.length} tracks`)
     renderPlaylistTrackList()
   } catch (e) {
@@ -12747,45 +12780,64 @@ function _atlOpts(vals, placeholder) {
 }
 
 async function goAddTracksInCollection() {
-  if (!currentPlaylistId) return
-  console.log('[goAddTracksInCollection] currentPlaylistId:', currentPlaylistId)
-  // Fetch playlist name + existing tracks for the green-dot indicator
-  const plRows = await pgQ('SELECT name FROM playlists WHERE id=$1', [currentPlaylistId])
-  console.log('[goAddTracksInCollection] plRows:', plRows)
-  const plName = plRows?.[0]?.name || 'Playlist'
-  console.log('[goAddTracksInCollection] plName:', plName)
-  await loadActivePlaylistSkus(currentPlaylistId, plName)
+  try {
+    if (!currentPlaylistId) {
+      alert('No playlist selected')
+      return
+    }
 
-  // Fetch full track details for sidebar display
-  const trackData = await pgQ(`
-    SELECT t.sku_root, t.title, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name
-    FROM playlist_tracks pt
-    JOIN titles t ON t.sku_root = pt.sku_root
-    LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR LENGTH(t.composer_id)-1)
-    WHERE pt.playlist_id = $1
-    ORDER BY t.title
-  `, [currentPlaylistId]).catch(() => [])
+    // Load collection if not already loaded
+    if (!allTracks.length) {
+      await loadCatalog()
+    }
 
-  // Navigate to The Collection — user adds tracks using the "Add to Playlist" button in the track detail panel
-  navigate('catalog')
+    // Fetch playlist name + existing tracks for the green-dot indicator
+    const plRows = await pgQ('SELECT name FROM playlists WHERE id=$1', [currentPlaylistId])
+    if (!Array.isArray(plRows)) {
+      console.error('[goAddTracksInCollection] failed to fetch playlist name')
+      alert('Error loading playlist')
+      return
+    }
+    const plName = plRows?.[0]?.name || 'Playlist'
 
-  // Show sidebar with selected tracks
-  const sidebar = document.getElementById('playlist-sidebar')
-  if (sidebar) {
-    sidebar.style.display = 'flex'
-    updatePlaylistSidebar(trackData || [])
-  }
+    // Load which tracks are already in this playlist
+    await loadActivePlaylistSkus(currentPlaylistId, plName)
 
-  // Re-render the list so green dots appear immediately (catalog may already be loaded)
+    // Fetch full track details for sidebar display
+    const trackData = await pgQ(`
+      SELECT t.sku_root, t.title, t.composer_id, COALESCE(c.full_name, t.composer_id) as composer_name
+      FROM playlist_tracks pt
+      JOIN titles t ON t.sku_root = pt.sku_root
+      LEFT JOIN composers c ON c.composer_id = SUBSTRING(t.composer_id FROM 1 FOR LENGTH(t.composer_id)-1)
+      WHERE pt.playlist_id = $1
+      ORDER BY t.title
+    `, [currentPlaylistId]).catch(() => [])
+
+    // Navigate to The Collection — user adds tracks using the "Add to Playlist" button in the track detail panel
+    navigate('catalog')
+
+    // Show sidebar with selected tracks
+    const sidebar = document.getElementById('playlist-sidebar')
+    if (sidebar) {
+      sidebar.style.display = 'flex'
+      updatePlaylistSidebar(Array.isArray(trackData) ? trackData : [])
+    }
+
+    console.log(`[goAddTracksInCollection] opened collection for playlist ${currentPlaylistId}`)
+    // Re-render the list so green dots appear immediately (catalog may already be loaded)
   if (currentDisplayTracks?.length) filterTracks(document.getElementById('catalog-search')?.value || '')
   // Show a dismissible banner so the user knows which playlist they're adding to
   document.getElementById('add-to-playlist-banner')?.remove()
   const banner = document.createElement('div')
   banner.id = 'add-to-playlist-banner'
   banner.style.cssText = 'position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#4a7c59;color:#fff;padding:8px 18px;border-radius:20px;font-size:12px;font-weight:500;z-index:9999;display:flex;align-items:center;gap:10px;box-shadow:0 4px 16px rgba(0,0,0,.3)'
-  banner.innerHTML = `<i class="ti ti-playlist"></i> Adding to <b>${plName}</b> — use <b>Add to Playlist</b> on any track
-    <button onclick="clearActivePlaylist();document.getElementById('playlist-sidebar').style.display='none';this.parentElement.remove()" style="background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:10px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px">Done</button>`
-  document.body.appendChild(banner)
+    banner.innerHTML = `<i class="ti ti-playlist"></i> Adding to <b>${plName}</b> — use <b>Add to Playlist</b> on any track
+      <button onclick="clearActivePlaylist();document.getElementById('playlist-sidebar').style.display='none';this.parentElement.remove()" style="background:rgba(255,255,255,.2);border:none;color:#fff;border-radius:10px;padding:2px 8px;cursor:pointer;font-size:11px;margin-left:4px">Done</button>`
+    document.body.appendChild(banner)
+  } catch (e) {
+    console.error(`[goAddTracksInCollection] exception: ${e.message}`)
+    alert(`Error: ${e.message}`)
+  }
 }
 
 function updatePlaylistSidebar(tracks) {
@@ -12992,7 +13044,7 @@ async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
       console.error(`[addTrackToCurrentPlaylist] failed to refresh playlist ${currentPlaylistId}`)
       return
     }
-    playlistTracks = rows
+    playlistTracks = rows.map(r => ({ ...r, _isPlaylistTrack: true }))
     renderPlaylistTrackList()
     // Update sidebar with simplified track data
     const sidebarData = rows.map(r => ({ title: r.title, composerName: r.composer_name, composerId: r.composer_id }))
@@ -13060,14 +13112,14 @@ async function showAddToPlaylistModal(skuRoot) {
       }
 
       // Refresh the playlist detail view to show the new track
-      if (window._currentPlaylistId) {
+      if (currentPlaylistId) {
         const trackData = await pgQ(`
           SELECT t.sku_root, t.title, t.key
           FROM playlist_tracks pt
           JOIN titles t ON t.sku_root = pt.sku_root
           WHERE pt.playlist_id = $1
           ORDER BY t.title
-        `, [window._currentPlaylistId]).catch(e => {
+        `, [currentPlaylistId]).catch(e => {
           console.error('[fast-add] failed to fetch track data:', e.message)
           return []
         })
