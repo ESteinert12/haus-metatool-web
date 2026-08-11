@@ -24,8 +24,16 @@ const upload = multer({ dest: os.tmpdir() })
 // ─── Middleware ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
+// ✅ SECURITY: Load session secret from environment
+const sessionSecret = process.env.SESSION_SECRET
+if (!sessionSecret) {
+  console.error('❌ FATAL: SESSION_SECRET environment variable not set!')
+  console.error('Generate one: export SESSION_SECRET=$(openssl rand -base64 32)')
+  process.exit(1)
+}
+
 app.use(session({
-  secret: 'haus-workspace-secret-2024',
+  secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
   cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days
@@ -339,14 +347,10 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-app.post('/api/pg/query', async (req, res) => {
-  const { sql, params } = req.body
-  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
-  try {
-    const result = await pgPool.query(sql, params || [])
-    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
+// DELETED: /api/pg/query endpoint
+// REASON: SQL injection vulnerability — no safe way to accept arbitrary SQL
+// REPLACEMENT: Client should call specific API routes for data access
+//   e.g., /api/composers/list, /api/tracks/search, etc.
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
@@ -424,11 +428,40 @@ app.post('/api/fs/audio-status', async (req, res) => {
 
 app.post('/api/fs/count-files', (req, res) => {
   const { dirPath, ext } = req.body
+
+  // Input validation
+  if (typeof dirPath !== 'string' || typeof ext !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Invalid input types' })
+  }
+  if (ext.length > 10 || ext.includes('/') || ext.includes('\\')) {
+    return res.status(400).json({ ok: false, error: 'Invalid extension' })
+  }
+
   try {
-    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
-    const result = execSync(cmd).toString().trim()
-    res.json(parseInt(result, 10))
-  } catch { res.json(0) }
+    // ✅ Use Node.js fs instead of shell commands
+    let count = 0
+    const walkDir = (dir) => {
+      try {
+        const files = fs.readdirSync(dir)
+        for (const file of files) {
+          const fullPath = require('path').join(dir, file)
+          const stat = fs.statSync(fullPath)
+          if (stat.isDirectory()) {
+            walkDir(fullPath)
+          } else if (!ext || file.endsWith(`.${ext}`)) {
+            count++
+          }
+        }
+      } catch (e) {
+        // Skip directories we can't read
+        console.warn(`[count-files] skipped: ${dir}`, e.message)
+      }
+    }
+    walkDir(dirPath)
+    res.json({ ok: true, count })
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message })
+  }
 })
 
 app.post('/api/fs/path-exists', (req, res) => {
@@ -631,15 +664,39 @@ app.get('/api/shell/app-path', (req, res) => {
 
 app.post('/api/shell/open-external', (req, res) => {
   const { url } = req.body
-  // On macOS server, open in default browser
-  exec(`open "${url}"`)
-  res.json({ ok: true })
+
+  // Validate URL format
+  try {
+    new URL(url)
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: 'Invalid URL format' })
+  }
+
+  // ✅ Use execFile instead of exec — no shell interpretation
+  const { execFile } = require('child_process')
+  execFile('open', [url], { stdio: 'pipe' }, (err) => {
+    if (err) res.json({ ok: false, error: err.message })
+    else res.json({ ok: true })
+  })
 })
 
 app.post('/api/shell/show-in-finder', (req, res) => {
   const { filePath } = req.body
-  exec(`open -R "${filePath}"`)
-  res.json({ ok: true })
+
+  // Validate path is within home directory
+  const homeDir = require('os').homedir()
+  const resolvedPath = require('path').resolve(filePath)
+
+  if (!resolvedPath.startsWith(homeDir)) {
+    return res.status(403).json({ ok: false, error: 'Path outside home directory' })
+  }
+
+  // ✅ Use execFile instead of exec — no shell interpretation
+  const { execFile } = require('child_process')
+  execFile('open', ['-R', resolvedPath], { stdio: 'pipe' }, (err) => {
+    if (err) res.json({ ok: false, error: err.message })
+    else res.json({ ok: true })
+  })
 })
 
 // Folder picker — returns null in web mode (UI falls back to text input)
@@ -742,19 +799,10 @@ app.get('/api/audio/stream', async (req, res) => {
   }
 })
 
-// ─── AppleScript route ─────────────────────────────────────────────────────
-app.post('/api/applescript', (req, res) => {
-  const { script } = req.body
-  const tmpFile = path.join(os.tmpdir(), `haus_as_${Date.now()}.applescript`)
-  try {
-    fs.writeFileSync(tmpFile, script, 'utf8')
-    exec(`osascript "${tmpFile}"`, { timeout: 15000 }, (err, stdout, stderr) => {
-      try { fs.unlinkSync(tmpFile) } catch {}
-      if (err) res.json({ error: err.message, stderr: stderr || '' })
-      else     res.json({ result: stdout.trim() })
-    })
-  } catch (e) { res.json({ error: e.message }) }
-})
+// DELETED: /api/applescript endpoint
+// REASON: Code injection vulnerability — no safe way to accept user-supplied AppleScript
+// AppleScript has full access to the macOS system and cannot be safely sandboxed
+// If needed in future, implement whitelist of safe operations only
 
 // ─── FileMaker routes ──────────────────────────────────────────────────────
 app.post('/api/fm/login', async (req, res) => {
@@ -875,7 +923,18 @@ app.get('/api/b2/stream', async (req, res) => {
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
         console.log(`[b2/stream] stub detected — serving local file: ${bodyStr}`)
-        let localPath = bodyStr
+
+        // ✅ SECURITY: Validate path is within allowed directories
+        const ALLOWED_BASE = '/Users/HAUS/Library/CloudStorage/Dropbox'
+        const resolvedPath = path.resolve(bodyStr)
+        const resolvedBase = path.resolve(ALLOWED_BASE)
+
+        if (!resolvedPath.startsWith(resolvedBase)) {
+          console.error(`[b2/stream] BLOCKED: Path outside allowed directory: ${bodyStr}`)
+          return res.status(403).json({ error: 'Path outside allowed directory' })
+        }
+
+        let localPath = resolvedPath
 
         // If exact file doesn't exist, search for alternatives (FULL > ALT > STING > BUMPER)
         if (!fs.existsSync(localPath)) {
