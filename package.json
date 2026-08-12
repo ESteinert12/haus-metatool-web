@@ -4,7 +4,11 @@
   "description": "HAUS Music unified workspace server",
   "main": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
   "scripts": {
-    "start": "cd 'HAUS Workspace.app/Contents/Resources/haus-workspace' && node server.js"
+    "start": "cd 'HAUS Workspace.app/Contents/Resources/haus-workspace' && node server.js",
+    "build": "echo 'No build needed for Node.js server'"
+  },
+  "engines": {
+    "node": "18.x"
   },
   "dependencies": {
     "chokidar": "^3.6.0",
