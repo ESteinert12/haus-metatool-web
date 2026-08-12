@@ -2,14 +2,13 @@
   "name": "haus-workspace",
   "version": "1.0.0",
   "description": "HAUS Music unified workspace server",
-  "main": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
+  "main": "api.js",
   "scripts": {
     "vercel-build": "echo 'No build step needed'",
-    "start": "cd 'HAUS Workspace.app/Contents/Resources/haus-workspace' && node server.js",
-    "build": "echo 'No build needed for Node.js server'"
+    "start": "node api.js"
   },
   "engines": {
-    "node": "18.x"
+    "node": "24.x"
   },
   "dependencies": {
     "chokidar": "^3.6.0",
