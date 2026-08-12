@@ -1,14 +1,9 @@
 {
   "version": 2,
-  "buildCommand": "cd 'HAUS Workspace.app/Contents/Resources/haus-workspace' && npm install",
   "builds": [
     {
-      "src": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
-      "use": "@vercel/node",
-      "config": {
-        "includeFiles": "HAUS Workspace.app/Contents/Resources/haus-workspace/**",
-        "zeroConfig": true
-      }
+      "src": "HAUS Workspace.app/Contents/Resources/haus-workspace/package.json",
+      "use": "@vercel/node"
     }
   ],
   "routes": [
@@ -16,9 +11,5 @@
       "src": "/(.*)",
       "dest": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js"
     }
-  ],
-  "env": {
-    "NODE_ENV": "production",
-    "SESSION_SECRET": "@session_secret"
-  }
+  ]
 }
