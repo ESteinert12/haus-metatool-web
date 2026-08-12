@@ -1,0 +1,18 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js"
+    }
+  ],
+  "env": {
+    "NODE_ENV": "production"
+  }
+}
