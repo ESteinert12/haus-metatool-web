@@ -1,0 +1,24 @@
+======================================================================
+STUB RECOVERY SUMMARY
+======================================================================
+
+Total stubs found: 2242
+  - Audio stubs (need recovery): 1872
+  - Metadata cruft (can ignore): 370
+
+Unique composer/song folders: 270
+
+Upload date range: 7/7/2026 to 7/31/2026
+
+Files by bucket:
+  nimbus: 270 folders
+
+RECOVERY PROCESS:
+1. Open your Dropbox backup at: 2. COLLECTION UPLOADER/2. ATMOS_Shipping/
+2. For each folder in recovery-dropbox-paths.txt, download the entire folder
+3. Place all folders in: /Users/HAUS/Desktop/STUB_RECOVERY/
+4. Run backfill script to upload all recovered files to B2
+
+See recovery-manifest.json for detailed file list
+See recovery-dropbox-paths.txt for Dropbox folder paths to recover
+======================================================================

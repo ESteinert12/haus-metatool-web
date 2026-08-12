@@ -1,0 +1,79 @@
+#!/bin/bash
+# HAUS Workspace launcher
+# Double-click to open. Node.js must be installed (nodejs.org).
+
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
+APP_DIR="$SCRIPT_DIR/../Resources/haus-workspace"
+
+# ── Notify helper ──────────────────────────────────────────
+notify() {
+  osascript -e "display notification \"$1\" with title \"HAUS Workspace\""
+}
+
+alert() {
+  osascript -e "display dialog \"$1\" buttons {\"$2\", \"Cancel\"} default button \"$2\"" 2>/dev/null
+  echo $?
+}
+
+# ── Find node ─────────────────────────────────────────────
+# macOS .app bundles don't inherit the user's PATH, so search common locations
+NODE=""
+for candidate in \
+  "/usr/local/bin/node" \
+  "/opt/homebrew/bin/node" \
+  "/usr/bin/node" \
+  "$HOME/.nvm/versions/node/$(ls $HOME/.nvm/versions/node 2>/dev/null | sort -V | tail -1)/bin/node" \
+  "$(which node 2>/dev/null)"
+do
+  if [ -x "$candidate" ]; then
+    NODE="$candidate"
+    break
+  fi
+done
+
+NPM=""
+for candidate in \
+  "/usr/local/bin/npm" \
+  "/opt/homebrew/bin/npm" \
+  "/usr/bin/npm" \
+  "$(dirname "$NODE")/npm"
+do
+  if [ -x "$candidate" ]; then
+    NPM="$candidate"
+    break
+  fi
+done
+
+if [ -z "$NODE" ] || [ -z "$NPM" ]; then
+  result=$(osascript -e 'display dialog "Node.js is required to run HAUS Workspace.\n\nDownload the LTS version from nodejs.org, install it, then double-click HAUS Workspace again." buttons {"Open nodejs.org", "Cancel"} default button "Open nodejs.org"' 2>/dev/null)
+  if echo "$result" | grep -q "Open nodejs.org"; then
+    open "https://nodejs.org"
+  fi
+  exit 1
+fi
+
+# ── Install Electron on first launch ──────────────────────
+if [ ! -d "$APP_DIR/node_modules" ]; then
+  osascript -e 'display notification "Setting up HAUS Workspace for the first time… this takes about 30 seconds." with title "HAUS Workspace — First Launch"'
+
+  cd "$APP_DIR" && "$NPM" install --prefer-offline 2>&1
+
+  if [ $? -ne 0 ]; then
+    osascript -e 'display dialog "Setup failed. Check that you are connected to the internet, then try again.\n\nIf the problem continues, open Terminal and run:\n  npm install\nfrom inside the haus-workspace folder." buttons {"OK"} default button "OK"'
+    exit 1
+  fi
+
+  notify "Setup complete. Launching HAUS Workspace…"
+fi
+
+# ── Launch Electron ───────────────────────────────────────
+ELECTRON="$APP_DIR/node_modules/.bin/electron"
+
+if [ ! -x "$ELECTRON" ]; then
+  osascript -e 'display dialog "Could not find Electron. Try deleting the node_modules folder inside haus-workspace, then relaunch." buttons {"OK"} default button "OK"'
+  exit 1
+fi
+
+cd "$APP_DIR" && "$ELECTRON" . &
+
+exit 0

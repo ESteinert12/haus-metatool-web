@@ -1,11 +1,13 @@
 {
   "version": 2,
+  "buildCommand": "cd 'HAUS Workspace.app/Contents/Resources/haus-workspace' && npm install",
   "builds": [
     {
       "src": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
       "use": "@vercel/node",
       "config": {
-        "includeFiles": "HAUS Workspace.app/Contents/Resources/haus-workspace/**"
+        "includeFiles": "HAUS Workspace.app/Contents/Resources/haus-workspace/**",
+        "zeroConfig": true
       }
     }
   ],
