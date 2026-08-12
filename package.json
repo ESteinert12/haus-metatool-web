@@ -1,14 +1,10 @@
 {
   "name": "haus-workspace",
   "version": "1.0.0",
-  "description": "HAUS Music unified workspace",
-  "main": "main.js",
+  "description": "HAUS Music unified workspace server",
+  "main": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
   "scripts": {
-    "start": "electron .",
-    "serve": "node server.js"
-  },
-  "devDependencies": {
-    "electron": "^28.3.3"
+    "start": "node HAUS\\ Workspace.app/Contents/Resources/haus-workspace/server.js"
   },
   "dependencies": {
     "chokidar": "^3.6.0",

@@ -3,7 +3,10 @@
   "builds": [
     {
       "src": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
-      "use": "@vercel/node"
+      "use": "@vercel/node",
+      "config": {
+        "includeFiles": "HAUS Workspace.app/Contents/Resources/haus-workspace/**"
+      }
     }
   ],
   "routes": [
@@ -13,6 +16,7 @@
     }
   ],
   "env": {
-    "NODE_ENV": "production"
+    "NODE_ENV": "production",
+    "SESSION_SECRET": "@session_secret"
   }
 }
