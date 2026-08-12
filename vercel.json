@@ -1,0 +1,21 @@
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js"
+    }
+  ],
+  "functions": {
+    "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js": {
+      "memory": 1024,
+      "maxDuration": 60
+    }
+  }
+}
