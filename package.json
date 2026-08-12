@@ -4,6 +4,7 @@
   "description": "HAUS Music unified workspace server",
   "main": "HAUS Workspace.app/Contents/Resources/haus-workspace/server.js",
   "scripts": {
+    "vercel-build": "echo 'No build step needed'",
     "start": "cd 'HAUS Workspace.app/Contents/Resources/haus-workspace' && node server.js",
     "build": "echo 'No build needed for Node.js server'"
   },
