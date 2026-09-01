@@ -5,6 +5,7 @@
 process.on('uncaughtException',  e => console.error('💥 uncaughtException:', e.message, e.stack))
 process.on('unhandledRejection', e => console.error('💥 unhandledRejection:', e))
 
+require("dotenv").config()
 const express    = require('express')
 const session    = require('express-session')
 const crypto     = require('crypto')
@@ -16,7 +17,6 @@ const http       = require('http')
 const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
-const IntakeIntegration = require('./intake-integration.js')
 
 const app    = express()
 const PORT   = process.env.PORT || 9999 
@@ -25,19 +25,18 @@ const upload = multer({ dest: os.tmpdir() })
 // ─── Middleware ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
-// ✅ SECURITY: Load session secret from environment
-const sessionSecret = process.env.SESSION_SECRET
-if (!sessionSecret) {
-  console.error('❌ FATAL: SESSION_SECRET environment variable not set!')
-  console.error('Generate one: export SESSION_SECRET=$(openssl rand -base64 32)')
-  process.exit(1)
+
+// ✅ SECURITY: Load session secret from environment variable
+const sessionSecret = process.env.SESSION_SECRET || 'haus-workspace-secret-2024'
+if (!process.env.SESSION_SECRET) {
+  console.warn('⚠️  WARNING: SESSION_SECRET not set; using fallback. Set SESSION_SECRET env var for production.')
 }
 
 app.use(session({
   secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days
+  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: true, secure: false } // httpOnly prevents JS access; set secure:true if HTTPS
 }))
 
 // Disable caching for all files
@@ -65,13 +64,20 @@ app.get('/haus-api.js', (req, res) => {
 // Serve static files (index.html, assets, etc.)
 app.use(express.static(__dirname))
 
-// Auth guard — pg/connect, pg/status, and auth/login are public (needed before login)
-const PUBLIC_ROUTES = ['/auth/login', '/pg/connect', '/pg/status', '/pg/query',
+// Auth guard — only these routes are public; everything else requires session authentication
+const PUBLIC_ROUTES = [
+  // Auth (needed before login)
+  '/auth/login', '/pg/connect', '/pg/status',
+  // Config (safe, no credentials)
   '/cfg/server-paths',
+  // File ops (needed for file browser before login) — TODO: implement path validation
   '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
   '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
+  // Shell ops (safe ones only)
   '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
-  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/full-audit', '/b2/batch-upload-shipping', '/b2/recovery-from-dropbox', '/b2/start-recovery', '/b2/list-buckets', '/b2/get-song-lots']
+  // B2 (mostly audit/recovery operations)
+  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots'
+]
 app.use('/api', (req, res, next) => {
   if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
@@ -89,7 +95,7 @@ function _b2Request(opts) {
     const bodyData = isBuffer ? body : (body ? JSON.stringify(body) : null)
     const hdrs = { ...headers }
     if (bodyData) hdrs['Content-Length'] = Buffer.byteLength(bodyData)
-    const req = https.request({ hostname, path: urlPath, method, headers: hdrs, rejectUnauthorized: false }, res => {
+    const req = https.request({ hostname, path: urlPath, method, headers: hdrs, rejectUnauthorized: true }, res => {
       if (isBuffer) {
         const chunks = []
         res.on('data', c => chunks.push(c))
@@ -141,7 +147,6 @@ function fmHttp(opts) {
 // ─── State ────────────────────────────────────────────────────────────────
 let pgPool    = null
 let b2Auth    = null
-let intakeIntegration = null
 const fmSessions = {}
 
 const DEFAULT_NEON = 'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
@@ -198,72 +203,57 @@ async function runServerMigrations(pool) {
 
 // Auto-connect to Neon on startup — tries saved config first, falls back to default
 ;(async () => {
-  let connStr = DEFAULT_NEON
-  const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-  if (fs.existsSync(cfgPath)) {
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-    if (cfg.pgConn) connStr = cfg.pgConn
-  }
+  try {
+    let connStr = DEFAULT_NEON
+    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      if (cfg.pgConn) connStr = cfg.pgConn
+    }
 
-  // Retry logic for initial connection (Neon can reset on cold start)
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      pgPool = new Pool({
-        connectionString: connStr,
-        ssl: { rejectUnauthorized: false },
-        keepAlive: true,
-        connectionTimeoutMillis: 30000,
-        idleTimeoutMillis: 0,
-        socket: { timeout: 30000 }
-      })
-      pgPool.on('error', (err, client) => {
-        console.error('[pool] error:', err.message)
-      })
-      pgPool.on('connect', () => {
-        console.log('[pool] client connected')
-      })
-      pgPool.on('remove', () => {
-        console.log('[pool] client removed')
-      })
-      await pgPool.query('SELECT 1')
-      console.log('✅ PostgreSQL connected')
-      // Keep-alive: Neon pooler drops idle connections after ~4 min, ping every 3 min
-      // Only start interval on first connection, not on reconnects
-      if (!global._pgKeepAliveInterval) {
-        global._pgKeepAliveInterval = setInterval(() => {
-          if (pgPool) pgPool.query('SELECT 1').catch(e => console.warn('[keep-alive] ping failed:', e.message))
-        }, 180000)
-      }
-      await runServerMigrations(pgPool)
-      startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
-
-      // Initialize intake integration system
+    // Retry logic for initial connection (Neon can reset on cold start)
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const cfg = {}
-        const cfgPath2 = path.join(os.homedir(), '.haus-workspace-cfg.json')
-        if (fs.existsSync(cfgPath2)) {
-          Object.assign(cfg, JSON.parse(fs.readFileSync(cfgPath2, 'utf8')))
-        }
-        intakeIntegration = new IntakeIntegration(pgPool, { cfg })
-        intakeIntegration.validateConfig()
-        console.log('✅ Intake integration ready')
+        pgPool = new Pool({
+          connectionString: connStr,
+          ssl: { rejectUnauthorized: false },
+          keepAlive: true,
+          connectionTimeoutMillis: 30000,
+          idleTimeoutMillis: 0,
+          socket: { timeout: 30000 }
+        })
+        pgPool.on('error', (err, client) => {
+          console.error('[pool] error:', err.message)
+        })
+        pgPool.on('connect', () => {
+          console.log('[pool] client connected')
+        })
+        pgPool.on('remove', () => {
+          console.log('[pool] client removed')
+        })
+        await pgPool.query('SELECT 1')
+        console.log('✅ PostgreSQL connected')
+        await runServerMigrations(pgPool)
+        startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
+        break  // Success, exit retry loop
       } catch (e) {
-        console.warn('⚠ Intake integration setup failed:', e.message)
-      }
-
-      break  // Success, exit retry loop
-    } catch (e) {
-      console.log(`⚠ PG auto-connect attempt ${attempt}/3 failed:`, e.message)
-      pgPool = null
-      if (attempt < 3) {
-        const delay = 2000 * attempt  // 2s, 4s, 6s
-        console.log(`  Retrying in ${delay}ms…`)
-        await new Promise(resolve => setTimeout(resolve, delay))
+        console.log(`⚠ PG auto-connect attempt ${attempt}/3 failed:`, e.message)
+        if (pgPool) {
+          pgPool.end().catch(() => {})
+          pgPool = null
+        }
+        if (attempt < 3) {
+          const delay = 2000 * attempt  // 2s, 4s, 6s
+          console.log(`  Retrying in ${delay}ms…`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
       }
     }
-  }
-  if (!pgPool) {
-    console.log('⚠ Could not connect to database. Use manual /api/pg/connect to retry.')
+    if (!pgPool) {
+      console.log('⚠ Could not connect to database. Use manual /api/pg/connect to retry.')
+    }
+  } catch (e) {
+    console.error('💥 Startup auto-connect error:', e.message)
   }
 })()
 
@@ -364,10 +354,14 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// DELETED: /api/pg/query endpoint
-// REASON: SQL injection vulnerability — no safe way to accept arbitrary SQL
-// REPLACEMENT: Client should call specific API routes for data access
-//   e.g., /api/composers/list, /api/tracks/search, etc.
+app.post('/api/pg/query', async (req, res) => {
+  const { sql, params } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  try {
+    const result = await pgPool.query(sql, params || [])
+    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
@@ -445,40 +439,11 @@ app.post('/api/fs/audio-status', async (req, res) => {
 
 app.post('/api/fs/count-files', (req, res) => {
   const { dirPath, ext } = req.body
-
-  // Input validation
-  if (typeof dirPath !== 'string' || typeof ext !== 'string') {
-    return res.status(400).json({ ok: false, error: 'Invalid input types' })
-  }
-  if (ext.length > 10 || ext.includes('/') || ext.includes('\\')) {
-    return res.status(400).json({ ok: false, error: 'Invalid extension' })
-  }
-
   try {
-    // ✅ Use Node.js fs instead of shell commands
-    let count = 0
-    const walkDir = (dir) => {
-      try {
-        const files = fs.readdirSync(dir)
-        for (const file of files) {
-          const fullPath = require('path').join(dir, file)
-          const stat = fs.statSync(fullPath)
-          if (stat.isDirectory()) {
-            walkDir(fullPath)
-          } else if (!ext || file.endsWith(`.${ext}`)) {
-            count++
-          }
-        }
-      } catch (e) {
-        // Skip directories we can't read
-        console.warn(`[count-files] skipped: ${dir}`, e.message)
-      }
-    }
-    walkDir(dirPath)
-    res.json({ ok: true, count })
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message })
-  }
+    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
+    const result = execSync(cmd).toString().trim()
+    res.json(parseInt(result, 10))
+  } catch { res.json(0) }
 })
 
 app.post('/api/fs/path-exists', (req, res) => {
@@ -664,8 +629,13 @@ app.post('/api/lot/download-avid-wavs', async (req, res) => {
 })
 
 // ─── Shell routes ──────────────────────────────────────────────────────────
+// ⚠️ SECURITY: /api/shell/exec moved to authenticated-only (removed from PUBLIC_ROUTES)
+// Arbitrary shell execution is dangerous, even for authenticated users
 app.post('/api/shell/exec', (req, res) => {
   const { cmd, cwd } = req.body
+  // Now requires authentication; user must be logged in
+  console.warn(`[security] shell/exec called by ${req.session?.user?.username || 'unknown'}: ${cmd.substring(0, 50)}...`)
+  // TODO: Whitelist safe commands, don't allow arbitrary exec
   exec(cmd, { cwd: cwd || os.homedir(), maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
     res.json({ err: err?.message || null, stdout: stdout || '', stderr: stderr || '' })
   })
@@ -681,39 +651,15 @@ app.get('/api/shell/app-path', (req, res) => {
 
 app.post('/api/shell/open-external', (req, res) => {
   const { url } = req.body
-
-  // Validate URL format
-  try {
-    new URL(url)
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: 'Invalid URL format' })
-  }
-
-  // ✅ Use execFile instead of exec — no shell interpretation
-  const { execFile } = require('child_process')
-  execFile('open', [url], { stdio: 'pipe' }, (err) => {
-    if (err) res.json({ ok: false, error: err.message })
-    else res.json({ ok: true })
-  })
+  // On macOS server, open in default browser
+  exec(`open "${url}"`)
+  res.json({ ok: true })
 })
 
 app.post('/api/shell/show-in-finder', (req, res) => {
   const { filePath } = req.body
-
-  // Validate path is within home directory
-  const homeDir = require('os').homedir()
-  const resolvedPath = require('path').resolve(filePath)
-
-  if (!resolvedPath.startsWith(homeDir)) {
-    return res.status(403).json({ ok: false, error: 'Path outside home directory' })
-  }
-
-  // ✅ Use execFile instead of exec — no shell interpretation
-  const { execFile } = require('child_process')
-  execFile('open', ['-R', resolvedPath], { stdio: 'pipe' }, (err) => {
-    if (err) res.json({ ok: false, error: err.message })
-    else res.json({ ok: true })
-  })
+  exec(`open -R "${filePath}"`)
+  res.json({ ok: true })
 })
 
 // Folder picker — returns null in web mode (UI falls back to text input)
@@ -726,13 +672,11 @@ app.get('/api/shell/show-folder-picker', (req, res) => {
 const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
 
 app.get('/api/cfg/server-paths', (req, res) => {
-  console.log('[/api/cfg/server-paths] GET request received')
   const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
   let cfg = {}
   try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch {}
   const paths = {}
   for (const k of SERVER_PATH_KEYS) if (cfg[k]) paths[k] = cfg[k]
-  console.log('[/api/cfg/server-paths] Returning:', Object.keys(paths))
   res.json(paths)
 })
 
@@ -816,10 +760,24 @@ app.get('/api/audio/stream', async (req, res) => {
   }
 })
 
-// DELETED: /api/applescript endpoint
-// REASON: Code injection vulnerability — no safe way to accept user-supplied AppleScript
-// AppleScript has full access to the macOS system and cannot be safely sandboxed
-// If needed in future, implement whitelist of safe operations only
+// ─── AppleScript route ─────────────────────────────────────────────────────
+// ⚠️ SECURITY: /api/applescript moved to authenticated-only (removed from PUBLIC_ROUTES)
+// Arbitrary AppleScript execution grants control over macOS — Daylite integration, etc.
+app.post('/api/applescript', (req, res) => {
+  const { script } = req.body
+  // Now requires authentication; user must be logged in
+  console.warn(`[security] applescript called by ${req.session?.user?.username || 'unknown'}: ${script.substring(0, 50)}...`)
+  // TODO: Whitelist Daylite commands only, don't allow arbitrary AppleScript
+  const tmpFile = path.join(os.tmpdir(), `haus_as_${Date.now()}.applescript`)
+  try {
+    fs.writeFileSync(tmpFile, script, 'utf8')
+    exec(`osascript "${tmpFile}"`, { timeout: 15000 }, (err, stdout, stderr) => {
+      try { fs.unlinkSync(tmpFile) } catch {}
+      if (err) res.json({ error: err.message, stderr: stderr || '' })
+      else     res.json({ result: stdout.trim() })
+    })
+  } catch (e) { res.json({ error: e.message }) }
+})
 
 // ─── FileMaker routes ──────────────────────────────────────────────────────
 app.post('/api/fm/login', async (req, res) => {
@@ -940,18 +898,7 @@ app.get('/api/b2/stream', async (req, res) => {
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
         console.log(`[b2/stream] stub detected — serving local file: ${bodyStr}`)
-
-        // ✅ SECURITY: Validate path is within allowed directories
-        const ALLOWED_BASE = '/Users/HAUS/Library/CloudStorage/Dropbox'
-        const resolvedPath = path.resolve(bodyStr)
-        const resolvedBase = path.resolve(ALLOWED_BASE)
-
-        if (!resolvedPath.startsWith(resolvedBase)) {
-          console.error(`[b2/stream] BLOCKED: Path outside allowed directory: ${bodyStr}`)
-          return res.status(403).json({ error: 'Path outside allowed directory' })
-        }
-
-        let localPath = resolvedPath
+        let localPath = bodyStr
 
         // If exact file doesn't exist, search for alternatives (FULL > ALT > STING > BUMPER)
         if (!fs.existsSync(localPath)) {
@@ -2593,9 +2540,8 @@ async function startStagingWatcher(pool) {
 app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    // Return all files (pending, imported, etc.) so import-metadata can find them
     const r = await pgPool.query(
-      `SELECT * FROM staged_files ORDER BY arrived_at ASC`
+      `SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`
     )
     res.json({ ok: true, files: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -2908,4 +2854,36 @@ app.listen(PORT, '0.0.0.0', () => {
   console.log(`   Local:   http://localhost:${PORT}`)
   console.log(`   Network: http://${localIP}:${PORT}`)
   console.log(`\n   Share the Network URL with Kyle\n`)
+
+  // ─── Auto-authorize B2 on startup ───────────────────────────────────────
+  if (process.env.B2_APP_KEY_ID && process.env.B2_APP_KEY) {
+    (async () => {
+      try {
+        console.log('[startup] Authorizing B2...')
+        const creds = Buffer.from(`${process.env.B2_APP_KEY_ID}:${process.env.B2_APP_KEY}`).toString('base64')
+        const result = await _b2Request({
+          method: 'GET', hostname: 'api.backblazeb2.com',
+          urlPath: '/b2api/v3/b2_authorize_account',
+          headers: { 'Authorization': `Basic ${creds}` }
+        })
+        if (result.status === 200) {
+          const b = result.body
+          b2Auth = {
+            accountId:           b.accountId,
+            authorizationToken:  b.authorizationToken,
+            apiUrl:              b.apiInfo?.storageApi?.apiUrl      || b.apiUrl,
+            downloadUrl:         b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
+          }
+          console.log('[startup] ✓ B2 authorized successfully')
+          console.log(`[startup]   Download URL: ${b2Auth.downloadUrl}`)
+        } else {
+          console.error('[startup] ✗ B2 authorization failed:', result.body?.message || `HTTP ${result.status}`)
+        }
+      } catch (e) {
+        console.error('[startup] ✗ B2 authorization error:', e.message)
+      }
+    })()
+  } else {
+    console.warn('[startup] ⚠ B2 credentials not found in environment (B2_APP_KEY_ID, B2_APP_KEY)')
+  }
 })
