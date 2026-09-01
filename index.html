@@ -7178,18 +7178,31 @@ function parseFolderName(name) {
     key = normalizeKey(keyRaw)
   }
 
-  // Split CamelCase title segments into words: GoodNeighbor → Good Neighbor
-  let humanTitle = title.trim()
+  // Split CamelCase title segments into words: GoodNeighbor → Good Neighbor.
+  // An internal capital marks a word boundary, so SoftGlow → "Soft Glow" while
+  // Softglow stays one word. buildHausName() reassembles them, so each round-trips.
+  let words = title.trim()
     .split('_').map(seg =>
-      seg.replace(/([a-z])([A-Z])/g, '$1 $2')
+      seg.replace(/([a-z0-9])([A-Z])/g, '$1 $2')
          .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    ).join(' ').trim()
+    ).join(' ').split(/\s+/).filter(Boolean)
 
-  // All-caps rule: if every letter in the title is uppercase, convert to title case
-  // e.g. "RAZORS EDGE" → "Razors Edge", "SOUND BARRIER" → "Sound Barrier"
-  if (humanTitle && humanTitle === humanTitle.toUpperCase()) {
-    humanTitle = humanTitle.toLowerCase().replace(/\b\w/g, c => c.toUpperCase())
+  // Keep name prefixes attached: "Mc Donald" → "McDonald", "Mac Arthur" → "MacArthur"
+  for (let wi = words.length - 2; wi >= 0; wi--) {
+    if (/^(mc|mac|o')$/i.test(words[wi])) {
+      words[wi] = words[wi] + words[wi + 1]
+      words.splice(wi + 1, 1)
+    }
   }
+
+  // Any fully-uppercase word gets title-cased: "RAZORS EDGE" → "Razors Edge",
+  // "ATMOSBed" → "Atmos Bed", "DARKNIGHT" → "Darknight". Mixed-case and
+  // lowercase words are left alone so deliberate casing survives.
+  const humanTitle = words
+    .map(w => (/[A-Z]/.test(w) && w === w.toUpperCase())
+      ? w.charAt(0) + w.slice(1).toLowerCase()
+      : w)
+    .join(' ').trim()
 
   return { composerID, title: humanTitle, tag: tag.trim(), key: key.trim() }
 }
@@ -10240,7 +10253,12 @@ function buildHausName(filename, title, info) {
   // the implementation that actually runs, in both Electron and web mode.
   const ext = filename.split('.').pop().toLowerCase()
   const version = detectVersion(filename)
-  const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('')
+  // Per word: always capitalise the first letter; only flatten the REST when the
+  // word is entirely uppercase ("DARK" → "Dark"). Mixed-case words keep their
+  // shape, so "McDonald" survives as McDonald rather than Mcdonald.
+  const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean)
+    .map(w => w === w.toUpperCase() ? w.charAt(0) + w.slice(1).toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1))
+    .join('')
   const prefix = info.isJup ? 'HAUSJUP' : 'HAUS'
   return `${prefix}_${titleCamel}_${info.key}_${info.id}_${version}.${ext}`
 }

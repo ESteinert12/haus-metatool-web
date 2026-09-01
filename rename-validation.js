@@ -103,7 +103,10 @@ function titleToCamelCase(title) {
     .replace(/[^a-zA-Z0-9 _]/g, '') // Remove all punctuation except spaces and underscores
     .split(/[\s_]+/) // Split on spaces/underscores
     .filter(Boolean) // Remove empty segments
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()) // Capitalize each word
+    // Capitalize each word. Only flatten the rest of the word when it is entirely
+    // uppercase ("DARK" -> "Dark"); mixed-case words keep their shape so name
+    // prefixes survive ("McDonald" -> McDonald, not Mcdonald).
+    .map(w => w === w.toUpperCase() ? w.charAt(0) + w.slice(1).toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1))
     .join('')
 }
 
