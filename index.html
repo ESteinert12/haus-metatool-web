@@ -1971,17 +1971,6 @@ async function pgQ(sql, params = [], retries = 2) {
   return []
 }
 
-async function loadLots(lotType, clientName) {
-  let sql = `SELECT lot_id, lot_name, lot_type, web_visible, excl_until FROM lots WHERE status='active'`
-  const params = []
-  if (lotType === 'gen_pop')  { sql += ` AND lot_type='gen_pop'` }
-  else if (lotType === 'jupiter') { sql += ` AND lot_type='jupiter'` }
-  else if (lotType === 'specop')  { sql += ` AND lot_type='specop'${clientName ? ` AND client=$1` : ''}` ; if (clientName) params.push(clientName) }
-  else if (clientName)            { sql += ` AND lot_type='client' AND client=$1`; params.push(clientName) }
-  sql += ` ORDER BY lot_name DESC`
-  return (await pgQ(sql, params)) || []
-}
-
 async function getOrCreateLot(lotName, lotType, clientName, trackLimit) {
   let rows = await pgQ(`SELECT lot_id, track_limit FROM lots WHERE lot_name=$1`, [lotName])
   if (rows && rows.length) {
@@ -2087,22 +2076,6 @@ function closeLotPortal() {
   const sel = document.getElementById('lot-portal-picker')
   if (sel) sel.value = ''
   _lotPortalLotId = null
-}
-
-async function commitLot() {
-  if (!_lotPortalLotId) return
-  const nameEl = document.getElementById('lot-portal-name')
-  const lotName = nameEl?.textContent || 'this lot'
-  if (!confirm(`Commit all draft tracks in "${lotName}" to The Collection? This cannot be undone.`)) return
-  await pgQ(`
-    UPDATE titles SET status = 'active'
-    WHERE status = 'draft'
-      AND sku_root IN (SELECT sku_root FROM lot_titles WHERE lot_id = $1)
-  `, [_lotPortalLotId])
-  closeLotPortal()
-  await loadLotPortalPicker()
-  loadCatalog()
-  alert(`Lot "${lotName}" committed. Tracks are now live in The Collection.`)
 }
 
 async function deleteTrack(skuRoot, lotId) {
@@ -2430,13 +2403,6 @@ async function savePlaylistMeta(playlistId) {
     [sentDate, avidBin, notes, playlistId])
 }
 
-async function removeTrackFromLot(lotId, skuRoot) {
-  if (!confirm(`Remove ${skuRoot} from this lot?`)) return
-  await pgQ(`DELETE FROM lot_titles WHERE lot_id=$1 AND sku_root=$2`, [lotId, skuRoot])
-  selectLot(lotId)
-  await loadLotsSection()
-}
-
 async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeIndexCtx=null) {
   const modal = document.createElement('div')
   modal.id = 'create-lot-modal'
@@ -2640,29 +2606,6 @@ function deriveTrackFolder(lotName, skuRoot, title, genre) {
   return `${cfg.hausjup}/${lotName}/${skuRoot}_${title || ''}`
 }
 
-async function resolvePathsBySku(skuRoot) {
-  const rows = await pgQ(`
-    SELECT l.lot_name, t.sku_root, t.title, pg.primary_genre_name, ms.filename, ms.stem_name
-    FROM titles t
-    JOIN lots l          ON l.lot_id          = t.lot_id
-    JOIN mix_stems ms    ON ms.sku_root        = t.sku_root
-    LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-    WHERE t.sku_root = $1
-  `, [skuRoot])
-  if (!rows || !rows.length) return null
-  const { lot_name, sku_root, title, primary_genre_name } = rows[0]
-  const folder = deriveTrackFolder(lot_name, sku_root, title, primary_genre_name || 'MISC')
-  return rows.map(r => ({ stemName: r.stem_name, filename: r.filename, path: `${folder}/${r.filename}` }))
-}
-
-async function getTeamByComposerId(composerId) {
-  // Look up composer info (JUP status, PRO) from composers table
-  try {
-    const rows = await pgQ(`SELECT composer_id, is_jup, pro FROM composers WHERE composer_id = $1 LIMIT 1`, [composerId])
-    return rows && rows.length ? rows[0] : null
-  } catch { return null }
-}
-
 async function generateSku(composerId) {
   // ── SKU Generation ──────────────────────────────────────────────────────
   // Uses sku_sequences (PRIMARY KEY on composer_full_id) — the only safe
@@ -2863,268 +2806,6 @@ async function writeTrackToDB(trackData) {
 }
 
 // ─── Lot Portal ───────────────────────────────────────────────────────────────
-async function loadLotPortal(lotId) {
-  const el = document.getElementById('lot-portal-list')
-  if (!el) return
-  if (!pgConnected || !lotId) { el.innerHTML = '<span style="color:var(--text3)">Connect to DB to load portal.</span>'; return }
-  el.innerHTML = '<span style="color:var(--text3)"><i class="ti ti-loader-2"></i> Loading…</span>'
-  const rows = await pgQ(`
-    SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.created_at
-    FROM titles t
-    WHERE t.lot_id = $1
-    ORDER BY t.created_at DESC
-  `, [lotId])
-  if (!rows || !rows.length) {
-    el.innerHTML = '<span style="color:var(--text3)">No tracks logged in this lot yet.</span>'
-    return
-  }
-  el.innerHTML = rows.map(r => `
-    <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:0.5px solid var(--border)">
-      <div style="min-width:0;flex:1">
-        <div style="font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
-        <div style="font-size:10px;color:var(--text3);font-family:monospace;margin-top:1px">${esc(r.sku_root)} · ${esc(r.key || '—')}${r.bpm ? ' · ' + r.bpm : ''}</div>
-        <div style="font-size:10px;color:var(--text3)">${esc(r.composer_id || '')}</div>
-      </div>
-      <button onclick="peekTitle('${esc(r.sku_root)}')" title="Peek" style="border:none;background:var(--bg2);border-radius:4px;padding:4px 7px;cursor:pointer;font-size:11px;color:var(--text2);margin-left:6px;flex-shrink:0"><i class="ti ti-eye"></i></button>
-    </div>
-  `).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:8px;text-align:right">${rows.length} track${rows.length !== 1 ? 's' : ''}</div>`
-}
-
-async function peekTitle(skuRoot) {
-  const rows = await pgQ(`
-    SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id,
-           t.variant, t.created_at, t.ksl_ids, t.description,
-           t.primary_genre_id, t.secondary_genre_id, t.mood_1_id,
-           pg.primary_genre_name,
-           sg.secondary_genre_name,
-           m1.mood_1_name,
-           ms.stem_name, ms.filename, ms.b2_key
-    FROM titles t
-    LEFT JOIN primary_genres   pg ON pg.primary_genre_id   = t.primary_genre_id
-    LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-    LEFT JOIN mood_1           m1 ON m1.mood_1_id          = t.mood_1_id
-    LEFT JOIN mix_stems        ms ON ms.sku_root            = t.sku_root
-    WHERE t.sku_root = $1
-    ORDER BY CASE WHEN upper(ms.stem_name) = 'FULL' THEN 0 ELSE 1 END, ms.stem_name
-  `, [skuRoot])
-  if (!rows || !rows.length) return
-  const t = rows[0]
-  const stems = rows.filter(r => r.stem_name)
-
-  // Ensure intake lookups loaded (for edit form dropdowns)
-  await loadIntakeMetadata()
-
-  const KEYS = ['C','Csharp','Db','D','Dsharp','Eb','E','F','Fsharp','Gb','G','Gsharp','Ab','A','Asharp','Bb','B',
-                'Cm','Csharpm','Dbm','Dm','Dsharpm','Ebm','Em','Fm','Fsharpm','Gbm','Gm','Gsharpm','Abm','Am','Asharpm','Bbm','Bm']
-
-  function stemList() {
-    if (!stems.length) return '<div style="font-size:12px;color:var(--text3)">No stems linked.</div>'
-    return `<div>
-      <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:6px">Stems</div>
-      ${stems.map(r => `<div style="font-size:11px;font-family:monospace;padding:2px 0;color:var(--text2)">
-        <span style="display:inline-block;width:80px;color:var(--text3)">${esc(r.stem_name)}</span>${esc(r.filename || '')}
-      </div>`).join('')}
-    </div>`
-  }
-
-  function labelVal(label, val) {
-    return `<div>
-      <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:3px">${label}</div>
-      <div style="font-size:13px">${esc(val || '—')}</div>
-    </div>`
-  }
-
-  function readBody() {
-    const genreDisplay = [t.primary_genre_name, t.secondary_genre_name].filter(Boolean).join(' › ') || '—'
-    return `
-      <div style="display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-bottom:14px">
-        ${labelVal('Composer', t.composer_id)}
-        ${labelVal('Key', t.key)}
-        ${labelVal('BPM', t.bpm)}
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:14px">
-        ${labelVal('Genre', genreDisplay)}
-        ${labelVal('Mood', t.mood_1_name)}
-      </div>
-      ${t.ksl_ids ? labelVal('KSL', t.ksl_ids) + '<div style="margin-bottom:14px"></div>' : ''}
-      ${t.description ? `<div style="margin-bottom:14px">${labelVal('Description', t.description)}</div>` : ''}
-      ${stemList()}`
-  }
-
-  function editBody() {
-    const keyOpts = KEYS.map(k => `<option value="${k}"${t.key===k?' selected':''}>${k}</option>`).join('')
-    const genreOpts = '<option value="">—</option>' + _intakeGenres.map(g =>
-      `<option value="${g.primary_genre_id}"${t.primary_genre_id===g.primary_genre_id?' selected':''}>${esc(g.primary_genre_name)}</option>`
-    ).join('')
-    const currentPgId = t.primary_genre_id
-    const subOpts = '<option value="">—</option>' + (_intakeSubGenres[currentPgId] || []).map(sg => {
-      const found = _intakeGenres  // need secondary_genre_id — look it up via name match
-      return `<option value="${esc(sg)}"${t.secondary_genre_name===sg?' selected':''}>${esc(sg)}</option>`
-    }).join('')
-    const moodOpts = '<option value="">—</option>' + _intakeMood1.map(m =>
-      `<option value="${m.mood_1_id}"${t.mood_1_id===m.mood_1_id?' selected':''}>${esc(m.mood_1_name)}</option>`
-    ).join('')
-    const inp = (id, val, type='text', extra='') =>
-      `<input id="pe-${id}" type="${type}" value="${esc(val||'')}" ${extra}
-        style="width:100%;padding:6px 9px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg3);color:var(--text)">`
-    return `
-      <div style="margin-bottom:12px">
-        <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">Title</div>
-        ${inp('title', t.title)}
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-        <div>
-          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">Key</div>
-          <select id="pe-key" style="width:100%;padding:6px 9px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg3);color:var(--text)">
-            <option value="">—</option>${keyOpts}
-          </select>
-        </div>
-        <div>
-          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">BPM</div>
-          ${inp('bpm', t.bpm, 'number', 'min="40" max="280" step="1"')}
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-        <div>
-          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">Primary Genre</div>
-          <select id="pe-primary-genre" onchange="peekUpdateSubGenres()" style="width:100%;padding:6px 9px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg3);color:var(--text)">
-            ${genreOpts}
-          </select>
-        </div>
-        <div>
-          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">Secondary Genre</div>
-          <select id="pe-secondary-genre" style="width:100%;padding:6px 9px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg3);color:var(--text)">
-            ${subOpts}
-          </select>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-bottom:12px">
-        <div>
-          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">Mood</div>
-          <select id="pe-mood" style="width:100%;padding:6px 9px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg3);color:var(--text)">
-            ${moodOpts}
-          </select>
-        </div>
-        <div>
-          <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">KSL</div>
-          ${inp('ksl', t.ksl_ids)}
-        </div>
-      </div>
-      <div style="margin-bottom:12px">
-        <div style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:var(--text3);margin-bottom:4px">Description</div>
-        <textarea id="pe-description" rows="3" style="width:100%;padding:6px 9px;border:1px solid var(--border2);border-radius:6px;font-size:13px;background:var(--bg3);color:var(--text);resize:vertical">${esc(t.description||'')}</textarea>
-      </div>
-      ${stemList()}`
-  }
-
-  // Remove existing modal
-  document.getElementById('peek-modal')?.remove()
-  const modal = document.createElement('div')
-  modal.id = 'peek-modal'
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:9999;display:flex;align-items:center;justify-content:center'
-
-  let editing = false
-  function render() {
-    modal.innerHTML = `
-      <div style="background:var(--bg);border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:85vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.3)">
-        <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">
-          <div>
-            <div style="font-size:17px;font-weight:700" id="pe-title-display">${esc(t.title)}</div>
-            <div style="font-size:12px;font-family:monospace;color:var(--text3);margin-top:2px">${esc(t.sku_root)}</div>
-          </div>
-          <div style="display:flex;gap:6px;align-items:center;flex-shrink:0;margin-left:12px">
-            ${editing
-              ? `<button onclick="peekSave('${esc(t.sku_root)}')" style="border:none;background:var(--accent);color:#fff;border-radius:6px;padding:6px 12px;cursor:pointer;font-size:12px;font-weight:600">Save</button>
-                 <button onclick="peekCancelEdit()" style="border:none;background:var(--bg2);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;color:var(--text2)">Cancel</button>`
-              : `<button onclick="peekStartEdit()" style="border:none;background:var(--bg2);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:12px;color:var(--text2)"><i class="ti ti-pencil"></i> Edit</button>`
-            }
-            <button onclick="document.getElementById('peek-modal').remove()" style="border:none;background:var(--bg2);border-radius:6px;padding:6px 10px;cursor:pointer;font-size:14px;color:var(--text2)">✕</button>
-          </div>
-        </div>
-        <div id="pe-body">${editing ? editBody() : readBody()}</div>
-      </div>`
-  }
-
-  window.peekStartEdit = () => { editing = true; render() }
-  window.peekCancelEdit = () => { editing = false; render() }
-
-  window.peekUpdateSubGenres = () => {
-    const pgId = parseInt(document.getElementById('pe-primary-genre')?.value)
-    const sel = document.getElementById('pe-secondary-genre')
-    if (!sel) return
-    const subs = _intakeSubGenres[pgId] || []
-    sel.innerHTML = '<option value="">—</option>' + subs.map(sg =>
-      `<option value="${esc(sg)}">${esc(sg)}</option>`
-    ).join('')
-  }
-
-  window.peekSave = async (skuRoot) => {
-    const titleVal    = document.getElementById('pe-title')?.value.trim()
-    const keyVal      = document.getElementById('pe-key')?.value || null
-    const bpmVal      = parseFloat(document.getElementById('pe-bpm')?.value) || null
-    const pgName      = _intakeGenres.find(g => g.primary_genre_id == document.getElementById('pe-primary-genre')?.value)
-    const pgId        = pgName ? pgName.primary_genre_id : null
-    const sgName      = document.getElementById('pe-secondary-genre')?.value || null
-    const mood1Id     = parseInt(document.getElementById('pe-mood')?.value) || null
-    const kslVal      = document.getElementById('pe-ksl')?.value.trim() || null
-    const descVal     = document.getElementById('pe-description')?.value.trim() || null
-
-    // Resolve secondary_genre_id from name + primary_genre_id
-    let sgId = null
-    if (pgId && sgName) {
-      const sgRows = await pgQ(
-        `SELECT secondary_genre_id FROM secondary_genres WHERE primary_genre_id=$1 AND secondary_genre_name=$2 LIMIT 1`,
-        [pgId, sgName]
-      )
-      if (sgRows && sgRows.length) sgId = sgRows[0].secondary_genre_id
-    }
-
-    if (!titleVal) { alert('Title cannot be empty.'); return }
-
-    const saveBtn = document.querySelector('#peek-modal button[onclick*="peekSave"]')
-    if (saveBtn) { saveBtn.textContent = 'Saving…'; saveBtn.disabled = true }
-
-    try {
-      await pgQ(`
-        UPDATE titles SET
-          title               = $1,
-          key                 = $2,
-          bpm                 = $3,
-          primary_genre_id    = $4,
-          secondary_genre_id  = $5,
-          mood_1_id           = $6,
-          ksl_ids             = $7,
-          description         = $8,
-          updated_at          = now()
-        WHERE sku_root = $9
-      `, [titleVal, keyVal, bpmVal, pgId, sgId, mood1Id, kslVal, descVal, skuRoot])
-
-      // Reflect updated values back into t for read view
-      t.title               = titleVal
-      t.key                 = keyVal
-      t.bpm                 = bpmVal
-      t.primary_genre_id    = pgId
-      t.primary_genre_name  = pgName?.primary_genre_name || null
-      t.secondary_genre_id  = sgId
-      t.secondary_genre_name = sgName
-      t.mood_1_id           = mood1Id
-      t.mood_1_name         = _intakeMood1.find(m => m.mood_1_id === mood1Id)?.mood_1_name || null
-      t.ksl_ids             = kslVal
-      t.description         = descVal
-
-      editing = false
-      render()
-    } catch(e) {
-      alert('Save failed: ' + e.message)
-      if (saveBtn) { saveBtn.textContent = 'Save'; saveBtn.disabled = false }
-    }
-  }
-
-  render()
-  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
-  document.body.appendChild(modal)
-}
-
 function detectStemName(filename) {
   // Extract the version token from the last underscore segment (before the extension).
   // HAUS filenames: HAUS_Title_Key_ComposerID_VERSION.ext — version is always the last segment.
@@ -4192,43 +3873,6 @@ async function assignItem(type, itemId, clientId) {
   }
 }
 
-async function unassignItem(type, itemId, clientId) {
-  try {
-    let table = type === 'projects' ? 'projects' : type === 'playlists' ? 'playlists' : 'lots'
-    let idField = type === 'lots' ? 'lot_id' : 'id'
-    await pgQ(`UPDATE ${table} SET client_id = NULL WHERE ${idField} = $1`, [itemId])
-    selectClient(clientId)
-  } catch (e) {
-    alert('Error: ' + e.message)
-  }
-}
-
-async function importClientsCSV(inputEl) {
-  const file = inputEl.files?.[0]
-  if (!file) return
-
-  const formData = new FormData()
-  formData.append('file', file)
-
-  try {
-    const res = await fetch('/api/clients/import-csv', {
-      method: 'POST',
-      body: formData
-    })
-    const result = await res.json()
-
-    if (result.ok) {
-      alert(`✓ Imported ${result.count} clients`)
-      loadClientsSection()
-      inputEl.value = ''
-    } else {
-      alert('Error: ' + result.error)
-    }
-  } catch (e) {
-    alert('Import failed: ' + e.message)
-  }
-}
-
 // ─── Library stats ─────────────────────────────────────────
 async function loadLibraryStats() {
   if (!window.haus) return
@@ -5022,9 +4666,6 @@ async function getDealsForSelect() {
 }
 
 // Legacy aliases (referenced by other code)
-function showComposersSubtab(tab) { showTeamSection(tab === 'composers' ? 'composers' : 'cowriters') }
-function showIPTab(tab) { if (tab !== 'teams') showTeamSection(tab) }
-
 async function loadIPTeams(composerFilter) {
   const wrap = document.getElementById('ip-teams-content')
   if (!wrap) return
@@ -7047,13 +6688,6 @@ function setJupToggle(i, isJup) {
   btn.style.cssText = 'cursor:pointer;border:none;padding:2px 8px;font-size:11px;font-weight:600;border-radius:4px'
 }
 
-function toggleJup(i) {
-  const btn = document.getElementById(`jup-toggle-${i}`)
-  if (!btn) return
-  setJupToggle(i, btn.dataset.jup !== '1')
-  resolveComposer(i) // re-render splits in case pub detail changes by JUP status
-}
-
 function _addTag(fieldId, val) {
   const container = document.getElementById(`${fieldId}-tags`)
   if (!container || !val) return
@@ -7174,14 +6808,6 @@ function applyIntakeAutocomplete(batchIndices) {
   // makeIntakeAutocomplete() is kept for any legacy SELECT fields that may still exist elsewhere.
 }
 
-function addIntakeTag(fieldId) {
-  const input = document.getElementById(`${fieldId}-input`)
-  if (!input) return
-  _addTag(fieldId, input.value.trim())
-  input.value = ''
-  input.selectedIndex = 0
-}
-
 async function addIntakeTagNew(fieldId) {
   const input = document.getElementById(`${fieldId}-newval`) || document.getElementById(`${fieldId}-new`)
   if (!input) return
@@ -7252,17 +6878,6 @@ function addMmwPhrase(i) {
   tag.innerHTML = `${esc(phrase)} <button onclick="removeIntakeTag(this)" style="background:none;border:none;cursor:pointer;padding:0;font-size:14px;line-height:1;color:var(--text2)">&times;</button>`
   container.appendChild(tag)
   markUnsavedChanges()
-}
-
-function toggleIntakeNewForm(fieldId) {
-  const form = document.getElementById(`${fieldId}-newform`)
-  if (!form) return
-  const visible = form.style.display !== 'none'
-  form.style.display = visible ? 'none' : 'block'
-  if (!visible) {
-    const inp = document.getElementById(`${fieldId}-newval`)
-    if (inp) inp.focus()
-  }
 }
 
 function addIntakeMoodTag(i) {
@@ -7536,15 +7151,6 @@ async function renderIntake(step) {
 // Matches: E, Em, Bb, Bbm, Abm, Csharp, Csharpm, Bflat, Bflatm, F#, F#m
 const KEY_RE = /^([A-Ga-g](?:sharp|flat|##?|bb?)?m?)$/i
 
-function deCamelCase(str) {
-  if (!str) return str
-  return str
-    .replace(/([a-z])([A-Z])/g, '$1 $2')
-    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
-    .replace(/_/g, ' ')
-    .trim()
-}
-
 function normalizeKey(k) {
   if (!k) return ''
   k = k.replace(/maj$/i, '').trim()
@@ -7586,13 +7192,6 @@ function parseFolderName(name) {
   }
 
   return { composerID, title: humanTitle, tag: tag.trim(), key: key.trim() }
-}
-
-async function checkIntakeDeps() {
-  const warnings = []
-  const ffmpeg = await window.haus.shell.exec('test -x /usr/bin/ffmpeg && echo ok || which ffmpeg 2>/dev/null || echo ""')
-  if (!ffmpeg.stdout.trim()) warnings.push('<b>ffmpeg</b> not found — MP3 conversion will be skipped. Install: <code>brew install ffmpeg</code>')
-  return warnings
 }
 
 // Derive lot type from client folder name — JUPITER → jupiter, else client
@@ -7740,53 +7339,6 @@ async function scanStagingForClient(clientName) {
 
 // Dead code — old intake layout (used #track-section / #intake-track-list which no longer exist).
 // Renamed to avoid shadowing the search-UI renderTrackList(tracks) at line 3013.
-function _legacyRenderTrackList() {
-  const trackSec = document.getElementById('track-section')
-  const trackList = document.getElementById('intake-track-list')
-  if (!trackSec || !trackList) return
-
-  if (intakeDrops.length === 0) {
-    trackList.innerHTML = '<div class="empty" style="padding:8px"><i class="ti ti-folder-off"></i><p>No drops found in this client folder</p></div>'
-    trackSec.style.display = 'block'
-    return
-  }
-
-  trackList.innerHTML = intakeDrops.map((d, i) => {
-    const active = intakeIndex === i
-    const fileCount = d.files.length
-    return `<div onclick="pickTrack(${i})" class="intake-row${active ? ' active' : ''}">
-      <div style="font-size:13px;font-weight:600">${d.title || d.name}</div>
-      <div style="font-size:11px;opacity:.7;margin-top:2px">${d.key || '?'} · ${fileCount} file${fileCount !== 1 ? 's' : ''}${d.lotFolder ? ' · ' + d.lotFolder : ''}</div>
-    </div>`
-  }).join('')
-
-  trackSec.style.display = 'block'
-  trackSec.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
-}
-
-function pickTrack(idx) {
-  loadIntakeTrackForm(idx)
-}
-
-function pickLot(lotId, lotName, lotType, webVisible) {
-  intakeLotId = lotId; intakeLotName = lotName; intakeLotType = lotType
-  intakeWebVisible = webVisible
-
-  // Re-render lot list to show selection
-  const ll = document.getElementById('lot-list')
-  if (ll) {
-    ll.querySelectorAll('button').forEach(btn => {
-      const isActive = btn.onclick?.toString().includes(`pickLot(${lotId},`)
-      btn.className = 'btn' + (isActive ? ' active' : '')
-      btn.style.background = isActive ? 'var(--accent)' : ''
-      btn.style.color      = isActive ? 'white' : ''
-    })
-  }
-
-  // If a track already selected, re-show visibility with updated state
-  if (intakeIndex !== null && intakeIndex >= 0) pickTrack(intakeIndex)
-}
-
 // ── Intake Browser (left panel) ────────────────────────────────────────────
 
 async function renderIntakeBrowserClients() {
@@ -9103,45 +8655,6 @@ function _intakeProgress(title, msg) {
 
 // ── Ops Dashboard ──────────────────────────────────────────────────────────
 
-async function clearLotB2Keys(lotName) {
-  if (!confirm(`Clear all b2_key entries for "${lotName}"? This will allow backfill to re-upload.`)) return
-  const rows = await pgQ(`
-    UPDATE mix_stems
-    SET b2_key = NULL
-    WHERE sku_root IN (
-      SELECT DISTINCT t.sku_root
-      FROM titles t
-      JOIN lot_titles lt ON lt.sku_root = t.sku_root
-      JOIN lots l ON l.lot_id = lt.lot_id
-      WHERE l.lot_name LIKE $1
-    )
-    RETURNING mix_stem_id
-  `, [lotName + '%'])
-  alert(`Cleared ${rows?.length || 0} b2_key entries. Run backfill now.`)
-}
-
-async function clearSKUb2Keys(sku) {
-  if (!confirm(`Clear all b2_key entries for SKU "${sku}"? This will allow backfill to re-upload.`)) return
-  const rows = await pgQ(`
-    UPDATE mix_stems
-    SET b2_key = NULL
-    WHERE sku_root = $1
-    RETURNING mix_stem_id
-  `, [sku])
-  alert(`Cleared ${rows?.length || 0} b2_key entries for ${sku}. Run backfill now.`)
-}
-
-async function addB2Key(sku, filename, b2Key) {
-  if (!confirm(`Add b2_key for ${sku} / ${filename}?`)) return
-  const result = await pgQ(`
-    INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key)
-    VALUES ($1, $2, $3, $4)
-    ON CONFLICT (sku_root, filename) DO UPDATE SET b2_key = EXCLUDED.b2_key
-    RETURNING mix_stem_id
-  `, [sku, 'FULL', filename, b2Key])
-  alert(`Added b2_key. Try playing the song now.`)
-}
-
 async function opsMigrateB2() {
   const btn = document.getElementById('ops-b2-btn')
   if (btn) { btn.disabled = true; btn.innerHTML = '<i class="ti ti-loader-2"></i> Running…' }
@@ -10316,14 +9829,6 @@ async function b2RebuildStemKeys(statusElId = 'b2-connect-result') {
   log(`✓ Done — scanned ${scanned} files, linked ${matched} stems (${errors} errors)`)
 }
 
-async function purgeAllLots() {
-  if (!confirm('Delete ALL lots from the database? This cannot be undone.')) return
-  await pgQ(`DELETE FROM lots`)
-  const ll = document.getElementById('lot-list')
-  if (ll) ll.innerHTML = '<div style="font-size:12px;color:var(--text3);margin-bottom:8px">No existing lots — create one below.</div>'
-  intakeLotId = null; intakeLotName = null
-}
-
 async function resolveCurrentLot(clientName) {
   // Find the latest OPEN lot folder in shipping for this client, or create one.
   // A lot is "closed" if it has a sent_date in the DB.
@@ -10434,43 +9939,6 @@ async function suggestLotName(clientName) {
   return prefix + nextSeq
 }
 
-async function createAndPickLot() {
-  const nameInput = document.getElementById('new-lot-name')
-  const name = nameInput?.value.trim()
-  const type = lotTypeFromClient(intakeClient)
-  if (!name) { nameInput?.focus(); return }
-
-  const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
-  const lotId = await getOrCreateLot(name, type, clientArg)
-  if (!lotId) { alert('Failed to create lot'); return }
-
-  // Create the physical folder in ATMOS_Shipping
-  const hausjup = cfg.hausjup
-  if (hausjup) {
-    const lotFolder = hausjup + '/' + name
-    await window.haus.shell.exec(`mkdir -p "${lotFolder}"`)
-  }
-
-  intakeLotId = lotId; intakeLotName = name; intakeLotType = type
-  if (nameInput) nameInput.value = ''
-
-  // Reload lot list
-  const lots = await loadLots(type, clientArg || null)
-  const ll = document.getElementById('lot-list')
-  if (ll) {
-    ll.innerHTML = lots.map(l => {
-      const active = intakeLotId === l.lot_id
-      return `<button class="btn ${active ? 'active' : ''}" onclick="pickLot(${l.lot_id},'${l.lot_name.replace(/'/g,"\\'")}','${l.lot_type}',${!!l.web_visible})"
-        style="width:100%;text-align:left;margin-bottom:4px;font-size:12px;${active ? 'background:var(--accent);color:white' : ''}">
-        <span>${l.lot_name}</span>
-        <span style="opacity:.6;font-size:10px;float:right">${l.lot_type}${l.web_visible ? ' · public' : ' · private'}</span>
-      </button>`
-    }).join('')
-  }
-
-  if (intakeIndex !== null && intakeIndex >= 0) pickTrack(intakeIndex)
-}
-
 async function showIntakeLotPicker() {
   const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
   console.log('[showIntakeLotPicker] intakeClient:', intakeClient, 'clientArg:', clientArg)
@@ -10523,73 +9991,6 @@ function pickLotFromModal(lotId, lotName, lotType) {
   intakeLotId = lotId; intakeLotName = lotName; intakeLotType = lotType
   document.getElementById('intake-lot-picker-modal')?.remove()
   if (intakeIndex !== null && intakeIndex >= 0) loadIntakeTrackForm(intakeIndex)
-}
-
-async function showLotTrackDetail(skuRoot) {
-  const rows = await pgQ(`
-    SELECT t.*, c.full_name AS composer_name
-    FROM titles t
-    LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-    WHERE t.sku_root = $1
-  `, [skuRoot])
-  const t = rows?.[0]
-  if (!t) return
-
-  const modal = document.createElement('div')
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
-  modal.onclick = e => { if (e.target === modal) modal.remove() }
-
-  // Reverse-lookup metapak name from stored phrase list
-  let metapak = null
-  if (t.mmw) {
-    const mmwSet = new Set(t.mmw.split(',').map(s => s.trim()))
-    const best = MMW_METAPAKS.reduce((b, p) => {
-      const overlap = p.phrases.filter(ph => mmwSet.has(ph)).length
-      return overlap > b.count ? { name: p.name, count: overlap } : b
-    }, { name: null, count: 0 })
-    if (best.count > 0) metapak = best.name
-  }
-  const fields = [
-    ['SKU', t.sku_root],
-    ['Title', t.title],
-    ['Composer ID', t.composer_id],
-    ['Composer', t.composer_name],
-    ['Key', t.key],
-    ['BPM', t.bpm],
-    ['Genre', t.genre_name || t.genre],
-    ['Sub-Genre', t.sub_genre],
-    ['Release Date', t.release_date ? new Date(t.release_date).toISOString().slice(0,10) : null],
-    ['Description', t.description],
-    ['Metapak', metapak],
-    ['Plot Arc', t.plot_arc],
-  ].filter(([, v]) => v)
-
-  modal.innerHTML = `
-    <div style="background:#E7F0EA;border-radius:12px;padding:24px;width:480px;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,.3)">
-      <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:18px">
-        <div style="font-size:16px;font-weight:700;color:#8FAF9B">${esc(t.title||'')}</div>
-        <div style="display:flex;gap:6px">
-          <button style="display:inline-flex;align-items:center;gap:5px;padding:2px 10px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onclick="this.closest('[style*=fixed]').remove();openMetadataEditor('${esc(skuRoot)}')"><i class="ti ti-edit"></i> Edit</button>
-          <button class="btn" onclick="this.closest('[style*=fixed]').remove()" style="padding:2px 8px"><i class="ti ti-x"></i></button>
-        </div>
-      </div>
-      <div style="display:grid;grid-template-columns:120px 1fr;gap:6px 12px;font-size:12px">
-        ${fields.map(([label, val]) => `
-          <div style="color:#6F927E;font-weight:600">${label}</div>
-          <div style="word-break:break-word;color:#1a2226">${esc(String(val))}</div>
-        `).join('')}
-      </div>
-    </div>
-  `
-  document.body.appendChild(modal)
-}
-
-function startIntake() {
-  if (intakeIndex === null || intakeIndex < 0) {
-    alert('Pick a track first')
-    return
-  }
-  setIntakeStep(1)
 }
 
 function showNewClientInput() {
@@ -11533,39 +10934,6 @@ function skipIntakeDrop() {
 let intakeResults = []
 
 // ─── Deals kanban ──────────────────────────────────────────
-const DEALS_DATA = {
-  'Prospect': [
-    { title:'Disney — nature doc', meta:'5 tracks requested', val:'$4,500' },
-  ],
-  'Active': [
-    { title:'Netflix — dramatic tension', meta:'8 tracks · submitted', val:'$12,000' },
-    { title:'HBO — background license', meta:'3 tracks · negotiating', val:'$5,400' },
-  ],
-  'Review': [
-    { title:'Hulu — true crime series', meta:'6 tracks · under review', val:'$7,200' },
-  ],
-  'Signed': [
-    { title:'Apple — mood series', meta:'15 tracks · signed', val:'$22,500' },
-  ],
-  'Delivered': [
-    { title:'NBC — sports package', meta:'10 tracks · delivered', val:'$14,000' },
-    { title:'ESPN — highlight reel', meta:'4 tracks', val:'$6,000' },
-  ]
-}
-
-function renderDeals() {
-  const board = document.getElementById('kanban-board')
-  board.innerHTML = Object.entries(DEALS_DATA).map(([col, deals]) => `
-    <div class="kanban-col">
-      <div class="kanban-col-header">${col} <span class="kanban-count">${deals.length}</span></div>
-      ${deals.map(d => `<div class="deal-card">
-        <div class="deal-title">${d.title}</div>
-        <div class="deal-meta">${d.meta}</div>
-        <div style="margin-top:8px;font-size:13px;font-weight:600;color:var(--text)">${d.val}</div>
-      </div>`).join('')}
-    </div>`).join('')
-}
-
 // ─── Finances ──────────────────────────────────────────────
 const FIN_DATA = {
   months: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
@@ -12541,30 +11909,6 @@ async function removeFromPlaylist(skuRoot) {
 }
 
 // ─── Add Tracks modal (full filter UI) ────────────────────────────────────
-function _atlUniq(field) {
-  // For comma-separated aggregate fields, split and flatten
-  const vals = new Set()
-  for (const t of (window._addTracksAll || [])) {
-    const v = t[field] || ''
-    if (v.includes(',')) v.split(',').forEach(x => { const s = x.trim(); if (s) vals.add(s) })
-    else if (v) vals.add(v)
-  }
-  return [...vals].sort()
-}
-
-function _atlSubGenres(primaryGenre) {
-  const vals = new Set()
-  for (const t of (window._addTracksAll || [])) {
-    if (!primaryGenre || t.primaryGenre === primaryGenre)
-      if (t.subGenre) vals.add(t.subGenre)
-  }
-  return [...vals].sort()
-}
-
-function _atlOpts(vals, placeholder) {
-  return `<option value="">${placeholder}</option>` + vals.map(v => `<option value="${v.replace(/"/g,'&quot;')}">${v}</option>`).join('')
-}
-
 async function goAddTracksInCollection() {
   if (!currentPlaylistId) return
   console.log('[goAddTracksInCollection] currentPlaylistId:', currentPlaylistId)
@@ -12634,197 +11978,7 @@ function clearActivePlaylist() {
   if (currentDisplayTracks?.length) filterTracks(document.getElementById('catalog-search')?.value || '')
 }
 
-async function addTracksToPlaylist() {
-  if (!currentPlaylistId) return
-  if (!allTracks || !allTracks.length) await loadCatalogPG()
-  window._addTracksAll = allTracks
-  const existing = await pgQ('SELECT sku_root FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
-  window._addTracksExisting = new Set((existing||[]).map(r=>r.sku_root))
-
-  const genres    = _atlUniq('primaryGenre')
-  const composers = [...new Set((window._addTracksAll||[]).map(t => t.composerName || t.composerID).filter(Boolean))].sort()
-  const keys      = _atlUniq('key')
-  const moods1    = _atlUniq('mood1')
-  const moods2    = _atlUniq('mood2')
-  const ksls      = _atlUniq('ksl')
-  const rmos      = _atlUniq('rmo')
-
-  const modal = document.createElement('div')
-  modal.id = 'add-tracks-modal'
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center'
-  modal.innerHTML = `
-    <div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;width:780px;max-height:82vh;display:flex;flex-direction:column;overflow:hidden">
-      <div style="padding:12px 16px;border-bottom:0.5px solid var(--border);display:flex;align-items:center;gap:10px;flex-shrink:0">
-        <b style="font-size:13px">Add tracks to playlist</b>
-        <span id="atl-count" style="font-size:11px;color:var(--text3);margin-left:4px"></span>
-        <button class="btn" style="margin-left:auto" onclick="document.getElementById('add-tracks-modal').remove()"><i class="ti ti-x"></i></button>
-      </div>
-      <!-- Filter bar -->
-      <div style="padding:10px 16px;border-bottom:0.5px solid var(--border);flex-shrink:0;display:flex;flex-wrap:wrap;gap:7px;align-items:center">
-        <input class="form-input" id="atl-q" placeholder="Title, SKU, composer…" style="width:180px" oninput="applyAddTracksFilters()" autocomplete="off">
-        <select class="form-input" id="atl-genre" style="width:130px" onchange="atlGenreChanged()"><option value="">All genres</option>${_atlOpts(genres,'All genres').replace('<option value="">All genres</option>','')}</select>
-        <select class="form-input" id="atl-subgenre" style="width:130px" onchange="applyAddTracksFilters()"><option value="">All sub-genres</option></select>
-        <select class="form-input" id="atl-composer" style="width:130px" onchange="applyAddTracksFilters()">${_atlOpts(composers,'All composers')}</select>
-        <select class="form-input" id="atl-key" style="width:80px" onchange="applyAddTracksFilters()">${_atlOpts(keys,'Key')}</select>
-        <div style="display:flex;align-items:center;gap:4px;font-size:11px;color:var(--text3)">
-          BPM <input class="form-input" id="atl-bpm-min" type="number" placeholder="min" style="width:54px;padding:4px 6px" oninput="applyAddTracksFilters()">
-          – <input class="form-input" id="atl-bpm-max" type="number" placeholder="max" style="width:54px;padding:4px 6px" oninput="applyAddTracksFilters()">
-        </div>
-        <select class="form-input" id="atl-mood1" style="width:120px" onchange="applyAddTracksFilters()">${_atlOpts(moods1,'Mood 1')}</select>
-        <select class="form-input" id="atl-mood2" style="width:120px" onchange="applyAddTracksFilters()">${_atlOpts(moods2,'Mood 2')}</select>
-        <select class="form-input" id="atl-ksl" style="width:110px" onchange="applyAddTracksFilters()">${_atlOpts(ksls,'KSL')}</select>
-        <select class="form-input" id="atl-rmo" style="width:110px" onchange="applyAddTracksFilters()">${_atlOpts(rmos,'RMO')}</select>
-        <button class="btn" style="font-size:11px" onclick="atlClearFilters()"><i class="ti ti-x"></i> Clear</button>
-      </div>
-      <div id="add-tracks-list" style="flex:1;overflow-y:auto"></div>
-    </div>`
-  document.body.appendChild(modal)
-  modal.addEventListener('click', e => { if(e.target===modal) modal.remove() })
-  setTimeout(() => document.getElementById('atl-q')?.focus(), 50)
-  applyAddTracksFilters()
-}
-
-function atlGenreChanged() {
-  const genre = document.getElementById('atl-genre')?.value || ''
-  const sub = document.getElementById('atl-subgenre')
-  if (sub) sub.innerHTML = `<option value="">All sub-genres</option>` + _atlSubGenres(genre).map(v => `<option value="${v.replace(/"/g,'&quot;')}">${v}</option>`).join('')
-  applyAddTracksFilters()
-}
-
-function atlClearFilters() {
-  ;['atl-q','atl-genre','atl-subgenre','atl-composer','atl-key','atl-mood1','atl-mood2','atl-ksl','atl-rmo','atl-bpm-min','atl-bpm-max']
-    .forEach(id => { const el = document.getElementById(id); if (el) el.value = '' })
-  atlGenreChanged()
-}
-
-function applyAddTracksFilters() {
-  const all = window._addTracksAll || []
-  const q       = (document.getElementById('atl-q')?.value || '').toLowerCase().trim()
-  const genre   = document.getElementById('atl-genre')?.value || ''
-  const sub     = document.getElementById('atl-subgenre')?.value || ''
-  const comp    = document.getElementById('atl-composer')?.value || ''
-  const key     = document.getElementById('atl-key')?.value || ''
-  const bpmMin  = parseFloat(document.getElementById('atl-bpm-min')?.value || '') || null
-  const bpmMax  = parseFloat(document.getElementById('atl-bpm-max')?.value || '') || null
-  const mood1   = document.getElementById('atl-mood1')?.value || ''
-  const mood2   = document.getElementById('atl-mood2')?.value || ''
-  const ksl     = document.getElementById('atl-ksl')?.value || ''
-  const rmo     = document.getElementById('atl-rmo')?.value || ''
-
-  const filtered = all.filter(t => {
-    if (q && !(t.title?.toLowerCase().includes(q) || t.sku?.toLowerCase().includes(q) || t.composerName?.toLowerCase().includes(q) || t.composerID?.toLowerCase().includes(q))) return false
-    if (genre   && t.primaryGenre !== genre) return false
-    if (sub     && t.subGenre !== sub) return false
-    if (comp    && (t.composerName || t.composerID) !== comp) return false
-    if (key     && t.key !== key) return false
-    if (bpmMin  !== null && (t.bpm === null || t.bpm < bpmMin)) return false
-    if (bpmMax  !== null && (t.bpm === null || t.bpm > bpmMax)) return false
-    if (mood1   && t.mood1 !== mood1) return false
-    if (mood2   && !t.mood2?.split(',').map(x=>x.trim()).includes(mood2)) return false
-    if (ksl     && !t.ksl?.split(',').map(x=>x.trim()).includes(ksl)) return false
-    if (rmo     && !t.rmo?.split(',').map(x=>x.trim()).includes(rmo)) return false
-    return true
-  })
-  const countEl = document.getElementById('atl-count')
-  if (countEl) countEl.textContent = `${filtered.length} track${filtered.length!==1?'s':''}`
-  renderAddTracksList(filtered)
-}
-
 // legacy alias kept for safety
-function filterAddTracks(q) { applyAddTracksFilters() }
-
-function renderAddTracksList(tracks) {
-  const el = document.getElementById('add-tracks-list')
-  if (!el) return
-  const ex = window._addTracksExisting || new Set()
-  const esc = s => (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')
-  if (!tracks || !tracks.length) {
-    el.innerHTML = '<div style="padding:24px;text-align:center;font-size:12px;color:var(--text3)">No tracks match</div>'
-    return
-  }
-  el.innerHTML = tracks.slice(0, 500).map(t => {
-    const inPl = ex.has(t.sku)
-    const meta = [t.composerName||t.composerID, t.primaryGenre, t.subGenre, t.key, t.bpm ? `${t.bpm} BPM` : ''].filter(Boolean).join(' · ')
-    return `<div class="atl-row" data-sku="${esc(t.sku)}" style="padding:7px 16px;font-size:12px;display:flex;align-items:center;gap:10px;border-bottom:0.5px solid var(--border)">
-      <div style="flex:1;min-width:0">
-        <div style="font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title)}</div>
-        <div style="color:var(--text3);font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(meta)}</div>
-      </div>
-      ${t.mood1 ? `<span style="font-size:10px;color:var(--text3);white-space:nowrap">${esc(t.mood1)}</span>` : ''}
-      <button class="btn atl-btn" data-sku="${esc(t.sku)}" style="flex-shrink:0;font-size:11px${inPl?';opacity:0.4;pointer-events:none':''}" ${inPl?'disabled':''}>${inPl?'✓ Added':'+ Add'}</button>
-    </div>`
-  }).join('')
-  el.querySelectorAll('.atl-btn:not([disabled])').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation()
-      addTrackToCurrentPlaylist(btn.dataset.sku, btn.closest('.atl-row'))
-    })
-  })
-}
-
-async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
-  try {
-    if (!currentPlaylistId) return
-    const ex = window._addTracksExisting
-    if (ex?.has(skuRoot)) return
-
-    // Get next position
-    const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
-    if (!Array.isArray(maxRes)) {
-      console.error(`[addTrackToCurrentPlaylist] failed to fetch max position for playlist ${currentPlaylistId}`)
-      alert('Error adding track')
-      return
-    }
-    const pos = maxRes?.[0]?.next || 1
-
-    // Insert track
-    const insertRes = await pgQ('INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1,$2,$3) ON CONFLICT (playlist_id,sku_root) DO NOTHING', [currentPlaylistId, skuRoot, pos])
-    if (!Array.isArray(insertRes)) {
-      console.error(`[addTrackToCurrentPlaylist] INSERT failed for ${skuRoot} in playlist ${currentPlaylistId}`)
-      alert('Error adding track to playlist')
-      return
-    }
-
-    // Only update UI if INSERT succeeded
-    ex?.add(skuRoot)
-    const btn = rowEl?.querySelector('button')
-    if (btn) { btn.textContent='Added'; btn.style.opacity='0.4'; btn.disabled=true; btn.style.pointerEvents='none' }
-
-    // Refresh track list in background
-    const rows = await pgQ(`
-      SELECT pt.id as pt_id, pt.position, pt.sku_root,
-             t.title, t.bpm, t.key,
-             c.full_name as composer_name,
-             CASE WHEN pg.primary_genre_name IS NOT NULL AND sg.secondary_genre_name IS NOT NULL
-                  THEN pg.primary_genre_name || '_' || sg.secondary_genre_name
-                  WHEN pg.primary_genre_name IS NOT NULL THEN pg.primary_genre_name
-                  ELSE '' END as genre
-      FROM playlist_tracks pt
-      JOIN titles t ON t.sku_root = pt.sku_root
-      LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
-      LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
-      LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
-      WHERE pt.playlist_id = $1
-      ORDER BY pt.position, pt.id
-    `, [currentPlaylistId])
-    if (!Array.isArray(rows)) {
-      console.error(`[addTrackToCurrentPlaylist] failed to refresh playlist ${currentPlaylistId}`)
-      return
-    }
-    playlistTracks = rows
-    renderPlaylistTrackList()
-    // Update sidebar with simplified track data
-    const sidebarData = rows.map(r => ({ title: r.title, composerName: r.composer_name, composerId: r.composer_id }))
-    updatePlaylistSidebar(sidebarData)
-    console.log(`[addTrackToCurrentPlaylist] added ${skuRoot} to playlist ${currentPlaylistId}`)
-  } catch (e) {
-    console.error(`[addTrackToCurrentPlaylist] exception: ${e.message}`)
-    alert(`Error adding track: ${e.message}`)
-  }
-}
-
-
-
 // ─── Add to Playlist from Collection ──────────────────────────────────────
 async function showAddToPlaylistModal(skuRoot) {
   if (!pgConnected) { alert('Not connected to database.'); return }
@@ -13525,20 +12679,6 @@ async function toggleTodo(id, done) {
 
 async function deleteTodo(id) {
   await pgQ('DELETE FROM todos WHERE id=$1', [id])
-  await loadTodos()
-}
-
-async function cycleTodoPriority(id, t) {
-  const isImp = t.is_important, isUrg = t.is_urgent
-  let newImp = isImp, newUrg = isUrg
-  if (isImp && isUrg) {
-    newImp = true; newUrg = false   // Hot → Warm
-  } else if (isImp) {
-    newImp = false; newUrg = false  // Warm → Cold
-  } else {
-    newImp = true; newUrg = true    // Cold → Hot
-  }
-  await pgQ('UPDATE todos SET is_important=$1, is_urgent=$2 WHERE id=$3', [newImp, newUrg, id])
   await loadTodos()
 }
 

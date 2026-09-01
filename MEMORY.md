@@ -225,6 +225,15 @@
 ## Intake Automation (added June 2026)
 - `parseFolderName(name)` — new function. Extracts composerID (regex `^([A-Z]\d{2}[a-z])`), title (middle segment), albumCode (last `_` segment) from incoming folder name
 - `initIntake()` — replaces `renderIntake(0)` call in `onSectionEnter`. Auto-runs `scanStaging()` on navigate; no manual Scan button needed
+
+> **REGRESSION (found 2026-09-01):** `initIntake()` no longer calls `scanStaging()` — its body is now just
+> `if (!pgConnected) await pgAutoConnect(); renderIntake(0)`. `scanStaging()` is therefore unreachable: nothing
+> in index.html, producer.html or server.js references it. The staging folder is never scanned on navigate, so
+> the folder-name auto-parse below (`guessedID`, `guessedTitle`, `guessedTag`) never runs and the Info table is
+> never pre-filled. `scanStaging()` itself is intact (149 lines) — only the call site is missing. Likely related
+> to the open bugs around misnamed files not being fixed or moved during intake. Left in place deliberately
+> during the dead-code sweep in 57a4b9e; restoring the call is a behaviour change and needs testing against a
+> real staging folder.
 - `scanStaging()` — now auto-parses each folder and pre-fills `guessedID`, `guessedTitle`, `guessedTag`; auto-advances to step 1 if drops found
 - `pollIntakeBadge()` — polls staging folder every 60s, shows blue count badge on Intake nav item
 - `updateIntakeBadge(count)` — sets/hides `#intake-nav-badge` span in the Intake nav item
