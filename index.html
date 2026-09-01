@@ -10309,7 +10309,8 @@ async function executeIntake(snapshot = null) {
     const i    = batchIndices[_j]
     const d    = snapshot ? snapshot.drops[_j]  : intakeDrops[i]
     const info = snapshot ? snapshot.infos[_j]  : intakeInfo[i]
-    const title = info.title || d.name
+    // NOTE: `let`, not `const` — reassigned below on the title-clash path
+    let title = info.title || d.name
     const albumSuffix = info.tag || info.genre
 
     // ── SKU Assignment ────────────────────────────────────────────────────
