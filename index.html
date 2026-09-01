@@ -270,6 +270,11 @@ webview{flex:1;border:none}
   // Load shared rename validation module
   document.write('<script src="/rename-validation.js"><\/script>')
 </script>
+<!-- XSS PROTECTION: DOMPurify, vendored locally.
+     Must NOT be a CDN URL — main.js opens this file with win.loadFile(), so the
+     desktop app runs from file:// with no network guarantee. A remote <script>
+     silently fails there and every setHTML() call below would throw. -->
+<script src="vendor/purify.min.js"></script>
 </head>
 <body>
 
@@ -1278,6 +1283,30 @@ webview{flex:1;border:none}
 </div>
 
 <script>
+// ─── XSS PROTECTION ────────────────────────────────────────
+// Helper function to safely set HTML content
+function setHTML(element, html) {
+  if (!element) return
+  if (!html) { element.innerHTML = ''; return }
+  // DOMPurify removes malicious scripts/event handlers
+  if (typeof DOMPurify === 'undefined' || !DOMPurify.sanitize) {
+    // Fail SAFE, not open: render as plain text rather than injecting unsanitised
+    // HTML, and say so loudly. Should never happen now the library is vendored.
+    console.error('[setHTML] DOMPurify not loaded (vendor/purify.min.js) — falling back to plain text')
+    element.textContent = String(html).replace(/<[^>]*>/g, '')
+    return
+  }
+  element.innerHTML = DOMPurify.sanitize(html, { ALLOWED_TAGS: ['div', 'span', 'b', 'i', 'strong', 'em', 'a', 'br', 'p', 'ul', 'ol', 'li'] })
+}
+
+// Escape HTML special characters (for text content)
+function esc(str) {
+  if (!str) return ''
+  const div = document.createElement('div')
+  div.textContent = str
+  return div.innerHTML
+}
+
 // ─── Config ────────────────────────────────────────────────
 const DEFAULT_CFG = {
   intake:  '',
@@ -2142,7 +2171,7 @@ async function openLotPortal(lotId) {
     return
   }
 
-  listEl.innerHTML = tracks.map(t => `
+  setHTML(listEl, tracks.map(t => `
     <div style="display:flex;align-items:center;gap:8px;padding:8px 10px;background:#E7F0EA;border-radius:8px;margin-bottom:6px;font-size:12px">
       <div style="flex:1;min-width:0">
         <div style="font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">${esc(t.title)}</div>
@@ -2154,7 +2183,7 @@ async function openLotPortal(lotId) {
       <button title="Remove from lot / delete draft" style="border:none;background:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px;flex-shrink:0"
         onclick="deleteTrack('${esc(t.sku_root)}', ${lotId})"><i class="ti ti-trash"></i></button>
     </div>
-  `).join('')
+  `).join(''))
 }
 
 function closeLotPortal() {
@@ -2234,7 +2263,7 @@ function renderLotsSidebar(lots) {
     sidebar.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:12px;text-align:center">No lots yet</div>'
     return
   }
-  sidebar.innerHTML = lots.map(l => `
+  setHTML(sidebar, lots.map(l => `
     <div class="lots-sidebar-row" onclick="selectLot(${l.lot_id})" data-lot-id="${l.lot_id}"
       style="padding:10px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);transition:background .1s,color .1s">
       <div style="font-size:13px;font-weight:500;color:var(--text)">${esc(l.lot_name)}</div>
@@ -2243,7 +2272,7 @@ function renderLotsSidebar(lots) {
         ${l.sent_date ? ' · ' + new Date(l.sent_date).toISOString().slice(0,10) : ''}
       </div>
     </div>
-  `).join('')
+  `).join(''))
   // Hover style — sage palette matching intake
   sidebar.querySelectorAll('.lots-sidebar-row').forEach(el => {
     el.addEventListener('mouseenter', () => { if (!el.classList.contains('active-lot')) { el.style.background = '#6F927E'; el.style.color = '#fff' } })
@@ -2312,7 +2341,7 @@ async function selectLot(lotId) {
     if (!lot) { detail.innerHTML = '<div style="color:var(--text3)">Lot not found.</div>'; return }
 
     const tracks = trackRows || []
-    detail.innerHTML = `
+    setHTML(detail, `
     <div style="max-width:680px">
       <div style="background:#C0C9CD;padding:16px;border-radius:8px;margin-bottom:20px">
         <div style="font-size:20px;font-weight:700;margin-bottom:4px;color:#1a2226">${esc(lot.lot_name)}</div>
@@ -2380,14 +2409,14 @@ async function selectLot(lotId) {
            </div>`
       }
     </div>
-  `
+  `)
 
     // Initialize project list filtering
     setTimeout(() => updateLotProjectList(), 0)
   } catch (e) {
     console.error('[selectLot] error loading lot:', e.message)
     const detail = document.getElementById('lots-detail')
-    if (detail) detail.innerHTML = `<div style="color:var(--red);padding:20px">Error loading lot: ${e.message}</div>`
+    if (detail) setHTML(detail, `<div style="color:var(--red);padding:20px">Error loading lot: ${esc(e.message)}</div>`)
   }
 }
 
@@ -2525,7 +2554,7 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
   const clients = await pgQ(`SELECT id, name FROM clients WHERE active=true ORDER BY name`)
   const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}"${preSelectClient && c.name === preSelectClient ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
 
-  modal.innerHTML = `
+  setHTML(modal, `
     <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:340px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
       <div style="font-size:14px;font-weight:700">New Lot</div>
       <div>
@@ -2547,7 +2576,7 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
         <button class="btn" onclick="document.getElementById('create-lot-modal').remove()">Cancel</button>
         <button class="btn primary" onclick="submitCreateLot(${linkToProjectId||'null'})"><i class="ti ti-plus"></i> Create</button>
       </div>
-    </div>`
+    </div>`)
   document.body.appendChild(modal)
   setTimeout(() => modal.querySelector('#new-lot-client-input')?.focus(), 50)
   modal.querySelector('#new-lot-name-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitCreateLot(linkToProjectId||null) })
@@ -2928,7 +2957,7 @@ async function writeTrackToDB(trackData) {
       setTimeout(() => {
         const msg = document.createElement('div')
         msg.style.cssText = 'position:fixed;top:20px;left:50%;transform:translateX(-50%);background:var(--amber,#f90);color:#000;font-weight:700;font-size:13px;padding:12px 20px;border-radius:8px;z-index:99999;box-shadow:0 4px 16px rgba(0,0,0,.3)'
-        msg.innerHTML = `⚠ Lot <b>${esc(lc.lot_name)}</b> has reached its ${lc.track_limit}-track limit and has been closed. A new lot will be created for the next track.`
+        setHTML(msg, `⚠ Lot <b>${esc(lc.lot_name)}</b> has reached its ${lc.track_limit}-track limit and has been closed. A new lot will be created for the next track.`)
         document.body.appendChild(msg)
         setTimeout(() => msg.remove(), 8000)
       }, 500)
@@ -2954,7 +2983,7 @@ async function loadLotPortal(lotId) {
     el.innerHTML = '<span style="color:var(--text3)">No tracks logged in this lot yet.</span>'
     return
   }
-  el.innerHTML = rows.map(r => `
+  setHTML(el, rows.map(r => `
     <div style="display:flex;align-items:center;justify-content:space-between;padding:7px 0;border-bottom:0.5px solid var(--border)">
       <div style="min-width:0;flex:1">
         <div style="font-weight:600;font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${esc(r.title)}">${esc(r.title)}</div>
@@ -2963,7 +2992,7 @@ async function loadLotPortal(lotId) {
       </div>
       <button onclick="peekTitle('${esc(r.sku_root)}')" title="Peek" style="border:none;background:var(--bg2);border-radius:4px;padding:4px 7px;cursor:pointer;font-size:11px;color:var(--text2);margin-left:6px;flex-shrink:0"><i class="ti ti-eye"></i></button>
     </div>
-  `).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:8px;text-align:right">${rows.length} track${rows.length !== 1 ? 's' : ''}</div>`
+  `).join('') + `<div style="font-size:10px;color:var(--text3);margin-top:8px;text-align:right">${rows.length} track${rows.length !== 1 ? 's' : ''}</div>`)
 }
 
 async function peekTitle(skuRoot) {
@@ -3101,7 +3130,7 @@ async function peekTitle(skuRoot) {
 
   let editing = false
   function render() {
-    modal.innerHTML = `
+    setHTML(modal, `
       <div style="background:var(--bg);border-radius:12px;padding:24px;width:520px;max-width:95vw;max-height:85vh;overflow-y:auto;box-shadow:0 8px 40px rgba(0,0,0,.3)">
         <div style="display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:16px">
           <div>
@@ -3118,7 +3147,7 @@ async function peekTitle(skuRoot) {
           </div>
         </div>
         <div id="pe-body">${editing ? editBody() : readBody()}</div>
-      </div>`
+      </div>`)
   }
 
   window.peekStartEdit = () => { editing = true; render() }
@@ -3451,9 +3480,9 @@ end tell`
   }
   const appts = lines.filter(l => l[1] !== 'task').slice(0, 5)
   const tasks  = lines.filter(l => l[1] === 'task').slice(0, 3)
-  el.innerHTML =
-    appts.map(l => `<div class="row"><i class="ti ti-clock row-icon"></i><div class="row-main"><div class="row-title">${l[0]}</div><div class="row-sub">${l[1] || ''}</div></div></div>`).join('') +
-    tasks.map(l => `<div class="row"><i class="ti ti-checkbox row-icon"></i><div class="row-main"><div class="row-title">${l[0]}</div><div class="row-sub">Open task</div></div></div>`).join('')
+  setHTML(el,
+    appts.map(l => `<div class="row"><i class="ti ti-clock row-icon"></i><div class="row-main"><div class="row-title">${esc(l[0])}</div><div class="row-sub">${esc(l[1] || '')}</div></div></div>`).join('') +
+    tasks.map(l => `<div class="row"><i class="ti ti-checkbox row-icon"></i><div class="row-main"><div class="row-title">${esc(l[0])}</div><div class="row-sub">Open task</div></div></div>`).join(''))
 }
 
 async function loadDayliteSchedule() {
@@ -3532,11 +3561,11 @@ end tell`
     if (!byDay[day]) byDay[day] = []
     byDay[day].push({ title, time })
   })
-  el.innerHTML = Object.entries(byDay).sort((a,b) => +a[0] - +b[0]).map(([day, events]) => `
+  setHTML(el, Object.entries(byDay).sort((a,b) => +a[0] - +b[0]).map(([day, events]) => `
     <div style="margin-bottom:10px">
       <div style="font-size:10px;font-weight:600;color:var(--text3);text-transform:uppercase;margin-bottom:4px">${monthName} ${day}</div>
-      ${events.map(e => `<div class="row" style="padding:5px 0"><i class="ti ti-clock row-icon"></i><div class="row-main"><div class="row-title">${e.title}</div><div class="row-sub">${e.time}</div></div></div>`).join('')}
-    </div>`).join('')
+      ${events.map(e => `<div class="row" style="padding:5px 0"><i class="ti ti-clock row-icon"></i><div class="row-main"><div class="row-title">${esc(e.title)}</div><div class="row-sub">${esc(e.time)}</div></div></div>`).join('')}
+    </div>`).join(''))
 }
 
 async function loadDayliteContacts() {
@@ -3596,12 +3625,12 @@ let dayliteContacts = []
 function renderContactsGrid(contacts) {
   const q = (document.getElementById('contacts-search')?.value || '').toLowerCase()
   const filtered = q ? contacts.filter(c => c.name.toLowerCase().includes(q) || c.role.toLowerCase().includes(q)) : contacts
-  document.getElementById('contacts-grid').innerHTML = filtered.slice(0, 100).map(c => `
+  setHTML(document.getElementById('contacts-grid'), filtered.slice(0, 100).map(c => `
     <div class="contact-card" onclick="openDaylite()">
-      <div class="contact-av" style="background:${c.color}">${c.initials}</div>
-      <div class="contact-name">${c.name}</div>
-      <div class="contact-role">${c.role}</div>
-    </div>`).join('')
+      <div class="contact-av" style="background:${esc(c.color)}">${esc(c.initials)}</div>
+      <div class="contact-name">${esc(c.name)}</div>
+      <div class="contact-role">${esc(c.role)}</div>
+    </div>`).join(''))
 }
 
 function renderContactsFallback() {
@@ -3630,7 +3659,7 @@ async function loadClientsSection() {
     if (detail) detail.innerHTML = '<div style="padding:20px;color:var(--text3);text-align:center;font-size:13px">Select a client to get started</div>'
   } catch (e) {
     console.error('Error loading clients:', e)
-    document.getElementById('clients-sidebar-list').innerHTML = `<div style="color:red;padding:20px">Error loading clients: ${e.message}</div>`
+    setHTML(document.getElementById('clients-sidebar-list'), `<div style="color:red;padding:20px">Error loading clients: ${esc(e.message)}</div>`)
   }
 }
 
@@ -3639,9 +3668,9 @@ function renderClientItemsHTML(clients) {
   return clients.map(c => `
     <div class="client-item${currentClientId === c.id ? ' client-active' : ''}" data-clientid="${c.id}" id="client-${c.id}"
       style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);display:flex;flex-direction:column;gap:3px">
-      <div style="font-size:13px;font-weight:500;color:#1a2226">${c.name}</div>
-      ${c.contact ? `<div style="font-size:11px;color:#5a6b70">${c.contact}</div>` : ''}
-      <div style="font-size:10px;color:#5a6b70">${[c.city, c.state, c.country].filter(Boolean).join(', ')}</div>
+      <div style="font-size:13px;font-weight:500;color:#1a2226">${esc(c.name)}</div>
+      ${c.contact ? `<div style="font-size:11px;color:#5a6b70">${esc(c.contact)}</div>` : ''}
+      <div style="font-size:10px;color:#5a6b70">${[esc(c.city), esc(c.state), esc(c.country)].filter(Boolean).join(', ')}</div>
     </div>
   `).join('')
 }
@@ -3688,7 +3717,7 @@ function filterClientsList() {
   const finalFiltered = hideInactive ? filtered.filter(c => c.active) : filtered
 
   const list = document.getElementById('clients-sidebar-list')
-  list.innerHTML = finalFiltered.length ? renderClientItemsHTML(finalFiltered) : '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No results</div>'
+  setHTML(list, finalFiltered.length ? renderClientItemsHTML(finalFiltered) : '<div style="padding:20px 14px;font-size:12px;color:#1a2226;text-align:center">No results</div>')
   attachClientListHandlers()
 }
 
@@ -4020,7 +4049,7 @@ async function selectClientPlaylist(playlistId, playlistName) {
     }
   } catch (e) {
     console.error('Error loading playlist:', e)
-    document.getElementById('clients-detail').innerHTML = `<div style="color:red;padding:20px">Error loading playlist: ${e.message}</div>`
+    setHTML(document.getElementById('clients-detail'), `<div style="color:red;padding:20px">Error loading playlist: ${esc(e.message)}</div>`)
   }
 }
 
@@ -4121,7 +4150,7 @@ async function selectClientLot(lotId, lotName) {
     setTimeout(() => updateLotProjectList(), 0)
   } catch (e) {
     console.error('Error loading lot:', e)
-    document.getElementById('clients-detail').innerHTML = `<div style="color:red;padding:20px">Error loading lot: ${e.message}</div>`
+    setHTML(document.getElementById('clients-detail'), `<div style="color:red;padding:20px">Error loading lot: ${esc(e.message)}</div>`)
   }
 }
 
@@ -4372,7 +4401,7 @@ function renderComposerRows(rows) {
     tbody.innerHTML = '<tr><td colspan="7" style="padding:20px;text-align:center;color:var(--text-muted)">No composers found.</td></tr>'
     return
   }
-  tbody.innerHTML = rows.map(c => {
+  setHTML(tbody, rows.map(c => {
     const active = c.is_active !== false
     return `
     <tr style="border-bottom:1px solid var(--border);opacity:${active?'1':'0.45'}" onmouseenter="this.style.background='var(--hover)'" onmouseleave="this.style.background=''">
@@ -4394,7 +4423,7 @@ function renderComposerRows(rows) {
         <div id="teams-panel-${esc(c.composer_id)}" style="border-top:2px solid var(--accent, #e05);border-bottom:1px solid var(--border)"></div>
       </td>
     </tr>`
-  }).join('')
+  }).join(''))
 }
 
 function filterComposersBase(q) {
@@ -4965,9 +4994,9 @@ async function loadDeals() {
   const wrap = document.getElementById('deals-list')
   if (!wrap) return
   const r = await pgQ(`SELECT d.*, COUNT(dp.id) AS pub_count FROM deals d LEFT JOIN deal_publishers dp ON dp.deal_id = d.deal_id GROUP BY d.deal_id ORDER BY d.name`)
-  if (!r) { wrap.innerHTML = '<div style="color:#e53;font-size:13px">Error loading deals.</div>'; return }
-  if (!r.length) { wrap.innerHTML = '<div style="color:var(--text3);font-size:13px">No deals yet. Click + New Deal to create one.</div>'; return }
-  wrap.innerHTML = r.map(d => `
+  if (!r) { setHTML(wrap, '<div style="color:#e53;font-size:13px">Error loading deals.</div>'); return }
+  if (!r.length) { setHTML(wrap, '<div style="color:var(--text3);font-size:13px">No deals yet. Click + New Deal to create one.</div>'); return }
+  setHTML(wrap, r.map(d => `
     <div style="border:1px solid var(--border);border-radius:10px;margin-bottom:10px;overflow:hidden">
       <div style="display:flex;align-items:center;gap:10px;padding:12px 16px;background:var(--bg2)">
         <div style="flex:1">
@@ -4981,7 +5010,7 @@ async function loadDeals() {
       <div id="deal-pubs-${d.deal_id}" style="padding:8px 16px">
         <div style="color:var(--text3);font-size:12px">Loading…</div>
       </div>
-    </div>`).join('')
+    </div>`).join(''))
   // Load publishers for each deal
   for (const d of r) { loadDealPublishers(d.deal_id) }
 }
@@ -4990,7 +5019,7 @@ async function loadDealPublishers(dealId) {
   const wrap = document.getElementById(`deal-pubs-${dealId}`)
   if (!wrap) return
   const pubs = await pgQ(`SELECT * FROM deal_publishers WHERE deal_id=$1 ORDER BY id`, [dealId])
-  if (!pubs || !pubs.length) { wrap.innerHTML = '<div style="font-size:12px;color:var(--text3);padding:4px 0">No publishers added yet.</div>'; return }
+  if (!pubs || !pubs.length) { setHTML(wrap, '<div style="font-size:12px;color:var(--text3);padding:4px 0">No publishers added yet.</div>'); return }
   // Group by PRO for clean display
   const byPro = {}
   for (const p of pubs) {
@@ -5000,7 +5029,7 @@ async function loadDealPublishers(dealId) {
   }
   const proOrder = ['ASCAP','BMI','SESAC','GMR','OTHER']
   const proColor = { ASCAP:'#3b7dd8', BMI:'#e06c2a', SESAC:'#7b3fc4', GMR:'#2a9d62', OTHER:'#888' }
-  wrap.innerHTML = proOrder.filter(pro => byPro[pro]).map(pro => `
+  setHTML(wrap, proOrder.filter(pro => byPro[pro]).map(pro => `
     <div style="margin-bottom:8px">
       <div style="font-size:10px;font-weight:700;letter-spacing:.06em;color:${proColor[pro]};margin-bottom:4px">${pro}</div>
       ${byPro[pro].map(p => `
@@ -5009,7 +5038,7 @@ async function loadDealPublishers(dealId) {
           <span style="color:var(--text3);font-family:monospace;font-size:11px;min-width:90px">${esc(p.ipi||'—')}</span>
           <span style="font-weight:700;min-width:38px;text-align:right;color:var(--text)">${p.split_pct!=null?p.split_pct+'%':''}</span>
         </div>`).join('')}
-    </div>`).join('')
+    </div>`).join(''))
 }
 
 async function openDealModal(dealId) {
@@ -5106,7 +5135,7 @@ async function loadIPTeams(composerFilter) {
   if (!wrap) return
   wrap.innerHTML = '<span style="color:var(--text3)">Loading…</span>'
   try { await _loadIPTeams(composerFilter, wrap) } catch(e) {
-    wrap.innerHTML = `<span style="color:#e05;font-size:12px">JS Error: ${e.message}</span>`
+    setHTML(wrap, `<span style="color:#e05;font-size:12px">JS Error: ${esc(e.message)}</span>`)
     console.error('[loadIPTeams]', e)
   }
 }
@@ -6214,8 +6243,8 @@ async function showImportDescriptionsModal() {
   function updatePreview() {
     const skuCol = modal.querySelector('#desc-sku-col').value
     const descCol = modal.querySelector('#desc-desc-col').value
-    const sample = parsedRows.slice(0,2).map(r => `<b>${r[skuCol]}</b>: ${(r[descCol]||'').slice(0,60)}`).join('<br>')
-    modal.querySelector('#desc-preview').innerHTML = `${parsedRows.length.toLocaleString()} rows — sample:<br>${sample}`
+    const sample = parsedRows.slice(0,2).map(r => `<b>${esc(r[skuCol])}</b>: ${esc((r[descCol]||'').slice(0,60))}`).join('<br>')
+    setHTML(modal.querySelector('#desc-preview'), `${parsedRows.length.toLocaleString()} rows — sample:<br>${sample}`)
   }
 
   modal.querySelector('#desc-sku-col')?.addEventListener('change', updatePreview)
@@ -6457,7 +6486,7 @@ function updatePlaylistIndicator() {
     const trackList = document.getElementById('track-list')
     trackList?.parentElement?.insertBefore(ind, trackList)
   }
-  ind.innerHTML = `<i class="ti ti-circle-filled" style="font-size:8px;color:#4a7c59"></i> Green = already in <b>${activePlaylistName}</b> &nbsp;·&nbsp; <span id="playlist-indicator-count" style="color:var(--text)">${activePlaylistSkus.size} track${activePlaylistSkus.size !== 1 ? 's' : ''}</span>`
+  setHTML(ind, `<i class="ti ti-circle-filled" style="font-size:8px;color:#4a7c59"></i> Green = already in <b>${esc(activePlaylistName)}</b> &nbsp;·&nbsp; <span id="playlist-indicator-count" style="color:var(--text)">${activePlaylistSkus.size} track${activePlaylistSkus.size !== 1 ? 's' : ''}</span>`)
 }
 let showFlaggedOnly = false
 
@@ -7369,7 +7398,7 @@ async function checkTitleUnique(i) {
   const rows = await pgQ(`SELECT sku_root FROM titles WHERE lower(title)=lower($1) LIMIT 1`, [val])
   console.log(`[checkTitleUnique] rows=`, rows)
   if (rows && rows.length) {
-    warn.innerHTML = `⚠ This title already exists — ${rows[0].sku_root} — please rename`
+    setHTML(warn, `⚠ This title already exists — ${esc(rows[0].sku_root)} — please rename`)
     warn.style.cssText = 'display:block;font-size:11px;color:#fff;background:#c0392b;padding:5px 9px;border-radius:4px;margin-top:5px;font-weight:500;line-height:1.4'
     input.style.borderColor = '#c0392b'
   } else {
@@ -11012,7 +11041,7 @@ async function collectIntakeInfo() {
         el.value = suggested  // auto-fill the suggested rename
       }
       if (warn) {
-        warn.innerHTML = `⚠ <strong>Title taken</strong> — "${title}" already belongs to ${existingComposerId} (${sku}). Renamed to <em>${suggested}</em> — edit if needed.`
+        setHTML(warn, `⚠ <strong>Title taken</strong> — "${esc(title)}" already belongs to ${esc(existingComposerId)} (${esc(sku)}). Renamed to <em>${esc(suggested)}</em> — edit if needed.`)
         warn.style.cssText = 'display:block;font-size:11px;color:#fff;background:#c0392b;padding:5px 9px;border-radius:4px;margin-top:5px;font-weight:500;line-height:1.4'
       }
     })
@@ -11026,7 +11055,7 @@ async function collectIntakeInfo() {
       if (el) el.style.borderColor = '#c0392b'
       const warn = document.getElementById(`title-warn-${i}`)
       if (warn) {
-        warn.innerHTML = `⚠ <strong>Already in DB</strong> — ${sku}. Will check if files need copying.`
+        setHTML(warn, `⚠ <strong>Already in DB</strong> — ${esc(sku)}. Will check if files need copying.`)
         warn.style.cssText = 'display:block;font-size:11px;color:#fff;background:#c0782b;padding:5px 9px;border-radius:4px;margin-top:5px;font-weight:500;line-height:1.4'
       }
     })
@@ -11772,12 +11801,12 @@ async function dbConsoleRun() {
     })
     const data = await resp.json()
     if (!data.ok) {
-      el.innerHTML = `<span style="color:var(--red)">DB error: ${data.error || 'unknown'}</span>`
+      setHTML(el, `<span style="color:var(--red)">DB error: ${esc(data.error || 'unknown')}</span>`)
       return
     }
     const r = data.rows
     if (!r || !r.length) {
-      el.innerHTML = `<span style="color:var(--green)">✓ Done — ${data.rowCount ?? 0} row(s) affected</span>`
+      setHTML(el, `<span style="color:var(--green)">✓ Done — ${data.rowCount ?? 0} row(s) affected</span>`)
       return
     }
     const cols = Object.keys(r[0])
@@ -11794,7 +11823,7 @@ async function dbConsoleRun() {
         </table>
       </div>`
   } catch(e) {
-    el.innerHTML = `<span style="color:var(--red)">Error: ${e.message}</span>`
+    setHTML(el, `<span style="color:var(--red)">Error: ${esc(e.message)}</span>`)
   }
 }
 
@@ -12478,7 +12507,7 @@ async function selectProjectLot(lotId) {
       const badge = lot?.sent_date
         ? `<span style="background:#4a7c5930;color:#4a7c59;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Sent ${String(lot.sent_date).slice(0,10)}</span>`
         : `<span style="background:#c17a5e20;color:#c17a5e;font-size:10px;padding:1px 7px;border-radius:10px;margin-left:8px">Open</span>`
-      countEl.innerHTML = `<span style="font-weight:600">${lot?.lot_name||'Lot'}</span> · ${playlistTracks.length} tracks${badge}`
+      setHTML(countEl, `<span style="font-weight:600">${esc(lot?.lot_name||'Lot')}</span> · ${playlistTracks.length} tracks${badge}`)
     }
 
     console.log(`[selectProjectLot] loaded ${playlistTracks.length} tracks for lot ${lotId}`)
