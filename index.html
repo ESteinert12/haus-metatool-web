@@ -11532,30 +11532,6 @@ function skipIntakeDrop() {
 
 let intakeResults = []
 
-// ─── Contacts ──────────────────────────────────────────────
-const SAMPLE_CONTACTS = [
-  { name:'Netflix Licensing', role:'Sync client', tags:['sync','client'], initials:'NL', color:'#e8f0fe' },
-  { name:'HBO Music', role:'Sync client', tags:['sync','client'], initials:'HM', color:'#fce4ec' },
-  { name:'Ben Zwerin', role:'Composer · R13a', tags:['composer'], initials:'BZ', color:'#e8f5e9' },
-  { name:'R48a Composer', role:'Composer · R48a', tags:['composer'], initials:'R4', color:'#fff3e0' },
-  { name:'R03b Composer', role:'Composer · R03b', tags:['composer'], initials:'R3', color:'#f3e5f5' },
-  { name:'Apple Music', role:'Sync client', tags:['sync'], initials:'AM', color:'#e3f2fd' },
-]
-
-function renderContacts(filter = '') {
-  const q = filter.toLowerCase()
-  const filtered = q ? SAMPLE_CONTACTS.filter(c => c.name.toLowerCase().includes(q) || c.role.toLowerCase().includes(q)) : SAMPLE_CONTACTS
-  document.getElementById('contacts-grid').innerHTML = filtered.map(c => `
-    <div class="contact-card" onclick="openDaylite()">
-      <div class="contact-av" style="background:${c.color}">${c.initials}</div>
-      <div class="contact-name">${c.name}</div>
-      <div class="contact-role">${c.role}</div>
-      <div class="contact-tags">${c.tags.map(t => `<span class="pill gray">${t}</span>`).join('')}</div>
-    </div>`).join('')
-}
-
-function filterContacts(q) { renderContacts(q) }
-
 // ─── Deals kanban ──────────────────────────────────────────
 const DEALS_DATA = {
   'Prospect': [
