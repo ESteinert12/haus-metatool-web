@@ -10545,14 +10545,24 @@ async function executeIntake(snapshot = null) {
       const mkArchive = await window.haus.shell.exec(`mkdir -p "${archiveDir}"`)
       if (!mkArchive?.err) {
         const baseName = d.path.split('/').pop()
+        // Pick a destination that doesn't already exist. `mv src dest` where dest
+        // is an EXISTING DIRECTORY succeeds (exit 0) and moves src *inside* it —
+        // so re-processing a drop of the same name silently nests the archive
+        // (_PROCESSED/NAME/NAME/NAME/...) instead of erroring.
+        let destName = baseName
+        for (let n = 2; n <= 99; n++) {
+          const probe = await window.haus.shell.exec(`test -e "${archiveDir}/${destName}" && echo exists`)
+          if ((probe?.stdout || '').trim() !== 'exists') break
+          destName = `${baseName}_${n}`
+        }
         // Move (not delete) the source folder to archive
-        const mvR = await window.haus.shell.exec(`mv "${d.path}" "${archiveDir}/${baseName}"`)
+        const mvR = await window.haus.shell.exec(`mv "${d.path}" "${archiveDir}/${destName}"`)
         if (mvR?.err) {
-          console.warn(`[executeIntake] failed to move "${d.path}" to archive:`, mvR.err)
-          // Fallback to deletion if move fails (for safety)
-          await window.haus.shell.exec(`rm -rf "${d.path}"`)
+          // Do NOT delete the source here. If the move failed the files were never
+          // archived, so removing them destroys the only copy.
+          console.warn(`[executeIntake] failed to move "${d.path}" to archive — LEAVING IT IN PLACE:`, mvR.err)
         } else {
-          console.log(`[executeIntake] archived intake folder: ${archiveDir}/${baseName}`)
+          console.log(`[executeIntake] archived intake folder: ${archiveDir}/${destName}`)
         }
       } else {
         console.warn(`[executeIntake] could not create archive dir ${archiveDir}:`, mkArchive.err)
