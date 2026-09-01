@@ -10318,6 +10318,48 @@ async function executeIntake(snapshot = null) {
   const bgMode = !!snapshot
   try {
   const results = []
+  // Source folders we could not archive and deliberately did not delete
+  const _intakeUnarchived = []
+
+  // Where processed source folders go. Must be a SIBLING of the scan root, not
+  // inside it, or scanStagingForClient() picks the archived drops back up.
+  const _srcRoot = cfg.intake || cfg.staging || null
+  const _archiveDir = cfg.finish || (_srcRoot ? `${_srcRoot}/../_PROCESSED` : null)
+
+  // Archive a source drop folder. Never deletes: if it cannot be archived the
+  // folder is left where it is and recorded for the summary at the end.
+  const _archiveSource = async (srcPath) => {
+    if (!_archiveDir || _archiveDir === cfg.intake || _archiveDir === cfg.staging) {
+      console.warn(`[executeIntake] no archive folder configured — leaving source in place: ${srcPath}`)
+      _intakeUnarchived.push(srcPath)
+      return false
+    }
+    const mk = await window.haus.shell.exec(`mkdir -p "${_archiveDir}"`)
+    if (mk?.err) {
+      console.warn(`[executeIntake] could not create archive dir ${_archiveDir}:`, mk.err)
+      _intakeUnarchived.push(srcPath)
+      return false
+    }
+    // `mv src dest` where dest is an EXISTING DIRECTORY exits 0 and moves src
+    // *inside* it, which silently nests archives (NAME/NAME/NAME). Find a free name.
+    const baseName = srcPath.split('/').pop()
+    let destName = baseName
+    for (let n = 2; n <= 99; n++) {
+      const probe = await window.haus.shell.exec(`test -e "${_archiveDir}/${destName}" && echo exists`)
+      if ((probe?.stdout || '').trim() !== 'exists') break
+      destName = `${baseName}_${n}`
+    }
+    const mv = await window.haus.shell.exec(`mv "${srcPath}" "${_archiveDir}/${destName}"`)
+    if (mv?.err) {
+      // Do NOT delete here — a failed move means the files were never archived,
+      // so removing them destroys the only copy.
+      console.warn(`[executeIntake] failed to archive "${srcPath}" — LEAVING IT IN PLACE:`, mv.err)
+      _intakeUnarchived.push(srcPath)
+      return false
+    }
+    console.log(`[executeIntake] archived intake folder: ${_archiveDir}/${destName}`)
+    return true
+  }
   const batchIndices = snapshot
     ? snapshot.batchIndices
     : (intakeBatchMode
@@ -10391,7 +10433,9 @@ async function executeIntake(snapshot = null) {
               }
             }
           }
-          await window.haus.shell.exec(`rm -rf "${d.path}"`)
+          // Files are already in shipping, so this drop is redundant — but it may be
+          // a re-delivery of the same title, so archive it rather than deleting.
+          await _archiveSource(d.path)
           results.push({ name: title, sku: skuRoot, isJup: info.isJup, isDuplicate: true, skippedFiles: true })
           continue
         }
@@ -10557,44 +10601,21 @@ async function executeIntake(snapshot = null) {
     await window.haus.fs.writeFile(`${destDir}/${mdName}`, md)
 
     // Move source folder to archive/finished location instead of deleting
-    const archiveDir = cfg.finish || (cfg.intake ? `${cfg.intake}/../_PROCESSED` : null)
-    if (archiveDir && archiveDir !== cfg.intake) {
-      // Create archive folder if needed
-      const mkArchive = await window.haus.shell.exec(`mkdir -p "${archiveDir}"`)
-      if (!mkArchive?.err) {
-        const baseName = d.path.split('/').pop()
-        // Pick a destination that doesn't already exist. `mv src dest` where dest
-        // is an EXISTING DIRECTORY succeeds (exit 0) and moves src *inside* it —
-        // so re-processing a drop of the same name silently nests the archive
-        // (_PROCESSED/NAME/NAME/NAME/...) instead of erroring.
-        let destName = baseName
-        for (let n = 2; n <= 99; n++) {
-          const probe = await window.haus.shell.exec(`test -e "${archiveDir}/${destName}" && echo exists`)
-          if ((probe?.stdout || '').trim() !== 'exists') break
-          destName = `${baseName}_${n}`
-        }
-        // Move (not delete) the source folder to archive
-        const mvR = await window.haus.shell.exec(`mv "${d.path}" "${archiveDir}/${destName}"`)
-        if (mvR?.err) {
-          // Do NOT delete the source here. If the move failed the files were never
-          // archived, so removing them destroys the only copy.
-          console.warn(`[executeIntake] failed to move "${d.path}" to archive — LEAVING IT IN PLACE:`, mvR.err)
-        } else {
-          console.log(`[executeIntake] archived intake folder: ${archiveDir}/${destName}`)
-        }
-      } else {
-        console.warn(`[executeIntake] could not create archive dir ${archiveDir}:`, mkArchive.err)
-      }
-    } else {
-      // No archive configured — clean deletion as fallback
-      const rmR = await window.haus.shell.exec(`rm -rf "${d.path}"`)
-      if (rmR?.err) console.warn(`[executeIntake] rm -rf failed for "${d.path}":`, rmR.err)
-    }
+    await _archiveSource(d.path)
+
     // Always purge from staged_files DB cache by filepath (covers both cache and live-scan drops)
     fetch(`/api/staged-files/by-path?path=${encodeURIComponent(d.path)}`, { method: 'DELETE' }).catch(() => {})
     results.push({ name: title, sku: dbResult?.sku, isJup: info.isJup, isDuplicate: dbResult?.isDuplicate || false })
   }
   intakeResults = [...(intakeResults || []), ...results]
+
+  if (_intakeUnarchived.length) {
+    const msg = `Intake finished, but ${_intakeUnarchived.length} source folder(s) could not be archived and were ` +
+      `left in place:\n\n${_intakeUnarchived.join('\n')}\n\n` +
+      `Nothing was deleted. Check the "Finished / archive" folder setting, then move or re-run them.`
+    console.warn('[executeIntake]', msg)
+    if (!bgMode) alert(msg)
+  }
 
   if (!bgMode) {
     const batchSize = batchIndices.length
