@@ -18,3 +18,13 @@ node_modules/
 Thumbs.db
 .vscode/
 .idea/
+
+# Local backups made before edits (never commit)
+*.pre-*
+*.backup_*
+*.bak_*
+*.backup
+
+# Embedded copy of this same repo — tracked as a stray gitlink, now de-nested
+HAUS Workspace.app/Contents/Resources/haus-workspace/
+
