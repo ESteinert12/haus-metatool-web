@@ -10235,10 +10235,12 @@ function detectVersion(filename) {
 }
 
 function buildHausName(filename, title, info) {
-  // Use shared module logic from rename-validation.js
+  // Mirrors titleToCamelCase()/buildHausName() in rename-validation.js.
+  // NOTE: that module is currently inert (see the loader in <head>) — this is
+  // the implementation that actually runs, in both Electron and web mode.
   const ext = filename.split('.').pop().toLowerCase()
   const version = detectVersion(filename)
-  const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
+  const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('')
   const prefix = info.isJup ? 'HAUSJUP' : 'HAUS'
   return `${prefix}_${titleCamel}_${info.key}_${info.id}_${version}.${ext}`
 }
