@@ -7803,15 +7803,22 @@ function parseFolderName(name) {
   const segs = name.split('_')
   const composerID = segs[0] || ''
   const titleRaw = segs[1] || ''
-  const keyRaw = segs[2] || ''
-  const tagSegs = segs.slice(3) || []
 
-  let title = titleRaw, tag = tagSegs.join(' ').trim(), key = keyRaw
-
-  // Normalize key if present
-  if (keyRaw) {
-    key = normalizeKey(keyRaw)
+  // Segments after the title hold the KEY and TAGS in EITHER order — both
+  // R48a_TITLE_HEARTLAND_Bb and R48a_TITLE_D_HEARTLAND occur in staging.
+  // Match the key by pattern rather than by position; everything else is a tag.
+  // (The old code took segs[2] unconditionally, so "HEARTLAND" became the key,
+  //  and being truthy it also suppressed the _FULL.wav filename fallback.)
+  let key = ''
+  const tagSegs = []
+  for (const seg of segs.slice(2)) {
+    const s = seg.trim()
+    if (!s) continue
+    if (!key && KEY_RE.test(s) && !/^HAUS$/i.test(s)) key = normalizeKey(s)
+    else tagSegs.push(s)
   }
+
+  let title = titleRaw, tag = tagSegs.join(' ').trim()
 
   // Split CamelCase title segments into words: GoodNeighbor → Good Neighbor
   let humanTitle = title.trim()
