@@ -2917,7 +2917,11 @@ app.delete('/api/intake/draft/:key', (req, res) => {
 })
 
 // ─── Start ─────────────────────────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
+// Bind to loopback by default. cloudflared runs on this machine and reaches
+// the server at http://localhost:9999 (see ~/.cloudflared/config.yml), so the
+// tunnel is unaffected. Set HOST=0.0.0.0 to expose the port on the network.
+const HOST = process.env.HOST || '127.0.0.1'
+app.listen(PORT, HOST, () => {
   const ifaces = os.networkInterfaces()
   let localIP  = 'localhost'
   for (const iface of Object.values(ifaces)) {
@@ -2928,8 +2932,9 @@ app.listen(PORT, '0.0.0.0', () => {
   }
   console.log(`\n🎵 HAUS Workspace running`)
   console.log(`   Local:   http://localhost:${PORT}`)
-  console.log(`   Network: http://${localIP}:${PORT}`)
-  console.log(`\n   Share the Network URL with Kyle\n`)
+  console.log(`   Tunnel:  https://app.hausmusicplayer.com`)
+  if (HOST !== '127.0.0.1') console.log(`   Network: http://${localIP}:${PORT}  (exposed — HOST=${HOST})`)
+  console.log(`\n   Share the Tunnel URL with Kyle\n`)
 
   // ─── Auto-authorize B2 on startup ───────────────────────────────────────
   if (process.env.B2_APP_KEY_ID && process.env.B2_APP_KEY) {
