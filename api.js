@@ -2640,6 +2640,18 @@ async function startStagingWatcher(pool) {
     await processDrop(pool, mm, dirPath, lotFolder)
   })
 
+  // Removal is the other half. Without this the table only ever grows and the
+  // intake sidebar accumulates every folder that has ever passed through.
+  _watcher.on('unlinkDir', async dirPath => {
+    if (dirPath === stagingDir) return
+    if (!IS_DROP_FOLDER.test(path.basename(dirPath))) return
+    try {
+      const r = await pool.query(
+        `UPDATE staged_files SET status='gone' WHERE filepath=$1 AND status='pending'`, [dirPath])
+      if (r.rowCount) console.log(`[staging] ${path.basename(dirPath)} left staging - row retired`)
+    } catch (e) { console.warn('[staging] unlinkDir update failed:', e.message) }
+  })
+
   console.log(`👁 Staging watcher started: ${stagingDir}`)
 }
 
@@ -2650,7 +2662,25 @@ app.get('/api/staged-files', async (req, res) => {
     const r = await pgPool.query(
       `SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`
     )
-    res.json({ ok: true, files: r.rows })
+    // Reconcile against disk. The watcher is add-only (chokidar addDir), so a
+    // folder that left staging -- archived after intake, or moved by hand --
+    // leaves its row 'pending' forever and the intake sidebar keeps showing it.
+    // Anything whose filepath no longer exists is a ghost: retire it here so
+    // the list is always what is actually sitting in staging right now.
+    const live = [], ghosts = []
+    for (const row of r.rows) {
+      let exists = false
+      try { exists = !!row.filepath && fs.existsSync(row.filepath) } catch { exists = false }
+      if (exists) live.push(row); else ghosts.push(row.id)
+    }
+    if (ghosts.length) {
+      try {
+        await pgPool.query(
+          `UPDATE staged_files SET status='gone' WHERE id = ANY($1::int[])`, [ghosts])
+        console.log(`[staging] retired ${ghosts.length} stale staged_files row(s) (folder no longer on disk)`)
+      } catch (e) { console.warn('[staging] could not retire stale rows:', e.message) }
+    }
+    res.json({ ok: true, files: live, retired: ghosts.length })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
