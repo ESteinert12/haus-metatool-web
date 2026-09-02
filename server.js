@@ -218,6 +218,13 @@ async function runServerMigrations(pool) {
       })
       await pgPool.query('SELECT 1')
       console.log('✅ PostgreSQL connected')
+      // Keep-alive: Neon pooler drops idle connections after ~4 min, ping every 3 min
+      // Only start interval on first connection, not on reconnects
+      if (!global._pgKeepAliveInterval) {
+        global._pgKeepAliveInterval = setInterval(() => {
+          if (pgPool) pgPool.query('SELECT 1').catch(e => console.warn('[keep-alive] ping failed:', e.message))
+        }, 180000)
+      }
       await runServerMigrations(pgPool)
       startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
       break  // Success, exit retry loop
@@ -333,14 +340,10 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-app.post('/api/pg/query', async (req, res) => {
-  const { sql, params } = req.body
-  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
-  try {
-    const result = await pgPool.query(sql, params || [])
-    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
+// DELETED: /api/pg/query endpoint
+// REASON: SQL injection vulnerability — no safe way to accept arbitrary SQL
+// REPLACEMENT: Client should call specific API routes for data access
+//   e.g., /api/composers/list, /api/tracks/search, etc.
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
@@ -418,11 +421,40 @@ app.post('/api/fs/audio-status', async (req, res) => {
 
 app.post('/api/fs/count-files', (req, res) => {
   const { dirPath, ext } = req.body
+
+  // Input validation
+  if (typeof dirPath !== 'string' || typeof ext !== 'string') {
+    return res.status(400).json({ ok: false, error: 'Invalid input types' })
+  }
+  if (ext.length > 10 || ext.includes('/') || ext.includes('\\')) {
+    return res.status(400).json({ ok: false, error: 'Invalid extension' })
+  }
+
   try {
-    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
-    const result = execSync(cmd).toString().trim()
-    res.json(parseInt(result, 10))
-  } catch { res.json(0) }
+    // ✅ Use Node.js fs instead of shell commands
+    let count = 0
+    const walkDir = (dir) => {
+      try {
+        const files = fs.readdirSync(dir)
+        for (const file of files) {
+          const fullPath = require('path').join(dir, file)
+          const stat = fs.statSync(fullPath)
+          if (stat.isDirectory()) {
+            walkDir(fullPath)
+          } else if (!ext || file.endsWith(`.${ext}`)) {
+            count++
+          }
+        }
+      } catch (e) {
+        // Skip directories we can't read
+        console.warn(`[count-files] skipped: ${dir}`, e.message)
+      }
+    }
+    walkDir(dirPath)
+    res.json({ ok: true, count })
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e.message })
+  }
 })
 
 app.post('/api/fs/path-exists', (req, res) => {
@@ -625,15 +657,39 @@ app.get('/api/shell/app-path', (req, res) => {
 
 app.post('/api/shell/open-external', (req, res) => {
   const { url } = req.body
-  // On macOS server, open in default browser
-  exec(`open "${url}"`)
-  res.json({ ok: true })
+
+  // Validate URL format
+  try {
+    new URL(url)
+  } catch (e) {
+    return res.status(400).json({ ok: false, error: 'Invalid URL format' })
+  }
+
+  // ✅ Use execFile instead of exec — no shell interpretation
+  const { execFile } = require('child_process')
+  execFile('open', [url], { stdio: 'pipe' }, (err) => {
+    if (err) res.json({ ok: false, error: err.message })
+    else res.json({ ok: true })
+  })
 })
 
 app.post('/api/shell/show-in-finder', (req, res) => {
   const { filePath } = req.body
-  exec(`open -R "${filePath}"`)
-  res.json({ ok: true })
+
+  // Validate path is within home directory
+  const homeDir = require('os').homedir()
+  const resolvedPath = require('path').resolve(filePath)
+
+  if (!resolvedPath.startsWith(homeDir)) {
+    return res.status(403).json({ ok: false, error: 'Path outside home directory' })
+  }
+
+  // ✅ Use execFile instead of exec — no shell interpretation
+  const { execFile } = require('child_process')
+  execFile('open', ['-R', resolvedPath], { stdio: 'pipe' }, (err) => {
+    if (err) res.json({ ok: false, error: err.message })
+    else res.json({ ok: true })
+  })
 })
 
 // Folder picker — returns null in web mode (UI falls back to text input)
@@ -646,11 +702,13 @@ app.get('/api/shell/show-folder-picker', (req, res) => {
 const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
 
 app.get('/api/cfg/server-paths', (req, res) => {
+  console.log('[/api/cfg/server-paths] GET request received')
   const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
   let cfg = {}
   try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch {}
   const paths = {}
   for (const k of SERVER_PATH_KEYS) if (cfg[k]) paths[k] = cfg[k]
+  console.log('[/api/cfg/server-paths] Returning:', Object.keys(paths))
   res.json(paths)
 })
 
@@ -736,22 +794,10 @@ app.get('/api/audio/stream', async (req, res) => {
   }
 })
 
-// ─── Titles/Songs routes ───────────────────────────────────────────────────
-app.use('/api/titles', titlesRoutes)
-
-// ─── AppleScript route ─────────────────────────────────────────────────────
-app.post('/api/applescript', (req, res) => {
-  const { script } = req.body
-  const tmpFile = path.join(os.tmpdir(), `haus_as_${Date.now()}.applescript`)
-  try {
-    fs.writeFileSync(tmpFile, script, 'utf8')
-    exec(`osascript "${tmpFile}"`, { timeout: 15000 }, (err, stdout, stderr) => {
-      try { fs.unlinkSync(tmpFile) } catch {}
-      if (err) res.json({ error: err.message, stderr: stderr || '' })
-      else     res.json({ result: stdout.trim() })
-    })
-  } catch (e) { res.json({ error: e.message }) }
-})
+// DELETED: /api/applescript endpoint
+// REASON: Code injection vulnerability — no safe way to accept user-supplied AppleScript
+// AppleScript has full access to the macOS system and cannot be safely sandboxed
+// If needed in future, implement whitelist of safe operations only
 
 // ─── FileMaker routes ──────────────────────────────────────────────────────
 app.post('/api/fm/login', async (req, res) => {
@@ -872,7 +918,18 @@ app.get('/api/b2/stream', async (req, res) => {
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
         console.log(`[b2/stream] stub detected — serving local file: ${bodyStr}`)
-        let localPath = bodyStr
+
+        // ✅ SECURITY: Validate path is within allowed directories
+        const ALLOWED_BASE = '/Users/HAUS/Library/CloudStorage/Dropbox'
+        const resolvedPath = path.resolve(bodyStr)
+        const resolvedBase = path.resolve(ALLOWED_BASE)
+
+        if (!resolvedPath.startsWith(resolvedBase)) {
+          console.error(`[b2/stream] BLOCKED: Path outside allowed directory: ${bodyStr}`)
+          return res.status(403).json({ error: 'Path outside allowed directory' })
+        }
+
+        let localPath = resolvedPath
 
         // If exact file doesn't exist, search for alternatives (FULL > ALT > STING > BUMPER)
         if (!fs.existsSync(localPath)) {
@@ -1065,6 +1122,690 @@ app.post('/api/b2/list-files', async (req, res) => {
     if (result.status === 200) return res.json({ ok: true, files: result.body.files || [], nextFileName: result.body.nextFileName })
     res.json({ ok: false, error: result.body?.message || `HTTP ${result.status}` })
   } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// FULL AUDIT: List all files from B2 with sizes, match to database metadata
+app.get('/api/b2/full-audit', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
+
+  try {
+    console.log('[b2/full-audit] Starting comprehensive B2 audit...')
+
+    // Step 1: Get metadata map from database (single quick query)
+    let metadataMap = {}
+    if (pgPool) {
+      try {
+        const client = await pgPool.connect()
+        const result = await client.query(`
+          SELECT
+            ms.b2_key,
+            t.sku_root,
+            t.title,
+            t.composer_id
+          FROM mix_stems ms
+          LEFT JOIN titles t ON ms.sku_root = t.sku_root
+          WHERE ms.b2_key IS NOT NULL AND ms.b2_key != ''
+        `)
+        client.release()
+
+        result.rows.forEach(row => {
+          metadataMap[row.b2_key] = {
+            sku: row.sku_root,
+            title: row.title,
+            composer: row.composer_id
+          }
+        })
+        console.log(`[b2/full-audit] Loaded metadata for ${Object.keys(metadataMap).length} files`)
+      } catch (e) {
+        console.warn('[b2/full-audit] Database query failed, continuing without metadata:', e.message)
+      }
+    }
+
+    // Step 2: Get bucket ID (with timeout)
+    console.log('[b2/full-audit] Looking up bucket ID...')
+    let bucketId = null
+
+    try {
+      const apiHostname = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const bucketsPromise = _b2Request({
+        method: 'GET',
+        hostname: apiHostname,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Bucket lookup timeout')), 10000)
+      )
+
+      const bucketsResult = await Promise.race([bucketsPromise, timeoutPromise])
+
+      if (bucketsResult.status !== 200) {
+        throw new Error(`B2 returned ${bucketsResult.status}: ${bucketsResult.body?.message}`)
+      }
+
+      const hausMusicBucket = (bucketsResult.body.buckets || []).find(b => b.bucketName === 'haus-music')
+      if (!hausMusicBucket) {
+        throw new Error('Bucket haus-music not found')
+      }
+
+      bucketId = hausMusicBucket.bucketId
+      console.log(`[b2/full-audit] Found bucketId: ${bucketId}`)
+    } catch (e) {
+      console.warn(`[b2/full-audit] Bucket lookup failed: ${e.message}, using fallback...`)
+      // If bucket lookup fails, we'll try list_file_names without specifying bucket
+      // and parse the path prefix instead
+    }
+
+    if (!bucketId) {
+      return res.json({ ok: false, error: 'Could not determine bucket ID. B2 API may be slow - try again in a moment.' })
+    }
+
+    // Step 3: List all files from B2
+    console.log('[b2/full-audit] Fetching file listing from B2...')
+    const stubs = []
+    const realAudio = []
+    let allB2Files = []
+    let nextFileName = null
+    let pageNum = 0
+
+    while (true) {
+      pageNum++
+      const params = new URLSearchParams({
+        bucketId: bucketId,
+        maxFileCount: '10000'
+      })
+      if (nextFileName) params.append('startFileName', nextFileName)
+
+      const apiHostname = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const listResult = await _b2Request({
+        method: 'GET',
+        hostname: apiHostname,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+
+      if (listResult.status !== 200) {
+        console.error(`[b2/full-audit] B2 list failed: ${listResult.status}`, listResult.body)
+        return res.json({ ok: false, error: `B2 list failed: ${listResult.body?.message || listResult.status}` })
+      }
+
+      const files = listResult.body.files || []
+      console.log(`[b2/full-audit] Page ${pageNum}: Got ${files.length} files`)
+      allB2Files = allB2Files.concat(files)
+
+      nextFileName = listResult.body.nextFileName
+      if (!nextFileName) break
+
+      // Delay between pages
+      await new Promise(resolve => setTimeout(resolve, 100))
+    }
+
+    console.log(`[b2/full-audit] Total B2 files: ${allB2Files.length}`)
+
+    // Step 4: Classify files
+    allB2Files.forEach(file => {
+      const size = file.contentLength || 0
+      const b2Key = file.fileName
+      const meta = metadataMap[b2Key] || {}
+      const collection = b2Key.includes('/') ? b2Key.split('/')[0].toUpperCase() : 'OTHER'
+
+      if (size < 1048576 && size > 0) { // < 1MB
+        stubs.push({
+          b2_key: b2Key,
+          sku: meta.sku || '',
+          title: meta.title || '',
+          composer: meta.composer || '',
+          collection: collection,
+          size: size
+        })
+      } else if (size >= 1048576) {
+        realAudio.push({
+          b2_key: b2Key,
+          size: size
+        })
+      }
+    })
+
+    console.log(`[b2/full-audit] Complete: Real: ${realAudio.length}, Stubs: ${stubs.length}`)
+
+    // Step 5: Save CSV
+    const csvPath = path.join(os.homedir(), 'Desktop', 'B2_FULL_STUB_AUDIT.csv')
+    const csvHeader = 'Composer ID,Song Title,SKU,Collection,File Size (bytes),B2 Path\n'
+    const csvRows = stubs.map(s =>
+      `"${s.composer || ''}","${s.title || ''}","${s.sku || ''}","${s.collection}",${s.size},"${s.b2_key}"`
+    ).join('\n')
+    fs.writeFileSync(csvPath, csvHeader + csvRows)
+    console.log(`[b2/full-audit] CSV saved to ${csvPath}`)
+
+    res.json({
+      ok: true,
+      audit: {
+        totalB2Files: allB2Files.length,
+        realAudio: realAudio.length,
+        stubs: stubs.length,
+        stubDetails: stubs.slice(0, 100),
+        csvPath: csvPath,
+        summary: {
+          byCollection: Object.fromEntries(
+            Object.entries(stubs.reduce((acc, s) => {
+              acc[s.collection] = (acc[s.collection] || 0) + 1
+              return acc
+            }, {}))
+          ),
+          topComposers: Object.entries(
+            stubs.reduce((acc, s) => {
+              acc[s.composer] = (acc[s.composer] || 0) + 1
+              return acc
+            }, {})
+          ).sort((a, b) => b[1] - a[1]).slice(0, 15)
+        }
+      }
+    })
+  } catch (e) {
+    console.error('[b2/full-audit] Error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// BATCH UPLOAD: Upload 800 fixable stubs from SHIPPING to B2
+app.get('/api/b2/batch-upload-shipping', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
+
+  console.log('[b2/batch-upload-shipping] Starting batch upload...')
+
+  try {
+    const csvPath = path.join(os.homedir(), 'Documents/Claude/Projects/ATMOSPHERE/B2_FIXABLE_FROM_SHIPPING.csv')
+    const shippingRoot = path.join(os.homedir(), 'Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping')
+
+    if (!fs.existsSync(csvPath)) {
+      return res.json({ ok: false, error: 'CSV not found' })
+    }
+
+    // Get bucket ID
+    console.log('[b2/batch-upload-shipping] Looking up bucket ID...')
+    const apiHostname = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const bucketsResult = await _b2Request({
+      method: 'GET',
+      hostname: apiHostname,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken }
+    })
+
+    if (bucketsResult.status !== 200) {
+      return res.json({ ok: false, error: `Failed to list buckets: ${bucketsResult.body?.message}` })
+    }
+
+    const hausMusicBucket = (bucketsResult.body.buckets || []).find(b => b.bucketName === 'haus-music')
+    if (!hausMusicBucket) {
+      return res.json({ ok: false, error: 'Bucket haus-music not found' })
+    }
+
+    const bucketId = hausMusicBucket.bucketId
+    console.log(`[b2/batch-upload-shipping] Found bucketId: ${bucketId}`)
+
+    const csvContent = fs.readFileSync(csvPath, 'utf8')
+    const lines = csvContent.split('\n').filter(l => l.trim())
+
+    const uploadQueue = []
+    const skuVersionSeen = new Set()
+    let uploadCount = 0
+    let errorCount = 0
+
+    // Parse CSV and build upload queue
+    for (const line of lines) {
+      // Extract fields between quotes: "field1","field2",...
+      const fields = []
+      let inQuote = false
+      let currentField = ''
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i]
+        if (char === '"') {
+          inQuote = !inQuote
+        } else if (char === ',' && !inQuote) {
+          fields.push(currentField)
+          currentField = ''
+        } else {
+          currentField += char
+        }
+      }
+      fields.push(currentField)
+
+      if (fields.length < 6) continue
+
+      const sku = fields[2].trim()
+      const b2Path = fields[5].trim()
+
+      if (!sku || !b2Path) continue
+
+      // Extract version from b2_key: HAUS_..._VERSION.ext
+      const versionMatch = b2Path.match(/_([A-Z][A-Za-z0-9]*)\.(?:wav|mp3|aiff)$/i)
+      const version = versionMatch ? versionMatch[1] : null
+      if (!version) continue
+
+      const key = `${sku}_${version}`
+      if (skuVersionSeen.has(key)) continue
+      skuVersionSeen.add(key)
+
+      // Find source file in SHIPPING
+      const shippingFolders = ['260708_TEXAS WIVES_3', '260729_TEXAS WIVES_6', 'CORRECTIONS', 'MIGRATE']
+      let sourceFile = null
+
+      for (const folder of shippingFolders) {
+        const folderPath = path.join(shippingRoot, folder)
+        if (!fs.existsSync(folderPath)) continue
+
+        const entries = fs.readdirSync(folderPath, { withFileTypes: true })
+        for (const entry of entries) {
+          if (entry.isDirectory() && entry.name.startsWith(sku)) {
+            const skuPath = path.join(folderPath, entry.name)
+            const files = fs.readdirSync(skuPath)
+            const versionPattern = new RegExp(`_${version}\\.(wav|mp3|aiff)$`, 'i')
+            const matchedFile = files.find(f => versionPattern.test(f))
+
+            if (matchedFile) {
+              sourceFile = path.join(skuPath, matchedFile)
+              break
+            }
+          }
+        }
+        if (sourceFile) break
+      }
+
+      if (sourceFile) {
+        uploadQueue.push({ sku, version, sourceFile, b2Path })
+      }
+    }
+
+    console.log(`[b2/batch-upload-shipping] Found ${uploadQueue.length} files to upload`)
+
+    // Upload in batches
+    const batchSize = 10
+    for (let i = 0; i < uploadQueue.length; i += batchSize) {
+      const batch = uploadQueue.slice(i, i + batchSize)
+
+      const promises = batch.map(async (item) => {
+        try {
+          const fileData = fs.readFileSync(item.sourceFile)
+
+          // Use b2_get_upload_url to get the actual upload endpoint
+          const urlRes = await _b2Request({
+            method: 'POST',
+            hostname: apiHostname,
+            urlPath: '/b2api/v3/b2_get_upload_url',
+            headers: { 'Authorization': b2Auth.authorizationToken },
+            body: { bucketId: bucketId }
+          })
+
+          if (urlRes.status !== 200) {
+            if (errorCount < 3) {
+              console.log(`[b2/batch-upload-shipping] Upload URL failed: ${urlRes.status}`, urlRes.body?.message)
+            }
+            errorCount++
+            return
+          }
+
+          const uploadUrl = urlRes.body.uploadUrl
+          const uploadHostname = uploadUrl.replace(/^https?:\/\//, '').split('/')[0]
+          const uploadPath = uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+
+          // Upload to the provided URL
+          const uploadRes = await _b2Request({
+            method: 'POST',
+            hostname: uploadHostname,
+            urlPath: uploadPath,
+            headers: {
+              'Authorization': urlRes.body.authorizationToken,
+              'X-Bz-File-Name': item.b2Path,
+              'X-Bz-Content-Type': 'application/octet-stream',
+              'Content-Length': fileData.length
+            },
+            body: fileData,
+            isBuffer: true
+          })
+
+          if (uploadRes.status === 200) {
+            uploadCount++
+          } else {
+            if (errorCount < 3) {
+              console.log(`[b2/batch-upload-shipping] Upload failed: ${uploadRes.status}`, uploadRes.body?.message)
+            }
+            errorCount++
+          }
+        } catch (e) {
+          if (errorCount < 3) {
+            console.log(`[b2/batch-upload-shipping] Error: ${e.message}`)
+          }
+          errorCount++
+        }
+      })
+
+      await Promise.all(promises)
+
+      console.log(`[b2/batch-upload-shipping] Batch ${Math.floor(i/batchSize)+1}: ${uploadCount} uploaded, ${errorCount} errors`)
+
+      if (i + batchSize < uploadQueue.length) {
+        await new Promise(resolve => setTimeout(resolve, 500))
+      }
+    }
+
+    console.log(`[b2/batch-upload-shipping] Complete: ${uploadCount} uploaded, ${errorCount} errors`)
+    res.json({
+      ok: true,
+      uploaded: uploadCount,
+      errors: errorCount,
+      total: uploadQueue.length
+    })
+
+  } catch (e) {
+    console.error('[b2/batch-upload-shipping] Error:', e.message)
+    res.write(`{"error":"${e.message}"}\n`)
+    res.write(']}\n')
+    res.end()
+  }
+})
+
+// RECOVERY: Download real WAV files from old Dropbox, upload to B2 to fix stubs
+// Processes composer-by-composer for manageable batches
+app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
+
+  const dropboxToken = process.env.DROPBOX_OLD_TOKEN
+  if (!dropboxToken) return res.json({ ok: false, error: 'DROPBOX_OLD_TOKEN not set' })
+
+  console.log('[b2/recovery] Starting WAV file recovery from old Dropbox (composer-by-composer)...')
+
+  try {
+    const csvPath = path.join(os.homedir(), 'Documents/Claude/Projects/ATMOSPHERE/B2_FULL_STUB_AUDIT.csv')
+    if (!fs.existsSync(csvPath)) {
+      return res.json({ ok: false, error: 'Stub CSV not found' })
+    }
+
+    // Parse stubs to get unique composers and their SKUs
+    const stubContent = fs.readFileSync(csvPath, 'utf8')
+    const composerSkus = {} // { 'R13': [SKUs], 'R46': [SKUs], ... }
+
+    for (const line of stubContent.split('\n')) {
+      if (!line.trim()) continue
+      const fields = []
+      let inQuote = false, current = ''
+      for (let i = 0; i < line.length; i++) {
+        const char = line[i]
+        if (char === '"') inQuote = !inQuote
+        else if (char === ',' && !inQuote) { fields.push(current); current = '' }
+        else current += char
+      }
+      fields.push(current)
+
+      if (fields.length >= 3) {
+        const sku = fields[2].trim()
+        if (sku && sku.length >= 3) {
+          const composerId = sku.substring(0, 3) // R13, R46, S33, etc.
+          if (!composerSkus[composerId]) composerSkus[composerId] = new Set()
+          composerSkus[composerId].add(sku)
+        }
+      }
+    }
+
+    const composers = Object.keys(composerSkus).sort()
+    console.log(`[b2/recovery] Found ${composers.length} composers with stubs to recover`)
+    console.log(`[b2/recovery] Sample composers: ${composers.slice(0, 10).join(', ')}`)
+
+    // List composer folders in old Dropbox
+    console.log('[b2/recovery] Scanning old Dropbox ARCHIVE folders by composer...')
+
+    let foundCount = 0
+    let checkedComposers = 0
+    let allFolders = []
+
+    // Check each ARCHIVE collection (with number prefixes)
+    const archiveCollections = ['1. ARCHIVE_Stratus', '2. ARCHIVE_Cumulus', '3. ARCHIVE_Cirrus', '4. ARCHIVE_Nimbus']
+
+    for (const collection of archiveCollections) {
+      try {
+        const listRes = await _b2Request({
+          method: 'POST',
+          hostname: 'api.dropboxapi.com',
+          urlPath: '/2/files/list_folder',
+          headers: {
+            'Authorization': `Bearer ${dropboxToken}`,
+            'Content-Type': 'application/json'
+          },
+          body: { path: `/${collection}` }
+        })
+
+        if (listRes.status === 200 && listRes.body.entries) {
+          console.log(`[b2/recovery]   ${collection}: ${listRes.body.entries.length} entries`)
+          for (const entry of listRes.body.entries) {
+            allFolders.push(`${entry.name} (${entry['.tag']})`)
+            if (entry['.tag'] === 'folder' && entry.name) {
+              // Extract composer ID from folder name (e.g., "R13_Christos Andreou_STRATUS" -> "R13")
+              const match = entry.name.match(/^([A-Z]\d+)/)
+              if (match) {
+                const composerId = match[1]
+                if (composerSkus[composerId]) {
+                  foundCount++
+                  checkedComposers++
+                  if (checkedComposers <= 10) {
+                    console.log(`[b2/recovery]     ✓ ${entry.name}`)
+                  }
+                }
+              }
+            }
+          }
+        } else {
+          console.log(`[b2/recovery]   ${collection}: list returned ${listRes.status}`)
+          console.log(`[b2/recovery]     Error: ${JSON.stringify(listRes.body)}`)
+        }
+      } catch (e) {
+        console.log(`[b2/recovery] List error in ${collection}: ${e.message}`)
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 200))
+    }
+
+    console.log(`[b2/recovery] Sample folders found: ${allFolders.slice(0, 5).join(', ')}`)
+
+    console.log(`[b2/recovery] Found ${foundCount} composer folders in old Dropbox`)
+
+    res.json({
+      ok: true,
+      status: 'recovery_ready',
+      totalComposers: composers.length,
+      foundInDropbox: foundCount,
+      skusToRecover: Object.values(composerSkus).reduce((sum, set) => sum + set.size, 0),
+      message: `Ready to recover ${Object.values(composerSkus).reduce((sum, set) => sum + set.size, 0)} WAV files from ${foundCount} composer folders`,
+      nextStep: 'Call /api/b2/start-recovery to begin downloading and uploading files (runs in background)'
+    })
+
+  } catch (e) {
+    console.error('[b2/recovery] Error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// START RECOVERY: Download from old Dropbox, upload to B2 (runs in background)
+app.get('/api/b2/start-recovery', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
+
+  const dropboxToken = process.env.DROPBOX_OLD_TOKEN
+  if (!dropboxToken) return res.json({ ok: false, error: 'DROPBOX_OLD_TOKEN not set' })
+
+  // Return immediately - recovery runs in background
+  res.json({ ok: true, status: 'recovery_started', message: 'Download/upload started. Check server logs for progress.' })
+
+  // Run recovery in background (no await)
+  ;(async () => {
+    console.log('\n' + '='.repeat(70))
+    console.log('[RECOVERY] WAV File Recovery - Download from Old Dropbox, Upload to B2')
+    console.log('='.repeat(70))
+
+    try {
+      const tmpDir = path.join(os.tmpdir(), 'haus-recovery')
+      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true })
+
+      const archiveCollections = ['1. ARCHIVE_Stratus', '2. ARCHIVE_Cumulus', '3. ARCHIVE_Cirrus', '4. ARCHIVE_Nimbus']
+      let uploadedCount = 0
+      let errorCount = 0
+
+      for (const collection of archiveCollections) {
+        console.log(`\n[RECOVERY] Processing ${collection}...`)
+
+        try {
+          // List composer folders
+          const listRes = await _b2Request({
+            method: 'POST',
+            hostname: 'api.dropboxapi.com',
+            urlPath: '/2/files/list_folder',
+            headers: {
+              'Authorization': `Bearer ${dropboxToken}`,
+              'Content-Type': 'application/json'
+            },
+            body: { path: `/${collection}` }
+          })
+
+          if (listRes.status !== 200 || !listRes.body.entries) {
+            console.log(`[RECOVERY] Failed to list ${collection}`)
+            continue
+          }
+
+          const composerFolders = listRes.body.entries.filter(e => e['.tag'] === 'folder')
+          console.log(`[RECOVERY] Found ${composerFolders.length} composer folders`)
+
+          // Process each composer
+          for (const composer of composerFolders) {
+            const composerPath = `/${collection}/${composer.name}`
+
+            try {
+              // List files in composer folder
+              const filesRes = await _b2Request({
+                method: 'POST',
+                hostname: 'api.dropboxapi.com',
+                urlPath: '/2/files/list_folder',
+                headers: {
+                  'Authorization': `Bearer ${dropboxToken}`,
+                  'Content-Type': 'application/json'
+                },
+                body: { path: composerPath }
+              })
+
+              if (filesRes.status !== 200 || !filesRes.body.entries) continue
+
+              // Find WAV files in subfolders
+              const wavFiles = []
+              for (const entry of filesRes.body.entries) {
+                if (entry['.tag'] === 'folder') {
+                  // List files in song folder
+                  const songFilesRes = await _b2Request({
+                    method: 'POST',
+                    hostname: 'api.dropboxapi.com',
+                    urlPath: '/2/files/list_folder',
+                    headers: {
+                      'Authorization': `Bearer ${dropboxToken}`,
+                      'Content-Type': 'application/json'
+                    },
+                    body: { path: entry.path_display }
+                  })
+
+                  if (songFilesRes.status === 200 && songFilesRes.body.entries) {
+                    for (const file of songFilesRes.body.entries) {
+                      if (file.name && file.name.endsWith('.wav')) {
+                        wavFiles.push(file)
+                      }
+                    }
+                  }
+                }
+              }
+
+              if (wavFiles.length === 0) continue
+
+              console.log(`[RECOVERY]   ${composer.name}: ${wavFiles.length} WAV files`)
+
+              // Download and upload each WAV file
+              for (const wavFile of wavFiles) {
+                try {
+                  // Download from Dropbox
+                  const dlRes = await _b2Request({
+                    method: 'POST',
+                    hostname: 'content.dropboxapi.com',
+                    urlPath: '/2/files/download',
+                    headers: {
+                      'Authorization': `Bearer ${dropboxToken}`,
+                      'Dropbox-API-Arg': JSON.stringify({ path: wavFile.path_display })
+                    }
+                  })
+
+                  if (dlRes.status !== 200) {
+                    errorCount++
+                    continue
+                  }
+
+                  // Save locally
+                  const localPath = path.join(tmpDir, wavFile.name)
+                  fs.writeFileSync(localPath, dlRes.body)
+
+                  // Upload to B2
+                  const uploadUrl = `${collection}/${composer.name}/${wavFile.name}`
+
+                  const urlRes = await _b2Request({
+                    method: 'POST',
+                    hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+                    urlPath: '/b2api/v3/b2_get_upload_url',
+                    headers: { 'Authorization': b2Auth.authorizationToken },
+                    body: { bucketId: b2Auth.allowed?.bucketId }
+                  })
+
+                  if (urlRes.status === 200) {
+                    const uploadUrlStr = urlRes.body.uploadUrl
+                    const uploadHostname = uploadUrlStr.replace(/^https?:\/\//, '').split('/')[0]
+                    const uploadPath = uploadUrlStr.replace(/^https?:\/\/[^/]+/, '')
+                    const fileData = fs.readFileSync(localPath)
+
+                    const uploadRes = await _b2Request({
+                      method: 'POST',
+                      hostname: uploadHostname,
+                      urlPath: uploadPath,
+                      headers: {
+                        'Authorization': urlRes.body.authorizationToken,
+                        'X-Bz-File-Name': uploadUrl,
+                        'X-Bz-Content-Type': 'application/octet-stream',
+                        'Content-Length': fileData.length
+                      },
+                      body: fileData,
+                      isBuffer: true
+                    })
+
+                    if (uploadRes.status === 200) {
+                      uploadedCount++
+                    } else {
+                      errorCount++
+                    }
+                  }
+
+                  // Clean up
+                  try { fs.unlinkSync(localPath) } catch (e) {}
+                } catch (e) {
+                  errorCount++
+                }
+              }
+            } catch (e) {
+              console.log(`[RECOVERY]   Error processing ${composer.name}: ${e.message}`)
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 100))
+          }
+        } catch (e) {
+          console.log(`[RECOVERY] Error with ${collection}: ${e.message}`)
+        }
+      }
+
+      console.log('\n' + '='.repeat(70))
+      console.log(`[RECOVERY] COMPLETE: ${uploadedCount} uploaded, ${errorCount} errors`)
+      console.log('='.repeat(70) + '\n')
+    } catch (e) {
+      console.error('[RECOVERY] Fatal error:', e.message)
+    }
+  })()
 })
 
 // DATABASE AUDIT: Query mix_stems for all b2_keys and check file sizes in B2
@@ -1831,7 +2572,10 @@ async function startStagingWatcher(pool) {
 app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const r = await pgPool.query(`SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`)
+    // Return all files (pending, imported, etc.) so import-metadata can find them
+    const r = await pgPool.query(
+      `SELECT * FROM staged_files ORDER BY arrived_at ASC`
+    )
     res.json({ ok: true, files: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -1854,6 +2598,142 @@ app.delete('/api/staged-files/by-path', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
+// Import metadata from .md file and move to shipping
+app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const { id } = req.params
+
+    // Get the staged file record
+    const r = await pgPool.query(`SELECT * FROM staged_files WHERE id=$1`, [id])
+    if (!r.rows.length) return res.json({ ok: false, error: 'Staged file not found' })
+    const record = r.rows[0]
+    const stagingPath = record.filepath
+    console.log('[import] Staged record:', { id: record.id, filename: record.filename, filepath: stagingPath })
+
+    // Find the .md file in the folder
+    let mdFile = null
+    let files = []
+    try {
+      console.log('[import] Attempting to read:', stagingPath)
+      files = fs.readdirSync(stagingPath)
+      console.log('[import] Files found:', files.length, files.slice(0, 5))
+      mdFile = files.find(f => f.endsWith('.md'))
+    } catch (e) {
+      console.warn('[import] Could not read folder:', stagingPath, e.message)
+    }
+    if (!mdFile) {
+      console.warn('[import] No .md file found. Files in folder:', files)
+      return res.json({ ok: false, error: 'No .md file found in folder. Files: ' + files.slice(0, 5).join(', ') })
+    }
+
+    // Parse the .md file
+    const mdPath = path.join(stagingPath, mdFile)
+    let mdContent = ''
+    try { mdContent = fs.readFileSync(mdPath, 'utf8') } catch { }
+
+    // Extract fields from markdown (key: value format)
+    const metadata = {}
+    const lines = mdContent.split('\n')
+    for (const line of lines) {
+      const match = line.match(/^\*\*([^:]+):\*\*\s*(.+)$/)
+      if (match) {
+        const key = match[1].trim().toLowerCase().replace(/\s+/g, '_')
+        const val = match[2].trim()
+        metadata[key] = val
+      }
+    }
+
+    // Extract SKU from metadata
+    const sku = metadata.sku || null
+    const genre = metadata.genre || metadata.genre_1 || null
+    const genre2 = metadata.genre_2 || null
+    const key = metadata.key || null
+    const bpm = metadata.bpm ? parseInt(metadata.bpm, 10) : null
+    const type = metadata.type || null
+    const ksl = metadata.ksl || null
+    const mmw = metadata.mmw || null
+    const vocals = metadata.vocals || null
+    const description = metadata.description || null
+    const dateIntake = metadata.date_intake || null
+
+    if (!sku) return res.json({ ok: false, error: 'SKU not found in .md file' })
+
+    // Update staged_files with extracted metadata (store extra fields in raw_tags)
+    const rawTags = record.raw_tags || {}
+    rawTags.sku = sku
+    rawTags.type = type
+    rawTags.ksl = ksl
+    rawTags.mmw = mmw
+    rawTags.genre2 = genre2
+    rawTags.vocals = vocals
+    rawTags.description = description
+    rawTags.date_intake = dateIntake
+
+    await pgPool.query(`
+      UPDATE staged_files SET
+        genre = COALESCE($1, genre),
+        key = COALESCE($2, key),
+        bpm = COALESCE($3, bpm),
+        raw_tags = $4,
+        status = 'imported'
+      WHERE id = $5
+    `, [genre, key, bpm, JSON.stringify(rawTags), id])
+
+    // Try to add to lot if lotFolder is specified in raw_tags
+    const lotFolder = rawTags.lotFolder || record.raw_tags?.lotFolder
+    if (lotFolder) {
+      try {
+        // Find the lot_id by folder name (search in lot_name using LIKE)
+        const lotRes = await pgPool.query(
+          `SELECT lot_id FROM lots WHERE lot_name LIKE '%' || $1 || '%' LIMIT 1`,
+          [lotFolder]
+        )
+        if (lotRes.rows.length > 0) {
+          const lotId = lotRes.rows[0].lot_id
+          // Insert into lot_titles with the extracted SKU
+          await pgPool.query(`
+            INSERT INTO lot_titles (lot_id, sku_root, status)
+            VALUES ($1, $2, 'active')
+            ON CONFLICT (lot_id, sku_root) DO UPDATE SET status='active'
+          `, [lotId, sku]).catch(() => {})
+        }
+      } catch (e) {
+        console.warn('[import-metadata] Could not add to lot:', e.message)
+        // Don't fail the response, metadata was already imported
+      }
+    }
+
+    // Move folder from STAGING to SHIPPING
+    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+    let cfg = {}
+    try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch { }
+    const stagingDir = cfg.staging
+    const shippingDir = cfg.shipping
+
+    if (!stagingDir || !shippingDir) {
+      return res.json({ ok: false, error: 'Staging or shipping path not configured' })
+    }
+
+    const folderName = path.basename(stagingPath)
+    const newPath = path.join(shippingDir, folderName)
+
+    // Move folder (async, don't block response)
+    try {
+      execSync(`mv "${stagingPath}" "${newPath}"`, { stdio: 'pipe' })
+      console.log(`✅ Moved ${folderName} to shipping`)
+    } catch (e) {
+      console.warn(`⚠ Failed to move folder to shipping:`, e.message)
+      // Don't fail the response, metadata was already imported
+    }
+
+    res.json({ ok: true, sku, genre, key, bpm, type })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// Restart watcher when staging path changes
 app.post('/api/cfg/server-paths', async (req, res, next) => {
   res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
   next()
