@@ -1479,6 +1479,8 @@ async function doLogin() {
   btn.disabled = false; btn.textContent = 'Sign In'
   if (!r.ok) { errEl.textContent = r.error || 'Login failed.'; errEl.style.display = 'block'; return }
   currentUser = r.user
+  pgClearAuthFailure()          // queries were suppressed while logged out
+  runMigrations().catch(e => console.warn('[migrations]', e?.message))
   // Update nav user display
   const nameEl   = document.getElementById('user-name')
   const avatarEl = document.getElementById('user-avatar')
@@ -1869,7 +1871,11 @@ async function pgAutoConnect() {
     if (r.ok) {
       if (retryEl) retryEl.style.display = 'none'
       pgConnected = true // allow pgQ() during migrations
-      await runMigrations()
+      // runMigrations issues 63 queries. Every one 401s when nobody is signed in,
+      // which is what filled the console on the login screen. Schema setup is not
+      // a logged-out visitor's job — defer it until after login (see doLogin).
+      if (currentUser) await runMigrations()
+      else console.log('[pg] connected; migrations deferred until sign-in')
       _setPgStatus(true)
       return
     }
@@ -2019,8 +2025,16 @@ function pgFail(message) {
 // True when the query failed, as opposed to returning no rows.
 function pgFailed(rows) { return !!(rows && rows.error) }
 
+// pgConnected means the SERVER reached Postgres — it says nothing about whether
+// this browser has a session. /api/pg/connect is public, so the app happily
+// connects while logged out and then fires authenticated queries that all 401.
+// Latch on the first 401 and stop hitting the network until a login clears it.
+let _pgAuthFailed = false
+function pgClearAuthFailure() { _pgAuthFailed = false }
+
 async function pgQ(sql, params = [], retries = 2) {
   if (!pgConnected) return pgFail('not connected')
+  if (_pgAuthFailed) return pgFail('not logged in')
   for (let i = 0; i <= retries; i++) {
     try {
       const r = await fetch('/api/pg/query', {
@@ -2034,6 +2048,11 @@ async function pgQ(sql, params = [], retries = 2) {
         if (i < retries && (data.error?.includes('ECONNRESET') || data.error?.includes('terminated'))) {
           await new Promise(resolve => setTimeout(resolve, 500))
           continue
+        }
+        if (r.status === 401 || /not logged in/i.test(data.error || '')) {
+          if (!_pgAuthFailed) console.warn('[pgQ] not logged in — suppressing further queries until sign-in')
+          _pgAuthFailed = true
+          return pgFail('not logged in')
         }
         console.error('[pgQ] error:', data.error)
         return pgFail(data.error)
