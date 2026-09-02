@@ -1481,6 +1481,7 @@ async function doLogin() {
   currentUser = r.user
   pgClearAuthFailure()          // queries were suppressed while logged out
   runMigrations().catch(e => console.warn('[migrations]', e?.message))
+  loadLotPortalPicker().catch(() => {})   // rendered empty pre-login; refresh it now
   // Update nav user display
   const nameEl   = document.getElementById('user-name')
   const avatarEl = document.getElementById('user-avatar')
@@ -2111,16 +2112,31 @@ async function loadLotPortalPicker() {
   const sel = document.getElementById('lot-portal-picker')
   if (!sel) return
   const current = sel.value
-  sel.innerHTML = '<option value="">⚙ Lot Portal…</option>'
-  if (_allLots && _allLots.length) {
-    _allLots.forEach(lot => {
-      const o = document.createElement('option')
-      o.value = lot.lot_id
-      o.textContent = lot.lot_name
-      sel.appendChild(o)
-    })
-    if (current) sel.value = current
+
+  // _allLots is only populated by loadLotsSection(), which runs when the LOTS
+  // section is opened. This picker is rendered on database connect (line ~1464),
+  // long before that — so the cache was empty and the dropdown showed nothing but
+  // its placeholder until the user happened to visit LOTS first. Fetch on demand.
+  // A local list, not _allLots: other callers expect the fuller row shape.
+  let lots = (_allLots && _allLots.length) ? _allLots : null
+  if (!lots) {
+    const rows = await pgQ(
+      `SELECT lot_id, lot_name FROM lots WHERE status='active'
+        ORDER BY created_at DESC NULLS LAST`)
+    lots = pgFailed(rows) ? [] : (rows || [])
+    if (pgFailed(rows)) console.warn('[lotPortalPicker] could not load lots:', rows.error)
   }
+
+  sel.innerHTML = lots.length
+    ? '<option value="">⚙ Lot Portal…</option>'
+    : '<option value="">⚙ No active lots</option>'
+  lots.forEach(lot => {
+    const o = document.createElement('option')
+    o.value = lot.lot_id
+    o.textContent = lot.lot_name
+    sel.appendChild(o)
+  })
+  if (current) sel.value = current
 }
 
 let _lotPortalLotId = null
@@ -12384,6 +12400,7 @@ document.head.appendChild(spinStyle)
       // and run the migrations that pgAutoConnect deferred while unauthenticated.
       pgClearAuthFailure()
       runMigrations().catch(e => console.warn('[migrations]', e?.message))
+      loadLotPortalPicker().catch(() => {})
       const nameEl   = document.getElementById('user-name')
       const avatarEl = document.getElementById('user-avatar')
       if (nameEl)   nameEl.textContent   = user.display_name
