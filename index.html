@@ -1662,8 +1662,8 @@ async function runMigrations() {
 
   // ── rmo: ensure table + PK + unique exist ────────────────────────────────
   await pgQ(`CREATE TABLE IF NOT EXISTS rmo (rmo_id SERIAL PRIMARY KEY, rmo_name TEXT UNIQUE NOT NULL)`).catch(() => {})
-  await pgQ(`ALTER TABLE rmo ADD PRIMARY KEY (rmo_id)`).catch(() => {})
-  await pgQ(`ALTER TABLE rmo ADD CONSTRAINT rmo_rmo_name_key UNIQUE (rmo_name)`).catch(() => {})
+  await pgQ(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='rmo'::regclass AND contype='p') THEN ALTER TABLE rmo ADD PRIMARY KEY (rmo_id); END IF; END $$`)
+  await pgQ(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='rmo_rmo_name_key') THEN ALTER TABLE rmo ADD CONSTRAINT rmo_rmo_name_key UNIQUE (rmo_name); END IF; END $$`)
 
   // ── rmo_moods: NO FK to moods (moods may not have a PK in older DBs) ────
   await pgQ(`CREATE TABLE IF NOT EXISTS rmo_moods (
@@ -1719,7 +1719,7 @@ async function runMigrations() {
   await pgQ(`ALTER TABLE cowriters ADD CONSTRAINT cowriters_name_unique UNIQUE (cowriter_name)`).catch(e => console.warn('[cowriter unique]', e?.message))
 
   // Best-effort PK on cowriter_id (may still fail if duplicate ids remain after name-dedup)
-  await pgQ(`ALTER TABLE cowriters ADD PRIMARY KEY (cowriter_id)`).catch(() => {})
+  await pgQ(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='cowriters'::regclass AND contype='p') THEN ALTER TABLE cowriters ADD PRIMARY KEY (cowriter_id); END IF; END $$`)
 
   // Re-add FK on title_cowriters (best-effort — needs cowriters PK)
   await pgQ(`ALTER TABLE title_cowriters ADD CONSTRAINT title_cowriters_cowriter_id_fkey FOREIGN KEY (cowriter_id) REFERENCES cowriters(cowriter_id) ON DELETE SET NULL`).catch(() => {})
@@ -1730,8 +1730,8 @@ async function runMigrations() {
   await seedCowriters().catch(e => console.warn('[seedCowriters]', e?.message))
 
   // Ensure teams.team_id has a unique constraint so ON CONFLICT (team_id) works
-  await pgQ(`ALTER TABLE teams ADD PRIMARY KEY (team_id)`).catch(() => {})
-  await pgQ(`ALTER TABLE teams ADD CONSTRAINT teams_team_id_unique UNIQUE (team_id)`).catch(() => {})
+  await pgQ(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conrelid='teams'::regclass AND contype='p') THEN ALTER TABLE teams ADD PRIMARY KEY (team_id); END IF; END $$`)
+  await pgQ(`DO $$ BEGIN IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname='teams_team_id_unique') THEN ALTER TABLE teams ADD CONSTRAINT teams_team_id_unique UNIQUE (team_id); END IF; END $$`)
   await seedTeams().catch(e => console.warn('[seedTeams]', e?.message))
 
   // ── Lots: extend schema + join table ─────────────────────────────────────
