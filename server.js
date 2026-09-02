@@ -16,28 +16,32 @@ const http       = require('http')
 const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
-
+const titlesRoutes = require('./routes/titles.js')
+const { analyzeAndFixKey } = require('./key-detection.js')
+const { parseFilename, validateFilename } = require('./rename-validation.js')
+const authMiddleware = require('./middleware_auth.js')
 const app    = express()
 const PORT   = process.env.PORT || 9999 
 const upload = multer({ dest: os.tmpdir() })
 
 // ─── Middleware ────────────────────────────────────────────────────────────
+
+// ─── Middleware ────────────────────────────────────────────────────────────────
+// Parse JSON and form data (must be early, before routes)
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
-app.use(session({
-  secret: 'haus-workspace-secret-2024',
-  resave: false,
-  saveUninitialized: false,
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days
-}))
 
-// Disable caching for all files
-app.use((req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
-  res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
-  next()
-})
+// Session middleware (refactored into middleware_auth.js)
+app.use(authMiddleware.getSessionMiddleware())
+
+// Disable caching for all files (refactored into middleware_auth.js)
+app.use(authMiddleware.getCacheControlMiddleware())
+
+// Add security headers (refactored into middleware_auth.js)
+app.use(authMiddleware.getSecurityHeadersMiddleware())
+
+// Add CORS headers (refactored into middleware_auth.js)
+app.use(authMiddleware.getCORSMiddleware())
 
 // Never cache index.html or haus-api.js so changes are always picked up
 app.get('/', (req, res) => {
@@ -56,15 +60,13 @@ app.get('/haus-api.js', (req, res) => {
 // Serve static files (index.html, assets, etc.)
 app.use(express.static(__dirname))
 
-// Auth guard — pg/connect, pg/status, and auth/login are public (needed before login)
-const PUBLIC_ROUTES = ['/auth/login', '/pg/connect', '/pg/status', '/pg/query',
-  '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
-  '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
-  '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
-  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots']
-app.use('/api', (req, res, next) => {
-  if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
-  if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
+// Auth guard middleware for /api routes (refactored into middleware_auth.js)
+app.use('/api', authMiddleware.getAuthGuardMiddleware())
+
+// Make pgPool available to all routes
+app.use((req, res, next) => {
+  req.app.locals.pgPool = pgPool
+  req.app.locals.appDir = __dirname
   next()
 })
 
@@ -660,6 +662,8 @@ app.post('/api/cfg/server-paths', (req, res) => {
     if (req.body[k] !== undefined) cfg[k] = req.body[k]
   }
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
+  // Restart watcher if staging path changed
+  res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
   res.json({ ok: true })
 })
 
@@ -731,6 +735,9 @@ app.get('/api/audio/stream', async (req, res) => {
     else res.end()
   }
 })
+
+// ─── Titles/Songs routes ───────────────────────────────────────────────────
+app.use('/api/titles', titlesRoutes)
 
 // ─── AppleScript route ─────────────────────────────────────────────────────
 app.post('/api/applescript', (req, res) => {
@@ -1596,175 +1603,185 @@ app.get('/api/intake/teams', async (req, res) => {
 })
 
 // POST /api/intake/generate-sku — atomically reserve the next SKU for a team
-// Body: { composerFullId, albumDigit? }
-// Returns: { ok, skuRoot, seq }
 app.post('/api/intake/generate-sku', async (req, res) => {
   const { composerFullId, albumDigit } = req.body
   if (!composerFullId) return res.json({ ok: false, error: 'composerFullId required' })
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const { skuRoot, seq } = await generateSku(
-      composerFullId,
-      albumDigit ?? CURRENT_ALBUM_DIGIT
-    )
-    res.json({ ok: true, skuRoot, seq })
+    const client = await pgPool.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await client.query(`
+        UPDATE sku_sequences
+        SET next_seq = next_seq + 1
+        WHERE composer_full_id = $1
+        RETURNING next_seq - 1 AS seq
+      `, [composerFullId])
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK')
+        return res.json({ ok: false, error: `Unknown composer: ${composerFullId}` })
+      }
+      const seq = parseInt(result.rows[0].seq)
+      const padded = seq < 1000 ? String(seq).padStart(3, '0') : String(seq).padStart(4, '0')
+      const skuRoot = `${composerFullId}${padded}${albumDigit || 4}`
+      await client.query(`UPDATE teams SET next_seq = next_seq + 1 WHERE composer_full_id = $1`, [composerFullId])
+      await client.query('COMMIT')
+      res.json({ ok: true, skuRoot, seq })
+    } catch (e) {
+      try { await client.query('ROLLBACK') } catch {}
+      throw e
+    } finally {
+      client.release()
+    }
   } catch (e) {
     res.json({ ok: false, error: e.message })
   }
 })
 
 // POST /api/intake/save-title — write a completed intake to the titles table
-// Body: {
-//   skuRoot, composerFullId, teamId?,
-//   title, key?, bpm?, description?,
-//   mood1Id?, mood2Id?, kslId?,
-//   primaryGenreId?, secondaryGenreId?,
-//   isJup?
-// }
-// Returns: { ok, skuRoot }
 app.post('/api/intake/save-title', async (req, res) => {
   const {
     skuRoot, composerFullId, teamId,
     title, key, bpm, description,
     mood1Id, mood2Id, kslId,
     primaryGenreId, secondaryGenreId,
-    isJup
+    isJup,
+    filename,    // Optional: filename to parse for key detection
+    audioPath    // Optional: audio file path for key detection
   } = req.body
-
   if (!skuRoot)        return res.json({ ok: false, error: 'skuRoot required' })
   if (!title)          return res.json({ ok: false, error: 'title required' })
   if (!composerFullId) return res.json({ ok: false, error: 'composerFullId required' })
-
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+
   try {
-    // Guard: refuse to overwrite an existing title
-    const existing = await pgPool.query(
-      `SELECT 1 FROM titles WHERE sku_root = $1`, [skuRoot]
-    )
+    let finalKey = key
+    let keySource = 'provided'
+    let keyError = null
+
+    // STEP 1: Try to detect/fix key if not provided
+    if (!finalKey && filename) {
+      console.log(`[intake/save-title] Attempting key detection:`)
+      console.log(`  filename: ${filename}`)
+      console.log(`  audioPath: ${audioPath}`)
+      try {
+        const keyResult = await analyzeAndFixKey(filename, audioPath)
+
+        console.log(`[intake/save-title] Key detection result:`, keyResult)
+
+        if (keyResult.key) {
+          finalKey = keyResult.key
+          keySource = keyResult.source // 'filename' or 'audio'
+          console.log(`✅ Key detected from ${keySource}: ${finalKey}`)
+        } else if (keyResult.requiresManualFix) {
+          // Key could not be detected - flag for manual rename
+          keyError = 'Could not detect key from filename or audio analysis. File will need manual review.'
+          console.log(`⚠️  Manual fix required for: ${filename}`)
+        } else if (keyResult.error) {
+          console.log(`⚠️  Key detection error: ${keyResult.error}`)
+        }
+      } catch (e) {
+        console.error(`❌ Key detection failed: ${e.message}`)
+        keyError = `Key detection error: ${e.message}`
+      }
+    } else if (!filename) {
+      console.log(`[intake/save-title] No filename provided, skipping key detection`)
+    } else {
+      console.log(`[intake/save-title] Key already provided (${finalKey}), skipping detection`)
+    }
+
+    const existing = await pgPool.query(`SELECT 1 FROM titles WHERE sku_root = $1`, [skuRoot])
     if (existing.rows.length > 0) {
       return res.json({ ok: false, error: `SKU ${skuRoot} already exists in titles` })
     }
 
     await pgPool.query(`
       INSERT INTO titles (
-        sku_root, composer_id, team_id,
-        title, key, bpm, description,
-        mood_1_id, mood_2_id, ksl_id,
-        primary_genre_id, secondary_genre_id,
+        sku_root, composer_id, team_id, title, key, bpm, description,
+        mood_1_id, mood_2_id, ksl_id, primary_genre_id, secondary_genre_id,
         is_jup, created_at, updated_at
-      ) VALUES (
-        $1,  $2,  $3,
-        $4,  $5,  $6,  $7,
-        $8,  $9,  $10,
-        $11, $12,
-        $13, now(), now()
-      )
+      ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, now(), now())
     `, [
-      skuRoot,              composerFullId,        teamId        || null,
-      title,                key           || null, bpm           || null, description || null,
-      mood1Id       || null, mood2Id      || null, kslId         || null,
+      skuRoot, composerFullId, teamId || null,
+      title, finalKey || null, bpm || null, description || null,
+      mood1Id || null, mood2Id || null, kslId || null,
       primaryGenreId || null, secondaryGenreId || null,
       isJup ?? false
     ])
 
-    res.json({ ok: true, skuRoot })
+    res.json({
+      ok: true,
+      skuRoot,
+      keyDetectionInfo: {
+        keyFound: !!finalKey,
+        key: finalKey,
+        source: keySource,
+        error: keyError
+      }
+    })
   } catch (e) {
     res.json({ ok: false, error: e.message })
   }
 })
 
 // ─── Staged-file watcher ──────────────────────────────────────────────────
-// Watches for composer DROP FOLDERS in staging (e.g. R13a_SongTitle_Cm/)
-// and caches their metadata so Intake loads instantly from DB.
-
 const IS_DROP_FOLDER = /^[A-Z]\d{2}[a-zA-Z]/i
 const AUDIO_EXT      = /\.(wav|mp3|aiff?|flac|m4a)$/i
-
-// Musical key regex — matches Ab, Bbm, C#, Dmaj, etc. (same as client-side KEY_RE)
 const KEY_RE_SERVER = /^([A-Ga-g](?:sharp|flat|##?|bb?)?m?)$/i
 
 function parseFolderDrop(folderName) {
-  // Folder name format: {ComposerID}_{TitleWords}_{Key}[_tag...]
-  // e.g. R13a_TensionRise_Cm  or  R63p_SkyWalker_Gmaj_COUNTRY
-  // Search backwards for the musical key so trailing genre tags (COUNTRY, COMEDY, etc.)
-  // don't get absorbed into the title or mistaken for the key.
-  const parts      = folderName.split('_')
+  const parts = folderName.split('_')
   const composerID = parts[0]
-  const rest       = parts.slice(1)           // everything after composerID
-
+  const rest = parts.slice(1)
   let keyIdx = -1
   for (let i = rest.length - 1; i >= 0; i--) {
     if (KEY_RE_SERVER.test(rest[i])) { keyIdx = i; break }
   }
-
   let key, titleParts
   if (keyIdx >= 0) {
-    key        = rest[keyIdx]
+    key = rest[keyIdx]
     titleParts = rest.slice(0, keyIdx)
-    // rest.slice(keyIdx + 1) = trailing genre tags — ignored (not part of title or key)
   } else {
-    // No musical key found — fall back to old behaviour: last segment = key
-    key        = rest[rest.length - 1] || null
+    key = rest[rest.length - 1] || null
     titleParts = rest.slice(0, rest.length - 1)
   }
-
-  return {
-    composer_id: composerID,
-    title:       titleParts.join(' '),
-    key:         key || null,
-  }
+  return { composer_id: composerID, title: titleParts.join(' '), key: key || null }
 }
 
 async function processDrop(_pool, mm, dropPath, lotFolder) {
-  const pool = pgPool  // always use current global pool, not the captured startup reference
+  const pool = pgPool
   const folderName = path.basename(dropPath)
   if (!IS_DROP_FOLDER.test(folderName)) return
-
-  // Wait a moment for all files to finish syncing
   await new Promise(r => setTimeout(r, 3000))
   if (!fs.existsSync(dropPath)) return
-
   let allFiles
   try { allFiles = fs.readdirSync(dropPath) } catch { return }
   const audioFiles = allFiles.filter(f => AUDIO_EXT.test(f))
   if (!audioFiles.length) return
-
   const parsed = parseFolderDrop(folderName)
-
-  // Use the FULL file for tag scraping; fall back to first audio file
   const fullFile = audioFiles.find(f => /_FULL\./i.test(f)) || audioFiles[0]
   const fullPath = path.join(dropPath, fullFile)
-
   let bpm = null, key = parsed.key, duration_sec = null, album = null
   if (mm) {
     try {
       const meta = await mm.parseFile(fullPath, { duration: true, skipCovers: true })
       const c = meta.common
-      bpm          = c.bpm || null
-      key          = c.key || parsed.key
+      bpm = c.bpm || null
+      key = c.key || parsed.key
       duration_sec = meta.format.duration || null
-      album        = c.album || null
+      album = c.album || null
     } catch {}
   }
-
   try {
     await pool.query(`
       INSERT INTO staged_files
         (filename, filepath, title, composer_id, version, key, bpm, duration_sec, album, raw_tags)
       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
       ON CONFLICT (filepath) DO UPDATE SET
-        title        = EXCLUDED.title,
-        key          = EXCLUDED.key,
-        bpm          = EXCLUDED.bpm,
-        duration_sec = EXCLUDED.duration_sec,
-        album        = EXCLUDED.album,
-        raw_tags     = EXCLUDED.raw_tags,
-        status       = 'pending'
-    `, [
-      folderName, dropPath,
-      parsed.title, parsed.composer_id, null,
-      key, bpm, duration_sec, album,
-      JSON.stringify({ audioFiles, lotFolder: lotFolder || null })
-    ])
+        title = EXCLUDED.title, key = EXCLUDED.key, bpm = EXCLUDED.bpm,
+        duration_sec = EXCLUDED.duration_sec, album = EXCLUDED.album,
+        raw_tags = EXCLUDED.raw_tags, status = 'pending'
+    `, [folderName, dropPath, parsed.title, parsed.composer_id, null, key, bpm, duration_sec, album, JSON.stringify({ audioFiles, lotFolder: lotFolder || null })])
     console.log(`🎵 Staged drop: ${folderName} (${audioFiles.length} files)`)
   } catch (e) {
     console.warn(`⚠ Failed to stage drop ${folderName}:`, e.message)
@@ -1784,38 +1801,29 @@ async function startStagingWatcher(pool) {
     console.log('⚠ Staging watcher: no staging folder configured, skipping')
     return
   }
-
   let mm = null
   try { mm = require('music-metadata') } catch {
-    console.log('⚠ Staging watcher: music-metadata not installed — run: npm install music-metadata@7 chokidar@3')
+    console.log('⚠ Staging watcher: music-metadata not installed')
   }
   let chokidar
   try { chokidar = require('chokidar') } catch {
-    console.log('⚠ Staging watcher: chokidar not installed — run: npm install chokidar@3')
+    console.log('⚠ Staging watcher: chokidar not installed')
     return
   }
-
   if (_watcher) { try { _watcher.close() } catch {} }
-
-  // Watch depth:2 to catch drops inside lot subfolders too
   _watcher = chokidar.watch(stagingDir, {
-    persistent:      true,
-    ignoreInitial:   true,   // don't re-process existing folders on startup
-    depth:           2,
-    ignored:         /(^|[\/\\])(\.|Icon\r|\.dropbox)/,
-    awaitWriteFinish: { stabilityThreshold: 3000, pollInterval: 500 },
+    persistent: true, ignoreInitial: true, depth: 2,
+    ignored: /(^|[\/\\])(\.|Icon\r|\.dropbox)/,
+    awaitWriteFinish: { stabilityThreshold: 3000, pollInterval: 500 }
   })
-
   _watcher.on('addDir', async dirPath => {
     if (dirPath === stagingDir) return
     const folderName = path.basename(dirPath)
     if (!IS_DROP_FOLDER.test(folderName)) return
-    // Determine if inside a lot subfolder
     const parent = path.dirname(dirPath)
     const lotFolder = parent !== stagingDir ? path.basename(parent) : null
     await processDrop(pool, mm, dirPath, lotFolder)
   })
-
   console.log(`👁 Staging watcher started: ${stagingDir}`)
 }
 
@@ -1823,9 +1831,7 @@ async function startStagingWatcher(pool) {
 app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const r = await pgPool.query(
-      `SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`
-    )
+    const r = await pgPool.query(`SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`)
     res.json({ ok: true, files: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -1838,7 +1844,6 @@ app.delete('/api/staged-files/:id', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// Delete by filepath — fallback for drops that came from live disk scan (no id)
 app.delete('/api/staged-files/by-path', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   const { path: filePath } = req.query
@@ -1849,11 +1854,34 @@ app.delete('/api/staged-files/by-path', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// Restart watcher when staging path changes
 app.post('/api/cfg/server-paths', async (req, res, next) => {
-  // handled by original route below — we just hook to restart watcher
   res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
   next()
+})
+
+// ─── Intake Draft Save/Load ────────────────────────────────────────────────
+const intakeDrafts = {}
+
+app.post('/api/intake/draft', (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { clientName, dropIndex, dropName, formData } = req.body
+  if (!clientName || dropIndex === undefined) return res.json({ ok: false, error: 'Missing clientName or dropIndex' })
+  const key = `${clientName}_${dropIndex}`
+  intakeDrafts[key] = { clientName, dropIndex, dropName, formData, timestamp: Date.now() }
+  console.log(`[intake/draft] Saved draft for ${clientName} drop ${dropIndex}`)
+  res.json({ ok: true, message: 'Draft saved' })
+})
+
+app.get('/api/intake/draft', (req, res) => {
+  const drafts = Object.values(intakeDrafts).sort((a, b) => b.timestamp - a.timestamp)
+  if (drafts.length === 0) return res.json(null)
+  res.json(drafts[0])
+})
+
+app.delete('/api/intake/draft/:key', (req, res) => {
+  const { key } = req.params
+  delete intakeDrafts[key]
+  res.json({ ok: true })
 })
 
 // ─── Clients import ────────────────────────────────────────────────────────
@@ -1905,42 +1933,85 @@ app.post('/api/db/migrate-client-ids', async (req, res) => {
   } catch (e) {
     res.json({ ok: false, error: e.message })
   }
-})
+  })
 
-// ─── Intake Draft Save/Load ────────────────────────────────────────────────
-const intakeDrafts = {} // In-memory store: { clientName_dropIndex: { clientName, dropIndex, dropName, formData, timestamp } }
+// ─── B2 Missing Files Checker API ──────────────────────────────────────────
+app.get('/api/b2/inventory', (req, res) => {
+  try {
+    const fs = require('fs')
+    const path = require('path')
 
-app.post('/api/intake/draft', (req, res) => {
-  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
-  const { clientName, dropIndex, dropName, formData } = req.body
-  if (!clientName || dropIndex === undefined) return res.json({ ok: false, error: 'Missing clientName or dropIndex' })
+    // Try multiple possible locations for the inventory file
+    const possiblePaths = [
+      path.join(__dirname, 'b2-all-collections-inventory-2026-08-25T08-27-53.json'),
+      path.join(__dirname, 'b2-all-collections-inventory-2026-08-25T08-27-53.json'),
+      // Fallback to any b2-all-collections-inventory file
+      ...(() => {
+        try {
+          const files = fs.readdirSync(__dirname)
+            .filter(f => f.startsWith('b2-all-collections-inventory') && f.endsWith('.json'))
+            .sort()
+            .reverse()
+            .map(f => path.join(__dirname, f))
+          return files
+        } catch { return [] }
+      })()
+    ]
 
-  const key = `${clientName}_${dropIndex}`
-  intakeDrafts[key] = {
-    clientName,
-    dropIndex,
-    dropName,
-    formData,
-    timestamp: Date.now()
+    let inventoryFile = null
+    for (const filePath of possiblePaths) {
+      try {
+        if (fs.existsSync(filePath)) {
+          inventoryFile = filePath
+          break
+        }
+      } catch { }
+    }
+
+    if (!inventoryFile) {
+      throw new Error(`No inventory file found. Checked: ${possiblePaths.join(', ')}`)
+    }
+
+    console.log(`[B2Inventory] Loading from ${inventoryFile}`)
+    const fileContent = fs.readFileSync(inventoryFile, 'utf8')
+    const data = JSON.parse(fileContent)
+
+    // Validate structure
+    if (!data.collections || !Array.isArray(data.collections)) {
+      throw new Error(`Invalid JSON structure: collections is not an array`)
+    }
+
+    // Extract just the filenames for matching
+    const filenames = []
+    for (const collection of data.collections || []) {
+      for (const folder of collection.folders || []) {
+        // Add audio files
+        for (const audio of folder.audioFiles || []) {
+          filenames.push(audio.name)
+        }
+
+        // Add stub files too (for completeness)
+        for (const stub of folder.stubFiles || []) {
+          filenames.push(stub.name)
+        }
+      }
+    }
+
+    console.log(`[B2Inventory] Serving ${filenames.length} files from ${path.basename(inventoryFile)}`)
+
+    // Double-check response format before sending
+    if (!Array.isArray(filenames)) {
+      throw new Error(`Invalid filenames array construction`)
+    }
+
+    res.json({ filenames })
+  } catch (error) {
+    console.error('[B2Inventory] Error:', error.message)
+    res.status(500).json({ error: error.message })
   }
-  console.log(`[intake/draft] Saved draft for ${clientName} drop ${dropIndex}`)
-  res.json({ ok: true, message: 'Draft saved' })
 })
 
-app.get('/api/intake/draft', (req, res) => {
-  // Return the most recent draft (typically the last one the user was working on)
-  const drafts = Object.values(intakeDrafts).sort((a, b) => b.timestamp - a.timestamp)
-  if (drafts.length === 0) return res.json(null)
-  res.json(drafts[0])
-})
-
-app.delete('/api/intake/draft/:key', (req, res) => {
-  const { key } = req.params
-  delete intakeDrafts[key]
-  res.json({ ok: true })
-})
-
-// ─── Start ─────────────────────────────────────────────────────────────────
+// ─── Start ─────────────────────────────────────
 app.listen(PORT, '0.0.0.0', () => {
   const ifaces = os.networkInterfaces()
   let localIP  = 'localhost'

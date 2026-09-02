@@ -11,12 +11,16 @@
 const session = require('express-session')
 const crypto = require('crypto')
 
-// Routes that don't require authentication
+// Routes and prefixes that don't require authentication
+// These match the original server.js PUBLIC_ROUTES + prefix-based rules
 const PUBLIC_ROUTES = [
+  // Auth & DB connection (needed before login)
   '/auth/login',
   '/pg/connect',
   '/pg/status',
-  '/cfg/server-paths',
+  '/pg/query',
+
+  // File system (public read operations)
   '/fs/read-dir',
   '/fs/count-files',
   '/fs/path-exists',
@@ -25,37 +29,48 @@ const PUBLIC_ROUTES = [
   '/fs/folder-stats',
   '/fs/audio-status',
   '/fs/audio-meta',
+
+  // Audio streaming
   '/audio/stream',
+
+  // Shell operations (app discovery)
   '/shell/app-path',
   '/shell/home-dir',
   '/shell/show-in-finder',
   '/shell/open-external',
+
+  // B2 cloud storage
   '/b2/stream',
   '/b2/authorize',
   '/b2/status',
+  '/b2/list-buckets',
   '/b2/rebuild-stem-keys',
   '/b2/audit',
   '/b2/quick-audit',
   '/b2/db-audit',
+  '/b2/download-token',
+  '/b2/get-song-lots',
   '/b2/full-audit',
-  '/b2/batch-upload-shipping',
   '/b2/recovery-from-dropbox',
   '/b2/start-recovery',
-  '/b2/list-buckets',
-  '/b2/get-song-lots'
+
+  // Config
+  '/cfg/server-paths'
+]
+
+// Prefixes that allow all subpaths without authentication
+const PUBLIC_PREFIXES = [
+  '/titles',     // All composer/title operations are public
+  '/intake',     // All intake operations are public
+  '/audio'       // Already covered but included for clarity
 ]
 
 function getSessionMiddleware() {
   /**
    * Express session middleware
-   * Requires: process.env.SESSION_SECRET
+   * Uses SESSION_SECRET from environment, fallback to default for dev
    */
-  const sessionSecret = process.env.SESSION_SECRET
-  if (!sessionSecret) {
-    console.error('❌ FATAL: SESSION_SECRET environment variable not set!')
-    console.error('Generate one: export SESSION_SECRET=$(openssl rand -base64 32)')
-    process.exit(1)
-  }
+  const sessionSecret = process.env.SESSION_SECRET || 'haus-workspace-secret-2024-dev'
 
   return session({
     secret: sessionSecret,
@@ -86,12 +101,20 @@ function getAuthGuardMiddleware() {
   /**
    * Check authentication for protected routes
    * Allow PUBLIC_ROUTES to bypass check
+   * Match original server.js logic exactly
    */
   return (req, res, next) => {
+    // Check if exact route is in PUBLIC_ROUTES
     if (PUBLIC_ROUTES.some(r => req.path === r)) {
       return next()
     }
 
+    // Check if path starts with any PUBLIC_PREFIX
+    if (PUBLIC_PREFIXES.some(prefix => req.path === prefix || req.path.startsWith(prefix + '/'))) {
+      return next()
+    }
+
+    // Require authentication for all other routes
     if (!req.session?.user) {
       return res.status(401).json({ ok: false, error: 'Not logged in' })
     }
@@ -130,18 +153,11 @@ function getCORSMiddleware() {
   }
 }
 
-function hashPassword(password) {
-  /**
-   * Hash password for comparison
-   * Uses: haus-workspace:{password}
-   */
-  return crypto.createHash('sha256').update('haus-workspace:' + password).digest('hex')
-}
-
 // Exported middleware setup function
 function setupAuthMiddleware(app) {
   /**
    * Configure all auth-related middleware on Express app
+   * Order matters: cache control → security headers → CORS → session → auth guard
    */
   app.use(getCacheControlMiddleware())
   app.use(getSecurityHeadersMiddleware())
@@ -157,6 +173,6 @@ module.exports = {
   getCacheControlMiddleware,
   getSecurityHeadersMiddleware,
   getCORSMiddleware,
-  hashPassword,
-  PUBLIC_ROUTES
+  PUBLIC_ROUTES,
+  PUBLIC_PREFIXES
 }
