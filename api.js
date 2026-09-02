@@ -2637,7 +2637,13 @@ async function startStagingWatcher(pool) {
     // Determine if inside a lot subfolder
     const parent = path.dirname(dirPath)
     const lotFolder = parent !== stagingDir ? path.basename(parent) : null
-    await processDrop(pool, mm, dirPath, lotFolder)
+    // Read the live pool, never the one captured when the watcher started.
+    // reconnectPg() swaps pgPool and ends the old one 5s later, so a captured
+    // reference goes dead on the first reconnect and every drop after that
+    // fails with "Cannot use a pool after calling end on the pool" -- silently,
+    // in the addDir case, which meant new drops stopped being staged at all.
+    if (!pgPool) { console.warn('[staging] no pg pool, skipping drop:', folderName); return }
+    await processDrop(pgPool, mm, dirPath, lotFolder)
   })
 
   // Removal is the other half. Without this the table only ever grows and the
@@ -2645,8 +2651,9 @@ async function startStagingWatcher(pool) {
   _watcher.on('unlinkDir', async dirPath => {
     if (dirPath === stagingDir) return
     if (!IS_DROP_FOLDER.test(path.basename(dirPath))) return
+    if (!pgPool) return
     try {
-      const r = await pool.query(
+      const r = await pgPool.query(
         `UPDATE staged_files SET status='gone' WHERE filepath=$1 AND status='pending'`, [dirPath])
       if (r.rowCount) console.log(`[staging] ${path.basename(dirPath)} left staging - row retired`)
     } catch (e) { console.warn('[staging] unlinkDir update failed:', e.message) }
