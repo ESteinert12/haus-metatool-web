@@ -6430,15 +6430,15 @@ async function loadCollectionSecondaryData(rows) {
 
 async function loadMood2Map(skus) {
   try {
-    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    // No IN (...) list. This was built with one placeholder per SKU — 33,000+ bind
+    // parameters and ~400KB of SQL text for what is the entire catalog. Aggregating
+    // every row is far cheaper (28ms measured); extra keys in the map are harmless.
     const rows = await pgQ(
       `SELECT t.sku_root, string_agg(DISTINCT mo.mood_name, ', ' ORDER BY mo.mood_name) as mood2
        FROM titles t
        LEFT JOIN title_moods tm ON tm.sku_root = t.sku_root
        LEFT JOIN moods mo ON mo.mood_id = tm.mood_id
-       WHERE t.sku_root IN (${placeholders})
-       GROUP BY t.sku_root`,
-      skus
+       GROUP BY t.sku_root`
     )
     const map = {}
     if (Array.isArray(rows)) {
@@ -6455,14 +6455,22 @@ async function loadMood2Map(skus) {
 
 async function loadKslMap(skus) {
   try {
-    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    // The old query joined `ksl` on ANY(string_to_array(ksl_ids, ',')) — an
+    // unindexable nested loop that scanned all 2,840 ksl rows for each of 32,731
+    // titles (46.5M comparisons discarded, 28.8 SECONDS), and it was WRONG:
+    // ksl_ids uses BOTH commas and vertical tabs (chr 11) as separators, so
+    // splitting on commas alone matched only the first name. 7,293 titles were
+    // displaying one KSL where several exist.
+    //
+    // ksl_ids already holds the names, so no join is needed. Split on both
+    // separators and aggregate in place. Measured 131ms for the whole catalog.
     const rows = await pgQ(
-      `SELECT t.sku_root, string_agg(DISTINCT k.ksl_name, ', ' ORDER BY k.ksl_name) as ksl
-       FROM titles t
-       LEFT JOIN ksl k ON k.ksl_name = ANY(string_to_array(t.ksl_ids, ','))
-       WHERE t.sku_root IN (${placeholders})
-       GROUP BY t.sku_root`,
-      skus
+      `SELECT sku_root,
+              (SELECT string_agg(DISTINCT trim(x), ', ' ORDER BY trim(x))
+                 FROM regexp_split_to_table(ksl_ids, '[,' || chr(11) || ']') AS x
+                WHERE trim(x) <> '') AS ksl
+         FROM titles
+        WHERE ksl_ids IS NOT NULL AND ksl_ids <> ''`
     )
     const map = {}
     if (Array.isArray(rows)) {
@@ -6479,15 +6487,13 @@ async function loadKslMap(skus) {
 
 async function loadRmoMap(skus) {
   try {
-    const placeholders = skus.map((_, i) => `$${i + 1}`).join(',')
+    // No IN (...) list — see loadMood2Map.
     const rows = await pgQ(
       `SELECT t.sku_root, string_agg(DISTINCT r.rmo_name, ', ' ORDER BY r.rmo_name) as rmo
        FROM titles t
        LEFT JOIN title_rmo tr ON tr.sku_root = t.sku_root
        LEFT JOIN rmo r ON r.rmo_id = tr.rmo_id
-       WHERE t.sku_root IN (${placeholders})
-       GROUP BY t.sku_root`,
-      skus
+       GROUP BY t.sku_root`
     )
     const map = {}
     if (Array.isArray(rows)) {
