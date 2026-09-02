@@ -8582,7 +8582,7 @@ function renderIntakeBrowserTracks() {
     else if (bgSt === 'error')   icon = '<i class="ti ti-x" style="font-size:10px;color:#e53;flex-shrink:0"></i>'
     else if (done)               icon = '<i class="ti ti-circle-check" style="font-size:11px;color:var(--green,#22c55e);flex-shrink:0"></i>'
     const dupeTag = d._isDupe && !done
-      ? '<span style="font-size:9px;font-weight:700;color:#fff;background:#e53935;padding:1px 5px;border-radius:3px;margin-left:4px;flex-shrink:0">DUPE</span>' : ''
+      ? `<span title="Already in the catalog as ${esc(d._dupeSkuRoot || '?')} - same title and composer. Verify before importing." style="font-size:9px;font-weight:700;color:#fff;background:#e53935;padding:1px 5px;border-radius:3px;margin-left:4px;flex-shrink:0">DUPE ${esc(d._dupeSkuRoot || '')}</span>` : ''
     const composerName = d._composerName || d.guessedID || '?'
     return `<div id="intake-tr-${i}" class="${cls.join(' ')}" onclick="loadIntakeTrackForm(${i})"
       style="${bg}">
@@ -8631,16 +8631,27 @@ async function _checkIntakeDupes() {
   if (!pgConnected || !intakeDrops.length) return
   const titles = intakeDrops.map(d => (d.guessedTitle || d.name).toLowerCase())
   const holders = titles.map((_, idx) => `$${idx + 1}`).join(',')
-  const rows = await pgQ(`SELECT lower(title) AS lt, sku_root FROM titles WHERE lower(title) IN (${holders})`, titles)
-  if (!rows) return
-  const dupeMap = {}
-  for (const r of rows) dupeMap[r.lt] = r.sku_root
+  // Match on title AND composer. Title alone produces false DUPE flags: the
+  // June 2026 catalog import left 32k rows with common titles, so a staged
+  // R15a_Top Down was being flagged against R53a2222 "Top Down" -- a different
+  // composer's unrelated track. Measured 2026-09-02: of 12 title-only hits,
+  // only 3 also matched on composer.
+  const rows = await pgQ(`SELECT lower(title) AS lt, lower(composer_id) AS lcid, sku_root FROM titles WHERE lower(title) IN (${holders})`, titles)
+  if (!rows || pgFailed(rows)) return
+  // composer ids vary in length between folder and catalog (R48 vs R48a), so
+  // treat a prefix match either way as the same composer.
+  const sameComposer = (a, b) => {
+    if (!a || !b) return false
+    a = String(a).toLowerCase().trim(); b = String(b).toLowerCase().trim()
+    return a === b || a.startsWith(b) || b.startsWith(a)
+  }
   let changed = false
   for (const d of intakeDrops) {
     const lt = (d.guessedTitle || d.name).toLowerCase()
     const wasDupe = d._isDupe
-    d._isDupe = !!dupeMap[lt]
-    d._dupeSkuRoot = dupeMap[lt] || null
+    const hit = rows.find(r => r.lt === lt && sameComposer(d.guessedID, r.lcid))
+    d._isDupe = !!hit
+    d._dupeSkuRoot = hit ? hit.sku_root : null
     if (d._isDupe !== wasDupe) changed = true
   }
   if (changed) renderIntakeBrowserTracks()
