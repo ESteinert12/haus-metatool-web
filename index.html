@@ -12380,6 +12380,10 @@ document.head.appendChild(spinStyle)
     const user = await window.__hausCheckSession()
     if (user) {
       currentUser = user
+      // Session restored on refresh — doLogin never runs, so clear the query latch
+      // and run the migrations that pgAutoConnect deferred while unauthenticated.
+      pgClearAuthFailure()
+      runMigrations().catch(e => console.warn('[migrations]', e?.message))
       const nameEl   = document.getElementById('user-name')
       const avatarEl = document.getElementById('user-avatar')
       if (nameEl)   nameEl.textContent   = user.display_name
