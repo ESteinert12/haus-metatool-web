@@ -2002,8 +2002,25 @@ async function b2UploadFile(localPath, b2Name) {
 }
 
 // ─── PostgreSQL helpers ─────────────────────────────────────
+// Failure marker. pgQ returns [] for BOTH "no rows" and "request failed", which
+// callers cannot tell apart — that silently suppressed every duplicate-title
+// warning while logged out, made seedRmo's `check[0].n` throw and abort app init,
+// and defeated every `.catch(() => {})` in the migration block (pgQ never throws).
+//
+// Changing the return type to null would break the ~360 call sites that do
+// rows.map(...) unguarded. Instead failures return an EMPTY ARRAY CARRYING AN
+// `error` PROPERTY: `.length`, `.map` and `?.length` all behave exactly as before,
+// and callers that care can check `rows.error`. Use pgFailed(rows) to test.
+function pgFail(message) {
+  const arr = []
+  arr.error = message || 'query failed'
+  return arr
+}
+// True when the query failed, as opposed to returning no rows.
+function pgFailed(rows) { return !!(rows && rows.error) }
+
 async function pgQ(sql, params = [], retries = 2) {
-  if (!pgConnected) return []
+  if (!pgConnected) return pgFail('not connected')
   for (let i = 0; i <= retries; i++) {
     try {
       const r = await fetch('/api/pg/query', {
@@ -2019,7 +2036,7 @@ async function pgQ(sql, params = [], retries = 2) {
           continue
         }
         console.error('[pgQ] error:', data.error)
-        return []
+        return pgFail(data.error)
       }
       return data.rows || []
     } catch (e) {
@@ -2028,10 +2045,10 @@ async function pgQ(sql, params = [], retries = 2) {
         continue
       }
       console.error('[pgQ] error:', e.message)
-      return []
+      return pgFail(e.message)
     }
   }
-  return []
+  return pgFail('retries exhausted')
 }
 
 async function loadLots(lotType, clientName) {
@@ -7532,13 +7549,18 @@ function addIntakeMoodTag(i) {
 async function checkTitleUnique(i) {
   const input = document.getElementById(`title-${i}`)
   const warn  = document.getElementById(`title-warn-${i}`)
-  console.log(`[checkTitleUnique] i=${i} input=${!!input} warn=${!!warn} pgConnected=${pgConnected}`)
   if (!input || !warn || !pgConnected) return
   const val = input.value.trim()
-  console.log(`[checkTitleUnique] val="${val}"`)
   if (!val) return
   const rows = await pgQ(`SELECT sku_root FROM titles WHERE lower(title)=lower($1) LIMIT 1`, [val])
-  console.log(`[checkTitleUnique] rows=`, rows)
+  // A failed query used to be indistinguishable from "no duplicate found", so while
+  // logged out this reported EVERY title as unique and suppressed the warning.
+  if (pgFailed(rows)) {
+    warn.innerHTML = `⚠ Could not check for duplicates — ${esc(rows.error || 'query failed')}`
+    warn.style.cssText = 'display:block;font-size:11px;color:#7a4a00;background:#fde68a;padding:5px 9px;border-radius:4px;margin-top:5px;font-weight:500;line-height:1.4'
+    input.style.borderColor = '#e6b271'
+    return
+  }
   if (rows && rows.length) {
     setHTML(warn, `⚠ This title already exists — ${esc(rows[0].sku_root)} — please rename`)
     warn.style.cssText = 'display:block;font-size:11px;color:#fff;background:#c0392b;padding:5px 9px;border-radius:4px;margin-top:5px;font-weight:500;line-height:1.4'
@@ -10845,11 +10867,24 @@ async function createAndPickLot() {
 async function showIntakeLotPicker() {
   const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
   console.log('[showIntakeLotPicker] intakeClient:', intakeClient, 'clientArg:', clientArg)
-  const lots = await pgQ(
-    `SELECT lot_id, lot_name, lot_type FROM lots ${clientArg ? "WHERE client=$1" : ""} ORDER BY lot_name DESC LIMIT 50`,
-    clientArg ? [clientArg] : []
-  ) || []
-  console.log('[showIntakeLotPicker] Query returned lots:', lots)
+  // Match case-insensitively against BOTH client columns. `client` holds the show
+  // ("American Pickers") and `lot_client` the production company ("CINEFLIX NY"),
+  // and the data has casing drift ("Haus Internal" vs "HAUS INTERNAL"), so an exact
+  // match on one column silently returned nothing.
+  let lots = clientArg ? (await pgQ(
+    `SELECT lot_id, lot_name, lot_type FROM lots
+      WHERE lower(trim(client)) = lower(trim($1)) OR lower(trim(lot_client)) = lower(trim($1))
+      ORDER BY lot_name DESC LIMIT 50`, [clientArg]) || []) : []
+
+  // Nothing matched this client — fall back to recent lots rather than an empty
+  // dropdown, which is indistinguishable from a failed query.
+  let fellBack = false
+  if (!lots.length) {
+    fellBack = true
+    lots = await pgQ(
+      `SELECT lot_id, lot_name, lot_type FROM lots ORDER BY lot_id DESC LIMIT 50`) || []
+  }
+  console.log(`[showIntakeLotPicker] ${lots.length} lots${fellBack ? ' (no client match — showing most recent)' : ` for client "${clientArg}"`}`)
 
   const modal = document.createElement('div')
   modal.id = 'intake-lot-picker-modal'
