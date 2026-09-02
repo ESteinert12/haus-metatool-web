@@ -1403,7 +1403,7 @@ async function loadCfg() {
   applyName()
   autoFillDropboxPaths()
   await pgAutoConnect()
-  loadFolderTags()   // folder-name tag vocabulary; parseFolderName reads the cache
+  await loadFolderTags()   // must complete before any folder is parsed
   b2AutoConnect()
 }
 
@@ -7830,14 +7830,24 @@ function parseFolderName(name) {
   // the folder_tags vocabulary can. Unknown segments become title text on purpose:
   // an extra visible word is recoverable, a silently truncated title is not.
   // Must match parseFolderDrop() in api.js — divergence creates duplicate staged rows.
+  // If the vocabulary has not loaded yet (async, and pgQ 401s before login) we
+  // CANNOT tell a tag from a title word. Fall back to the old single-segment rule
+  // — title = segs[1] — which never absorbed tags. Treating every unknown segment
+  // as title text is only safe once FOLDER_TAGS is actually populated.
+  const haveTags = FOLDER_TAGS.size > 0
   let key = ''
   const titleSegs = [], tagSegs = []
-  for (const seg of segs.slice(1)) {
+  for (const [idx, seg] of segs.slice(1).entries()) {
     const s = seg.trim()
     if (!s) continue
     if (!key && KEY_RE.test(s) && !/^HAUS$/i.test(s)) { key = normalizeKey(s); continue }
-    if (FOLDER_TAGS.has(s.toUpperCase())) { tagSegs.push(s); continue }
-    titleSegs.push(s)
+    if (haveTags) {
+      if (FOLDER_TAGS.has(s.toUpperCase())) tagSegs.push(s)
+      else titleSegs.push(s)
+    } else {
+      if (idx === 0) titleSegs.push(s)   // legacy: only the first segment is the title
+      else tagSegs.push(s)
+    }
   }
 
   let title = titleSegs.join(' '), tag = tagSegs.join(' ').trim()
