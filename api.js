@@ -234,6 +234,7 @@ async function runServerMigrations(pool) {
         await pgPool.query('SELECT 1')
         console.log('✅ PostgreSQL connected')
         await runServerMigrations(pgPool)
+        await loadFolderTags()   // must precede the watcher — parseFolderDrop reads FOLDER_TAGS
         startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
         break  // Success, exit retry loop
       } catch (e) {
@@ -2473,7 +2474,24 @@ const IS_DROP_FOLDER = /^[A-Z]\d{2}[a-zA-Z]/i
 const AUDIO_EXT      = /\.(wav|mp3|aiff?|flac|m4a)$/i
 
 // Musical key regex — matches Ab, Bbm, C#, Dmaj, etc. (same as client-side KEY_RE)
-const KEY_RE_SERVER = /^([A-Ga-g](?:sharp|flat|##?|bb?)?m?)$/i
+// Accepts C, Cm, Csharp, Cb and the spelled forms Cmaj / Eminor / Fmin, which the
+// previous pattern missed — those segments fell through and polluted the title.
+const KEY_RE_SERVER = /^([A-Ga-g](?:sharp|flat|##?|bb?)?(?:m|min|minor|maj|major)?)$/i
+
+// Known genre/collection tags, loaded from the folder_tags table. Folder names put
+// tags on either side of the key (R48a_AGAVE FEVER_TEX_DESERT_D as well as
+// R48a_TITLE_D_HEARTLAND), so position alone cannot separate tag from title.
+let FOLDER_TAGS = new Set()
+async function loadFolderTags() {
+  if (!pgPool) return
+  try {
+    const r = await pgPool.query('SELECT tag FROM folder_tags')
+    FOLDER_TAGS = new Set(r.rows.map(x => String(x.tag).trim().toUpperCase()))
+    console.log(`[tags] loaded ${FOLDER_TAGS.size} folder tags`)
+  } catch (e) {
+    console.warn('[tags] could not load folder_tags:', e.message)
+  }
+}
 
 function parseFolderDrop(folderName) {
   // Folder name format: {ComposerID}_{TitleWords}_{Key}[_tag...]
@@ -2484,20 +2502,21 @@ function parseFolderDrop(folderName) {
   const composerID = parts[0]
   const rest       = parts.slice(1)           // everything after composerID
 
-  let keyIdx = -1
-  for (let i = rest.length - 1; i >= 0; i--) {
-    if (KEY_RE_SERVER.test(rest[i])) { keyIdx = i; break }
-  }
-
-  let key, titleParts
-  if (keyIdx >= 0) {
-    key        = rest[keyIdx]
-    titleParts = rest.slice(0, keyIdx)
-    // rest.slice(keyIdx + 1) = trailing genre tags — ignored (not part of title or key)
-  } else {
-    // No musical key found — fall back to old behaviour: last segment = key
-    key        = rest[rest.length - 1] || null
-    titleParts = rest.slice(0, rest.length - 1)
+  // Classify every segment independently instead of by position. Taking
+  // rest.slice(0, keyIdx) as the title absorbed any tag that appeared BEFORE the
+  // key, e.g. R48a_AMERICAN MADE_HEARTLAND_Bb -> "AMERICAN MADE HEARTLAND".
+  // A segment is the key if it matches KEY_RE_SERVER, a tag if it is in
+  // folder_tags, otherwise part of the title. Unknown segments fall through to
+  // the title deliberately: a visible extra word is recoverable, a silently
+  // truncated title is not.
+  let key = null
+  const titleParts = [], tagParts = []
+  for (const raw of rest) {
+    const seg = String(raw).trim()
+    if (!seg) continue
+    if (!key && KEY_RE_SERVER.test(seg)) { key = seg; continue }
+    if (FOLDER_TAGS.has(seg.toUpperCase())) { tagParts.push(seg); continue }
+    titleParts.push(seg)
   }
 
   return {
