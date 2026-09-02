@@ -1,5 +1,5 @@
-// server.js — HAUS Workspace web server
-// Run with: node server.js
+// api.js — HAUS Workspace web server (the entrypoint; see package.json main/start)
+// Run with: node api.js
 // Then open http://localhost:3001 in any browser on the network
 
 process.on('uncaughtException',  e => console.error('💥 uncaughtException:', e.message, e.stack))
@@ -1775,6 +1775,82 @@ app.get('/api/b2/start-recovery', async (req, res) => {
       console.error('[RECOVERY] Fatal error:', e.message)
     }
   })()
+})
+
+// ─── B2 Missing Files Checker API ──────────────────────────────────────────
+app.get('/api/b2/inventory', (req, res) => {
+  try {
+    const fs = require('fs')
+    const path = require('path')
+
+    // Try multiple possible locations for the inventory file
+    const possiblePaths = [
+      path.join(__dirname, 'b2-all-collections-inventory-2026-08-25T08-27-53.json'),
+      path.join(__dirname, 'b2-all-collections-inventory-2026-08-25T08-27-53.json'),
+      // Fallback to any b2-all-collections-inventory file
+      ...(() => {
+        try {
+          const files = fs.readdirSync(__dirname)
+            .filter(f => f.startsWith('b2-all-collections-inventory') && f.endsWith('.json'))
+            .sort()
+            .reverse()
+            .map(f => path.join(__dirname, f))
+          return files
+        } catch { return [] }
+      })()
+    ]
+
+    let inventoryFile = null
+    for (const filePath of possiblePaths) {
+      try {
+        if (fs.existsSync(filePath)) {
+          inventoryFile = filePath
+          break
+        }
+      } catch { }
+    }
+
+    if (!inventoryFile) {
+      throw new Error(`No inventory file found. Checked: ${possiblePaths.join(', ')}`)
+    }
+
+    console.log(`[B2Inventory] Loading from ${inventoryFile}`)
+    const fileContent = fs.readFileSync(inventoryFile, 'utf8')
+    const data = JSON.parse(fileContent)
+
+    // Validate structure
+    if (!data.collections || !Array.isArray(data.collections)) {
+      throw new Error(`Invalid JSON structure: collections is not an array`)
+    }
+
+    // Extract just the filenames for matching
+    const filenames = []
+    for (const collection of data.collections || []) {
+      for (const folder of collection.folders || []) {
+        // Add audio files
+        for (const audio of folder.audioFiles || []) {
+          filenames.push(audio.name)
+        }
+
+        // Add stub files too (for completeness)
+        for (const stub of folder.stubFiles || []) {
+          filenames.push(stub.name)
+        }
+      }
+    }
+
+    console.log(`[B2Inventory] Serving ${filenames.length} files from ${path.basename(inventoryFile)}`)
+
+    // Double-check response format before sending
+    if (!Array.isArray(filenames)) {
+      throw new Error(`Invalid filenames array construction`)
+    }
+
+    res.json({ filenames })
+  } catch (error) {
+    console.error('[B2Inventory] Error:', error.message)
+    res.status(500).json({ error: error.message })
+  }
 })
 
 // DATABASE AUDIT: Query mix_stems for all b2_keys and check file sizes in B2

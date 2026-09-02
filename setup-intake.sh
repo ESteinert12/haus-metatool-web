@@ -34,14 +34,14 @@ echo "✅ All intake modules copied"
 
 # Verify syntax
 echo ""
-echo "🔍 Verifying server.js syntax..."
+echo "🔍 Verifying api.js syntax..."
 cd "$HAUS_APP"
-node -c server.js && echo "  ✅ Syntax valid"
+node --check api.js && echo "  ✅ Syntax valid"
 
 echo ""
 echo "🚀 Ready to restart server"
 echo ""
 echo "Next steps:"
 echo "  1. Kill the running server (Ctrl+C)"
-echo "  2. Start: node server.js"
+echo "  2. Start: node api.js"
 echo "  3. Check for errors in console"

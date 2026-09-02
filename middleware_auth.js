@@ -18,7 +18,8 @@ const PUBLIC_ROUTES = [
   '/auth/login',
   '/pg/connect',
   '/pg/status',
-  '/pg/query',
+  // '/pg/query' deliberately NOT public — it accepts arbitrary SQL from the
+  // browser. api.js keeps it behind the session guard; this list must match.
 
   // File system (public read operations)
   '/fs/read-dir',
