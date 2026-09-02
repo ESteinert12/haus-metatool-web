@@ -11108,6 +11108,18 @@ async function scanStaging() {
           _stagedId:    f.id,   // for cleanup after intake
         }
       })
+      // Same drop folder can appear at two paths (moved between lot folders,
+      // or a Dropbox sync racing). Same folder name == same drop, so collapse
+      // by name and keep the most recent row.
+      const byName = new Map()
+      for (const d of intakeDrops) {
+        const prev = byName.get(d.name)
+        if (!prev || (d._stagedId || 0) > (prev._stagedId || 0)) byName.set(d.name, d)
+      }
+      if (byName.size !== intakeDrops.length) {
+        console.log(`[intake] collapsed ${intakeDrops.length - byName.size} duplicate drop(s) by folder name`)
+        intakeDrops = Array.from(byName.values())
+      }
       usedCache = true
     }
   } catch {}
