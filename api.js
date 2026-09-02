@@ -2645,8 +2645,12 @@ app.get('/api/staged-files', async (req, res) => {
 app.delete('/api/staged-files/:id', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    await pgPool.query(`DELETE FROM staged_files WHERE id=$1`, [req.params.id])
-    res.json({ ok: true })
+    // Soft delete: mark imported rather than removing the row, so staging history
+    // survives and a failed cleanup is diagnosable. The listing endpoint filters
+    // status='pending', so the effect for the UI is identical.
+    const r = await pgPool.query(
+      `UPDATE staged_files SET status='imported' WHERE id=$1`, [req.params.id])
+    res.json({ ok: true, updated: r.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
@@ -2656,8 +2660,10 @@ app.delete('/api/staged-files/by-path', async (req, res) => {
   const { path: filePath } = req.query
   if (!filePath) return res.json({ ok: false, error: 'path required' })
   try {
-    await pgPool.query(`DELETE FROM staged_files WHERE filepath=$1`, [filePath])
-    res.json({ ok: true })
+    // Soft delete — see the :id handler above.
+    const r = await pgPool.query(
+      `UPDATE staged_files SET status='imported' WHERE filepath=$1`, [filePath])
+    res.json({ ok: true, updated: r.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
