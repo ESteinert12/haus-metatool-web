@@ -1,9 +1,21 @@
 // api.js — HAUS Workspace web server (the entrypoint; see package.json main/start)
 // Run with: node api.js
-// Then open http://localhost:3001 in any browser on the network
+// Then open http://localhost:9999 (or the Cloudflare tunnel, app.hausmusicplayer.com)
 
-process.on('uncaughtException',  e => console.error('💥 uncaughtException:', e.message, e.stack))
-process.on('unhandledRejection', e => console.error('💥 unhandledRejection:', e))
+// Exit on an uncaught exception rather than logging and carrying on. A failed
+// listen() (EADDRINUSE, when a second instance starts) used to be logged and then
+// IGNORED: the process kept running, connected to Postgres, and started a SECOND
+// staging watcher on the same Dropbox folder, so every drop was processed twice.
+// A process that cannot serve should die so it is visibly gone.
+process.on('uncaughtException', e => {
+  console.error('uncaughtException:', e.message, e.stack)
+  process.exit(1)
+})
+// Rejections stay non-fatal - one failed query should not kill the server - but
+// they are logged with a stack so they are traceable.
+process.on('unhandledRejection', e => {
+  console.error('unhandledRejection:', e && e.stack ? e.stack : e)
+})
 
 require("dotenv").config()
 const express    = require('express')
