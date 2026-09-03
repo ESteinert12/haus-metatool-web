@@ -7272,6 +7272,12 @@ const MMW_METAPAKS = [{"name": "AMERICANA", "phrases": ["Act upbeat", "Allow hap
 let intakeStep = 0, intakeDrops = [], intakeInfo = {}, intakeIndex = null, intakeBatchMode = false
 // Source folders that could not be archived. Never deleted — reported at run end.
 let _intakeArchiveFailures = []
+// B2 uploads that did not land. b2UploadFile never throws -- it logs and returns
+// null on every failure (not connected, upload-url refused, upload refused) --
+// and the intake loop used to discard that return value, so a failed upload
+// still recorded a b2_key. That is how a track ends up with a perfectly valid
+// database row pointing at an object that was never uploaded.
+let _intakeUploadFailures = []
 let _bgJobs = [], _bgJobSeq = 0
 let intakeClient = null, intakeLotId = null, intakeLotName = null, intakeLotType = 'client', intakeWebVisible = false, intakeExclUntil = ''
 let _intakeGenres = [], _intakeMoods = [], _intakeMood1 = [], _intakeSubGenres = {}, _intakeComposers = [], _intakeRmo = [], _intakeKsl = [], _intakeCowriters = [], _intakeMetapaks = MMW_METAPAKS
@@ -7875,12 +7881,35 @@ async function renderIntake(step) {
     }).join('')
     const remaining = intakeDrops.length - intakeIndex
     const allDone = remaining <= 0
+    // Both of these used to be collected and never shown. An intake that failed
+    // to upload, or failed to move the source out of staging, reported "All done!"
+    const warnRows = []
+    if (_intakeUploadFailures.length) {
+      const notConn = _intakeUploadFailures.some(f => f.notConnected)
+      warnRows.push(`<div style="font-weight:600;margin-bottom:3px">
+        ${_intakeUploadFailures.length} file${_intakeUploadFailures.length !== 1 ? 's' : ''} did not reach B2</div>
+        <div style="opacity:.9">${notConn
+          ? 'B2 was not connected. The files are in the shipping folder but nothing was uploaded.'
+          : 'The files are in the shipping folder. Their database rows have no B2 key, so a later intake will retry them.'}</div>`)
+    }
+    if (_intakeArchiveFailures.length) {
+      warnRows.push(`<div style="font-weight:600;margin:6px 0 3px">
+        ${_intakeArchiveFailures.length} source folder${_intakeArchiveFailures.length !== 1 ? 's' : ''} still in staging</div>
+        <div style="opacity:.9">Nothing was deleted — they will reappear as drops.</div>`)
+    }
+    const warnBanner = warnRows.length ? `
+      <div class="card" style="margin-top:10px;background:#fdf3e7;border:1px solid #c0782b;color:#7a4a12;font-size:12px;line-height:1.5;padding:14px 16px;text-align:left">
+        <div style="display:flex;align-items:center;gap:6px;font-weight:700;margin-bottom:6px">
+          <i class="ti ti-alert-triangle"></i> Finished with warnings</div>
+        ${warnRows.join('')}
+      </div>` : ''
     el.innerHTML = `
       <div class="card" style="text-align:center;padding:28px 40px 20px">
         <i class="ti ti-circle-check" style="font-size:40px;color:var(--green)"></i>
         <div style="font-size:15px;font-weight:600;margin:10px 0 4px">${allDone ? 'All done!' : 'Track processed'}</div>
         <div style="font-size:12px;color:var(--text3)">${allDone ? `${intakeResults.length} track${intakeResults.length !== 1 ? 's' : ''} total` : `${remaining} drop${remaining !== 1 ? 's' : ''} remaining`}</div>
       </div>
+      ${warnBanner}
       <div class="card" style="margin-top:10px">${skuRows}</div>
       <div style="display:flex;gap:8px;margin-top:12px">
         <button class="btn" onclick="openFinderAt('hausjup')"><i class="ti ti-folder"></i> Show in Finder</button>
@@ -11651,6 +11680,7 @@ function deduplicateHausNames(nameMap) {
 
 async function executeIntake(snapshot = null) {
   const bgMode = !!snapshot
+  if (!snapshot) { _intakeUploadFailures = []; _intakeArchiveFailures = [] }
   try {
   const results = []
   const batchIndices = snapshot
@@ -11862,9 +11892,20 @@ async function executeIntake(snapshot = null) {
         _intakeProgress('Uploading to B2…', fname)
         const localPath = `${destDir}/${fname}`
         const b2Key = `${composerFolder}/${folderName}/${fname}`
-        await b2UploadFile(localPath, b2Key)
-        b2Keys[fname] = b2Key
+        const uploaded = await b2UploadFile(localPath, b2Key)
+        if (uploaded) {
+          b2Keys[fname] = b2Key
+        } else {
+          // Leave b2_key NULL rather than recording a key for a file that is not
+          // there. The dupe path's backfill will retry it on a later run, and a
+          // NULL key is findable; a wrong key is not.
+          console.error(`[executeIntake] B2 upload FAILED: ${b2Key}`)
+          _intakeUploadFailures.push({ title, fname })
+        }
       }
+    } else {
+      console.warn(`[executeIntake] B2 not connected — "${title}" shipped locally but nothing was uploaded`)
+      for (const fname of renamedFiles) _intakeUploadFailures.push({ title, fname, notConnected: true })
     }
 
     _intakeProgress('Writing to database…', title)
