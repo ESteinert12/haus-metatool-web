@@ -2513,6 +2513,90 @@ app.get('/api/b2/repair', async (req, res) => {
   }
 })
 
+// --- B2 bucket scan ----------------------------------------------------------
+// /api/b2/verify is DATABASE-driven: it walks mix_stems rows that carry a
+// b2_key and asks whether the object is good. A stub sitting in B2 that NO row
+// points at is invisible to it. The 2026-08-12 audit counted 30,703 stubs
+// across four collections while the DB-driven sweep found 2,016 -- that gap is
+// the blind spot, not good news.
+//
+// This scans the BUCKET itself: every object, sized, grouped by collection,
+// then cross-referenced against mix_stems to separate "known to the catalogue"
+// from orphans.
+//   GET /api/b2/scan
+app.get('/api/b2/scan', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  const STUB_LIMIT = parseInt(req.query.stubLimit || '1024')
+  try {
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const byCollection = new Map()   // collection -> { total, stub, bytes }
+    const stubKeys = []
+    let total = 0, stubs = 0, pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `scan page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        const coll = (f.fileName.split('/')[0] || '(root)').toLowerCase()
+        if (!byCollection.has(coll)) byCollection.set(coll, { total: 0, stub: 0, bytes: 0 })
+        const c = byCollection.get(coll)
+        c.total++; c.bytes += f.contentLength; total++
+        if (f.contentLength < STUB_LIMIT) { c.stub++; stubs++; stubKeys.push(f.fileName) }
+      }
+      startFileName = r.body.nextFileName
+      pages++
+      if (pages % 5 === 0) console.log(`[b2-scan] ${total} objects, ${stubs} stubs so far…`)
+    } while (startFileName && pages < 200)
+
+    // Which stubs does the catalogue actually know about?
+    let known = 0, orphan = 0
+    if (pgPool && stubKeys.length) {
+      try {
+        const rows = (await pgPool.query(
+          `SELECT b2_key FROM mix_stems WHERE b2_key = ANY($1::text[])`, [stubKeys])).rows
+        known = rows.length
+        orphan = stubKeys.length - known
+      } catch (e) { console.warn('[b2-scan] cross-reference failed:', e.message) }
+    }
+
+    const collections = [...byCollection.entries()]
+      .map(([name, c]) => ({ collection: name, objects: c.total, stubs: c.stub,
+                             gb: +(c.bytes / 1e9).toFixed(1) }))
+      .sort((a, b) => b.stubs - a.stubs)
+
+    const report = { generated: new Date().toISOString(), stubLimit: STUB_LIMIT,
+                     totalObjects: total, totalStubs: stubs,
+                     stubsKnownToCatalogue: known, stubsOrphaned: orphan,
+                     collections, stubKeys }
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-scan-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
+    } catch (e) { console.warn('[b2-scan] could not write report:', e.message) }
+
+    console.log(`[b2-scan] ${total} objects, ${stubs} stubs (${known} in catalogue, ${orphan} orphaned)`)
+    res.json({ ok: true, totalObjects: total, totalStubs: stubs,
+               stubsKnownToCatalogue: known, stubsOrphaned: orphan,
+               collections, reportPath, stubSample: stubKeys.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-scan] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
