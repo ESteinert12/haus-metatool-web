@@ -2241,7 +2241,8 @@ app.get('/api/b2/verify', async (req, res) => {
         urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
         headers: { 'Authorization': b2Auth.authorizationToken }
       })
-      const bb = JSON.parse(br.body.toString())
+      // _b2Request already JSON-parses non-buffer responses; body is an object.
+      const bb = br.body
       bucketId = (bb.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
     } catch (e) { return res.json({ ok: false, error: `could not resolve bucket: ${e.message}` }) }
     if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
@@ -2262,7 +2263,7 @@ app.get('/api/b2/verify', async (req, res) => {
         urlPath: `/b2api/v3/b2_list_file_names?${params}`,
         headers: { 'Authorization': b2Auth.authorizationToken }
       })
-      const body = JSON.parse(r.body.toString())
+      const body = r.body   // already parsed
       if (r.status !== 200) return res.json({ ok: false, error: body?.message || `list failed HTTP ${r.status}` })
       for (const f of body.files || []) sizes.set(f.fileName, f.contentLength)
       startFileName = body.nextFileName
