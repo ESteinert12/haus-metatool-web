@@ -2317,9 +2317,24 @@ app.get('/api/b2/verify', async (req, res) => {
 // run so you can see coverage before anything is written.
 //   GET /api/b2/repair?dryRun=1            what could be fixed, and what cannot
 //   GET /api/b2/repair?dryRun=0&limit=100  actually re-upload, capped
+// B2 over a long run drops connections. A single ECONNRESET during the 26-page
+// bucket listing used to abort the whole repair, discarding the work done so far.
+async function _b2Retry(opts, label = 'b2', tries = 4) {
+  let lastErr
+  for (let i = 1; i <= tries; i++) {
+    try { return await _b2Request(opts) }
+    catch (e) {
+      lastErr = e
+      console.warn(`[b2-retry] ${label} attempt ${i}/${tries} failed: ${e.message}`)
+      if (i < tries) await new Promise(r => setTimeout(r, 1000 * i))
+    }
+  }
+  throw lastErr
+}
+
 async function _b2GetUploadUrl(bucketId) {
   const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
-  const r = await _b2Request({
+  const r = await _b2Retry({
     method: 'POST', hostname: apiHost, urlPath: '/b2api/v3/b2_get_upload_url',
     headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
     body: { bucketId }
@@ -2411,10 +2426,10 @@ app.get('/api/b2/repair', async (req, res) => {
     do {
       const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
       if (startFileName) params.set('startFileName', startFileName)
-      const r = await _b2Request({ method: 'GET',
+      const r = await _b2Retry({ method: 'GET',
         hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
         urlPath: `/b2api/v3/b2_list_file_names?${params}`,
-        headers: { 'Authorization': b2Auth.authorizationToken } })
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `list page ${pages + 1}`)
       if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
       for (const f of r.body.files || []) if (wanted.has(f.fileName)) sizes.set(f.fileName, f.contentLength)
       startFileName = r.body.nextFileName
@@ -2470,7 +2485,7 @@ app.get('/api/b2/repair', async (req, res) => {
         const up = await _b2GetUploadUrl(bucketId)
         const sha1 = crypto.createHash('sha1').update(buf).digest('hex')
         const mime = r.filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav'
-        const result = await _b2Request({
+        const result = await _b2Retry({
           method: 'POST',
           hostname: up.uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1'),
           urlPath: up.uploadUrl.replace(/^https?:\/\/[^/]+/, ''),
@@ -2478,7 +2493,7 @@ app.get('/api/b2/repair', async (req, res) => {
           headers: { 'Authorization': up.authorizationToken,
                      'X-Bz-File-Name': encodeURIComponent(r.b2_key).replace(/%2F/g, '/'),
                      'Content-Type': mime, 'X-Bz-Content-Sha1': sha1 }
-        })
+        }, r.filename)
         const parsed = JSON.parse(result.body.toString())
         if (result.status !== 200) { failures.push({ ...r, error: parsed?.message || `HTTP ${result.status}` }); continue }
         if (parsed.contentLength !== buf.length) {
