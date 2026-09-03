@@ -2597,6 +2597,114 @@ app.get('/api/b2/scan', async (req, res) => {
   }
 })
 
+// --- B2 relinking ------------------------------------------------------------
+// 41,543 stems carry no b2_key, and the assumption has been that their audio
+// must be re-uploaded from the old Dropbox. But the bucket holds ~255,000
+// objects while mix_stems references only ~164,500 keys -- roughly 90,000
+// objects nothing points at. If the Stratus/Cumulus/Cirrus audio was uploaded
+// during the original migration and simply never linked back, this is a
+// matching problem, not a bandwidth problem.
+//
+// Matches an unlinked stem to an existing object ONLY when all three hold:
+//   - exactly one object in the bucket has that filename
+//   - its path contains the stem's sku_root (so same-named files across SKUs
+//     cannot cross-link)
+//   - it is >= 1KB (never link a stub)
+// Anything less certain is reported, not guessed.
+//   GET /api/b2/link?dryRun=1        coverage report, writes nothing
+//   GET /api/b2/link?dryRun=0        sets b2_key on confident matches
+app.get('/api/b2/link', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    const rows = (await pgPool.query(
+      `SELECT m.mix_stem_id, m.sku_root, m.filename
+         FROM mix_stems m WHERE m.b2_key IS NULL`)).rows
+    if (!rows.length) return res.json({ ok: true, message: 'no unlinked stems' })
+
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const wantedNames = new Set(rows.map(r => r.filename))
+    const byName = new Map()   // filename -> [{key, size}]
+    let pages = 0, startFileName = null, scanned = 0
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `link page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        scanned++
+        const base = f.fileName.split('/').pop()
+        if (!wantedNames.has(base)) continue
+        if (!byName.has(base)) byName.set(base, [])
+        byName.get(base).push({ key: f.fileName, size: f.contentLength })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const linkable = [], notFound = [], ambiguous = [], stubOnly = []
+    for (const r of rows) {
+      const cands = byName.get(r.filename) || []
+      if (!cands.length) { notFound.push(r); continue }
+      // the object's path must name this SKU, or it belongs to a different track
+      const sameSku = cands.filter(c => c.key.includes('/' + r.sku_root))
+      if (!sameSku.length)    { notFound.push(r); continue }
+      const real = sameSku.filter(c => c.size >= STUB_LIMIT)
+      if (!real.length)       { stubOnly.push({ ...r, candidates: sameSku }); continue }
+      if (real.length > 1)    { ambiguous.push({ ...r, candidates: real }); continue }
+      linkable.push({ ...r, b2_key: real[0].key, size: real[0].size })
+    }
+
+    const counts = { unlinked: rows.length, linkable: linkable.length,
+                     notFound: notFound.length, ambiguous: ambiguous.length,
+                     stubOnly: stubOnly.length }
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-link-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        objectsScanned: scanned, counts, linkable, notFound, ambiguous, stubOnly }, null, 2))
+    } catch (e) { console.warn('[b2-link] could not write report:', e.message) }
+
+    if (dryRun) {
+      console.log(`[b2-link] DRY RUN — ${counts.linkable}/${counts.unlinked} linkable, ${counts.notFound} not in bucket, ${counts.ambiguous} ambiguous, ${counts.stubOnly} stub-only`)
+      return res.json({ ok: true, dryRun: true, objectsScanned: scanned, counts, reportPath,
+                        linkableSample: linkable.slice(0, 20), notFoundSample: notFound.slice(0, 20) })
+    }
+
+    const todo = limit ? linkable.slice(0, limit) : linkable
+    let updated = 0
+    for (const l of todo) {
+      try {
+        await pgPool.query(`UPDATE mix_stems SET b2_key = $1 WHERE mix_stem_id = $2 AND b2_key IS NULL`,
+                           [l.b2_key, l.mix_stem_id])
+        updated++
+        if (updated % 500 === 0) console.log(`[b2-link] ${updated}/${todo.length}`)
+      } catch (e) { console.warn('[b2-link] update failed:', l.mix_stem_id, e.message) }
+    }
+    console.log(`[b2-link] done — ${updated} linked, ${linkable.length - todo.length} remaining`)
+    res.json({ ok: true, dryRun: false, counts, updated,
+               remaining: linkable.length - todo.length, reportPath })
+  } catch (e) {
+    console.error('[b2-link] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
