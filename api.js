@@ -2354,13 +2354,21 @@ app.get('/api/b2/repair', async (req, res) => {
   const limit  = parseInt(req.query.limit || '0') || 0
   const STUB_LIMIT = 1024
   try {
-    let shippingRoot = null
+    // There is more than one shipping location: the live one (Downloads, chosen
+    // to avoid cloud-storage stubs) and the legacy Dropbox one still holding
+    // July's deliverables. Indexing only cfg.hausjup reported files as "no local
+    // copy" when they were sitting in the other. Index every root that exists.
+    const roots = []
     try {
       const c = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
-      shippingRoot = c.hausjup
+      if (c.hausjup) roots.push(c.hausjup)
     } catch {}
-    if (!shippingRoot || !fs.existsSync(shippingRoot)) {
-      return res.json({ ok: false, error: `shipping folder not found: ${shippingRoot}` })
+    roots.push(path.join(os.homedir(), 'Downloads', '1. ATMOS_SHIPPING'))
+    roots.push(path.join(os.homedir(), 'Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping'))
+    for (const extra of String(req.query.extraRoots || '').split(',').map(x => x.trim()).filter(Boolean)) roots.push(extra)
+    const shippingRoots = [...new Set(roots)].filter(r => { try { return fs.existsSync(r) } catch { return false } })
+    if (!shippingRoots.length) {
+      return res.json({ ok: false, error: `no shipping folder found. Tried: ${roots.join(' | ')}` })
     }
 
     let bucketId = req.query.bucketId
@@ -2398,7 +2406,13 @@ app.get('/api/b2/repair', async (req, res) => {
       return s === undefined || s < STUB_LIMIT
     })
 
-    const idx = _indexShipping(shippingRoot)
+    const idx = new Map()
+    for (const root of shippingRoots) {
+      for (const [name, paths] of _indexShipping(root)) {
+        if (!idx.has(name)) idx.set(name, [])
+        idx.get(name).push(...paths)
+      }
+    }
     const repairable = [], noLocal = [], ambiguous = []
     for (const r of broken) {
       const hits = idx.get(r.filename) || []
@@ -2409,7 +2423,7 @@ app.get('/api/b2/repair', async (req, res) => {
 
     if (dryRun) {
       console.log(`[b2-repair] DRY RUN — ${broken.length} broken, ${repairable.length} repairable, ${noLocal.length} no local copy, ${ambiguous.length} ambiguous`)
-      return res.json({ ok: true, dryRun: true, shippingRoot,
+      return res.json({ ok: true, dryRun: true, shippingRoots,
         counts: { broken: broken.length, repairable: repairable.length,
                   noLocal: noLocal.length, ambiguous: ambiguous.length },
         noLocalSample: noLocal.slice(0, 50), ambiguousSample: ambiguous.slice(0, 20) })
