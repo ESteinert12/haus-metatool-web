@@ -2658,6 +2658,7 @@ app.get('/api/b2/link', async (req, res) => {
     } while (startFileName && pages < 200)
 
     const linkable = [], notFound = [], ambiguous = [], stubOnly = []
+    let tieBroken = 0
     for (const r of rows) {
       const cands = byName.get(r.filename) || []
       if (!cands.length) { notFound.push(r); continue }
@@ -2666,11 +2667,28 @@ app.get('/api/b2/link', async (req, res) => {
       if (!sameSku.length)    { notFound.push(r); continue }
       const real = sameSku.filter(c => c.size >= STUB_LIMIT)
       if (!real.length)       { stubOnly.push({ ...r, candidates: sameSku }); continue }
-      if (real.length > 1)    { ambiguous.push({ ...r, candidates: real }); continue }
+      if (real.length > 1) {
+        // Duplicates in the bucket, from two upload passes under slightly
+        // different folder spellings -- a composer typo ("Ethan Meixsell" vs
+        // "Ethan Miexsell"), a longer form of a name, or a "_Snapped" suffix.
+        // When every candidate is the SAME BYTE SIZE they are the same audio and
+        // the choice is arbitrary: take the shortest key, then lexicographically,
+        // so the result is deterministic and re-runnable. Candidates that differ
+        // in size might be different takes -- never guess at those.
+        const sizes = new Set(real.map(c => c.size))
+        if (sizes.size === 1) {
+          const pick = real.slice().sort((a, b) => a.key.length - b.key.length || a.key.localeCompare(b.key))[0]
+          linkable.push({ ...r, b2_key: pick.key, size: pick.size, tieBreak: true })
+          tieBroken++
+          continue
+        }
+        ambiguous.push({ ...r, candidates: real }); continue
+      }
       linkable.push({ ...r, b2_key: real[0].key, size: real[0].size })
     }
 
     const counts = { unlinked: rows.length, linkable: linkable.length,
+                     ofWhichTieBroken: tieBroken,
                      notFound: notFound.length, ambiguous: ambiguous.length,
                      stubOnly: stubOnly.length }
     let reportPath = null
