@@ -11695,7 +11695,7 @@ async function executeIntake(snapshot = null) {
           // proves *something* is there — it may be an older take, and this drop a
           // re-delivery. Archive it if we can; otherwise leave it and report.
           {
-            const archiveDupe = `${destDirDupe}/_source`
+            const archiveDupe = `${cfg.hausjup}/${dupeLotFolder}`
             let archived = false
             if (archiveDupe && archiveDupe !== cfg.intake) {
               const mk = await window.haus.shell.exec(`mkdir -p "${archiveDupe}"`)
@@ -11881,10 +11881,12 @@ async function executeIntake(snapshot = null) {
     // project folder for an old show -- consumed sources were being dumped in
     // there and it could never empty out. Shipping is on local disk (Downloads),
     // deliberately not Dropbox, to avoid cloud-storage stubs and partial uploads.
-    // One SKU = one folder, source included, all deleted together once the client
-    // has it and B2 is confirmed. The dupe check below globs -maxdepth 1, so a
-    // _source subfolder is invisible to it.
-    const archiveDir = `${destDir}/_source`
+    // Destination is the LOT folder chosen in intake: the source sits beside the
+    // SKU folders for that lot. Everything for a lot is then in one place and is
+    // deleted together once the client has it and B2 is confirmed. The "already
+    // shipped?" probe globs the SKU folder with -maxdepth 1, so a source folder
+    // sitting at lot level cannot cause a false positive.
+    const archiveDir = `${cfg.hausjup}/${lotFolder}`
     if (archiveDir && archiveDir !== cfg.intake) {
       // Create archive folder if needed
       const mkArchive = await window.haus.shell.exec(`mkdir -p "${archiveDir}"`)
