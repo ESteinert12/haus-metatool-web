@@ -2221,6 +2221,75 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
   }
 })
 
+// --- B2 verification -------------------------------------------------------
+// Nothing here has ever checked that what mix_stems claims is in B2 actually is.
+// That is how intake could store ~130 bytes of file path instead of audio for
+// weeks unnoticed: the player streams from the LOCAL disk (audioUrl ->
+// /api/audio/stream), never from B2.
+//   ok / stub (present but <1KB) / missing (row has a key, bucket has nothing)
+app.get('/api/b2/verify', async (req, res) => {
+  if (!b2Auth)  return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const bucketId = req.query.bucketId
+  if (!bucketId) return res.json({ ok: false, error: 'bucketId required' })
+  const since  = req.query.since  || null
+  const prefix = req.query.prefix || ''
+  const STUB_LIMIT = 1024
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const sizes = new Map()
+    let startFileName = null, pages = 0
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (prefix)        params.set('prefix', prefix)
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Request({
+        method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+      const body = JSON.parse(r.body.toString())
+      if (r.status !== 200) return res.json({ ok: false, error: body?.message || `list failed HTTP ${r.status}` })
+      for (const f of body.files || []) sizes.set(f.fileName, f.contentLength)
+      startFileName = body.nextFileName
+      pages++
+    } while (startFileName && pages < 100)
+
+    const q = since
+      ? `SELECT m.sku_root, m.filename, m.b2_key, t.title
+           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
+          WHERE m.b2_key IS NOT NULL AND t.created_at >= $1`
+      : `SELECT m.sku_root, m.filename, m.b2_key, t.title
+           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
+          WHERE m.b2_key IS NOT NULL`
+    const rows = (await pgPool.query(q, since ? [since] : [])).rows
+
+    const bad = []
+    let ok = 0, stub = 0, missing = 0
+    for (const row of rows) {
+      const size = sizes.get(row.b2_key)
+      if (size === undefined)     { missing++; bad.push({ ...row, problem: 'missing', b2_size: null }) }
+      else if (size < STUB_LIMIT) { stub++;    bad.push({ ...row, problem: 'stub',    b2_size: size }) }
+      else ok++
+    }
+
+    const report = { generated: new Date().toISOString(), bucketId, prefix, since,
+                     b2_objects_listed: sizes.size, rows_checked: rows.length, ok, stub, missing, bad }
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-verify-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
+    } catch (e) { console.warn('[b2-verify] could not write report:', e.message) }
+
+    console.log(`[b2-verify] ${ok} ok, ${stub} stub, ${missing} missing (of ${rows.length} rows, ${sizes.size} objects)`)
+    res.json({ ok: true, b2_objects_listed: sizes.size, rows_checked: rows.length,
+               counts: { ok, stub, missing }, reportPath, sample: bad.slice(0, 200) })
+  } catch (e) {
+    console.error('[b2-verify] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
