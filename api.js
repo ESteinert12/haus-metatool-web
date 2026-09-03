@@ -2705,17 +2705,36 @@ app.get('/api/b2/link', async (req, res) => {
     }
 
     const todo = limit ? linkable.slice(0, limit) : linkable
-    let updated = 0
-    for (const l of todo) {
-      try {
-        await pgPool.query(`UPDATE mix_stems SET b2_key = $1 WHERE mix_stem_id = $2 AND b2_key IS NULL`,
-                           [l.b2_key, l.mix_stem_id])
-        updated++
-        if (updated % 500 === 0) console.log(`[b2-link] ${updated}/${todo.length}`)
-      } catch (e) { console.warn('[b2-link] update failed:', l.mix_stem_id, e.message) }
+    // One UPDATE per row meant 41,000 round trips, and Neon dropped the
+    // connection repeatedly under that load. Batched, it is ~83 statements.
+    // Rows in a failed batch keep b2_key NULL, so re-running picks them up --
+    // the guard makes this safely repeatable.
+    const CHUNK = 500
+    let updated = 0, batchFailures = 0
+    for (let i = 0; i < todo.length; i += CHUNK) {
+      const slice = todo.slice(i, i + CHUNK)
+      const ids   = slice.map(l => l.mix_stem_id)
+      const keys  = slice.map(l => l.b2_key)
+      let done = false
+      for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+        try {
+          const r = await pgPool.query(
+            `UPDATE mix_stems m SET b2_key = v.key
+               FROM (SELECT unnest($1::int[]) AS id, unnest($2::text[]) AS key) v
+              WHERE m.mix_stem_id = v.id AND m.b2_key IS NULL`, [ids, keys])
+          updated += r.rowCount
+          done = true
+        } catch (e) {
+          console.warn(`[b2-link] batch ${i / CHUNK + 1} attempt ${attempt}/3 failed: ${e.message}`)
+          if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt))
+        }
+      }
+      if (!done) batchFailures += slice.length
+      if ((i / CHUNK) % 10 === 0) console.log(`[b2-link] ${updated}/${todo.length}`)
     }
+    if (batchFailures) console.warn(`[b2-link] ${batchFailures} row(s) skipped after retries — re-run to pick them up`)
     console.log(`[b2-link] done — ${updated} linked, ${linkable.length - todo.length} remaining`)
-    res.json({ ok: true, dryRun: false, counts, updated,
+    res.json({ ok: true, dryRun: false, counts, updated, skipped: batchFailures,
                remaining: linkable.length - todo.length, reportPath })
   } catch (e) {
     console.error('[b2-link] error:', e.message)
