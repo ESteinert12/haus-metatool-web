@@ -8488,8 +8488,8 @@ async function executeRecopyStagingDupe(idx) {
       }
     }
 
-    // Delete staging + purge cache
-    await window.haus.shell.exec(`rm -rf "${r.drop.path}"`)
+    // Retire staging (move, not delete) + purge cache
+    await retireStagingFolder(r.drop.path)
     fetch(`/api/staged-files/by-path?path=${encodeURIComponent(r.drop.path)}`, { method: 'DELETE' }).catch(() => {})
 
     // Update row to show success + enable delete checkbox
@@ -8505,21 +8505,44 @@ async function executeRecopyStagingDupe(idx) {
   }
 }
 
+async function retireStagingFolder(srcPath) {
+  // Never rm -rf a folder from staging. The cleanup panel decides a drop is
+  // already in the catalogue by matching title + composer, and on 2026-09-02 it
+  // was wrong once out of twelve: T51a_InTheBottle had never been imported and
+  // was destroyed. rm -rf also bypasses the macOS Trash, so there was nothing to
+  // restore from. Move instead, into a dated folder that neither the watcher
+  // (depth 2) nor the disk scans (one level deep) will pick back up.
+  const staging = cfg.staging || cfg.intake
+  if (!staging) return { err: 'no staging folder configured' }
+  const stamp   = new Date().toISOString().slice(0, 10)
+  const destDir = `${staging}/_deleted/${stamp}`
+  const mk = await window.haus.shell.exec(`mkdir -p "${destDir}"`)
+  if (mk?.err) return { err: `could not create ${destDir}: ${mk.err}` }
+  const base  = srcPath.replace(/\/+$/, '').split('/').pop()
+  let   dest  = `${destDir}/${base}`
+  const clash = await window.haus.shell.exec(`test -e "${dest}" && echo YES || echo NO`)
+  if ((clash?.stdout || '').trim() === 'YES') dest = `${destDir}/${base}_${Date.now()}`
+  const mv = await window.haus.shell.exec(`mv "${srcPath}" "${dest}"`)
+  if (mv?.err) return { err: mv.err }
+  console.log(`[cleanup] retired ${base} -> ${dest}`)
+  return { ok: true, dest }
+}
+
 async function executeCleanupStagingDupes(results) {
   const toDelete = results.filter((_, idx) => {
     const chk = document.getElementById(`cleanup-chk-${idx}`)
     return chk && chk.checked
   })
   if (!toDelete.length) { alert('Nothing selected.'); return }
-  if (!confirm(`Delete ${toDelete.length} staging folder${toDelete.length !== 1 ? 's' : ''}? This cannot be undone.`)) return
+  if (!confirm(`Move ${toDelete.length} staging folder${toDelete.length !== 1 ? 's' : ''} out of staging?\n\nThey go to _deleted/ inside the staging folder, so you can drag them back if this is wrong. Nothing is erased.`)) return
 
   const panel = document.getElementById('intake-form-panel')
   let done = 0, failed = []
   for (const r of toDelete) {
-    const rm = await window.haus.shell.exec(`rm -rf "${r.drop.path}"`)
+    const rm = await retireStagingFolder(r.drop.path)
     if (rm?.err) {
       failed.push(r.title)
-      console.error('[cleanup] rm failed:', r.drop.path, rm.err)
+      console.error('[cleanup] retire failed:', r.drop.path, rm.err)
     } else {
       // Clear DB cache entry
       fetch(`/api/staged-files/by-path?path=${encodeURIComponent(r.drop.path)}`, { method: 'DELETE' }).catch(() => {})
@@ -11756,7 +11779,7 @@ async function executeIntake(snapshot = null) {
     // Safety check: if every copy failed, files weren't locally synced (Dropbox placeholder).
     // Delete the empty dest folder and throw — staging stays intact for retry.
     if (dedupedMap.length > 0 && renamedFiles.length === 0) {
-      await window.haus.shell.exec(`rm -rf "${destDir}"`)
+      await window.haus.shell.exec(`rmdir "${destDir}"`)  // rmdir, not rm -rf: refuses if anything did land there
       throw new Error(`No files could be copied for "${title}".\n\nFiles may not be fully synced from Dropbox — wait for the Dropbox sync icon to clear, then try again.\n\nThe staging folder has been preserved for retry.`)
     }
     if (cpErrors > 0) {

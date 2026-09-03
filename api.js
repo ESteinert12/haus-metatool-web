@@ -2626,7 +2626,7 @@ async function startStagingWatcher(pool) {
     persistent:      true,
     ignoreInitial:   true,   // don't re-process existing folders on startup
     depth:           2,
-    ignored:         /(^|[\/\\])(\.|Icon\r|\.dropbox)/,
+    ignored:         /(^|[\/\\])(\.|Icon\r|\.dropbox|_deleted)/,
     awaitWriteFinish: { stabilityThreshold: 3000, pollInterval: 500 },
   })
 
