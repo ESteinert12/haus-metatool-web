@@ -11443,6 +11443,13 @@ async function collectIntakeInfo() {
     const composerId = document.getElementById(`id-${i}`)?.value.trim() || 'UNKNOWN'
     const jupBtn = document.getElementById(`jup-toggle-${i}`)
     intakeInfo[i] = {
+      // Stable identity. Everything else here is keyed by array index, and
+      // intakeDrops gets rebuilt whenever staging is re-scanned (an archived
+      // folder leaving the list shifts every index after it). Without this,
+      // intakeInfo[i] and intakeDrops[i] can end up describing different songs
+      // -- that is how R48a5854 "Bone Dried" got Hold On Tight Tension 1's audio.
+      _dropPath: intakeDrops[i].path,
+      _dropName: intakeDrops[i].name,
       title:   document.getElementById(`title-${i}`)?.value.trim() || intakeDrops[i].name,
       id:      composerId,
       tag:     document.getElementById(`tag-${i}`)?.value.trim().toUpperCase() || '',
@@ -11579,9 +11586,26 @@ async function executeIntake(snapshot = null) {
         : [intakeIndex])
   for (let _j = 0; _j < batchIndices.length; _j++) {
     const i    = batchIndices[_j]
-    const d    = snapshot ? snapshot.drops[_j]  : intakeDrops[i]
     const info = snapshot ? snapshot.infos[_j]  : intakeInfo[i]
-    const title = info.title || d.name
+    let   d    = snapshot ? snapshot.drops[_j]  : intakeDrops[i]
+    // Trust the recorded path over the array position. If the index has drifted,
+    // re-find the drop; if it cannot be found at all, stop the whole intake
+    // rather than uploading some other song's audio under this song's name.
+    if (info && info._dropPath && (!d || d.path !== info._dropPath)) {
+      const byPath = intakeDrops.find(x => x && x.path === info._dropPath)
+      if (byPath) {
+        console.warn(`[intake] index drift: slot ${i} is now "${d?.name || 'nothing'}", expected "${info._dropName}". Resolved by path.`)
+        d = byPath
+      } else {
+        console.error(`[intake] ABORT — "${info._dropName}" is no longer in staging at ${info._dropPath}`)
+        alert(`Intake stopped.\n\n"${info._dropName}" is no longer where it was when you filled the form, so the audio cannot be matched to the metadata safely.\n\nNothing was uploaded. Re-scan staging and try again.`)
+        return
+      }
+    }
+    // let, not const: the title-clash branch below reassigns this when another
+    // composer already owns the title. As a const that threw
+    // "Assignment to constant variable" and killed the intake mid-run.
+    let title = info.title || d.name
     const albumSuffix = info.tag || info.genre
 
     // ── SKU Assignment ────────────────────────────────────────────────────
