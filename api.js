@@ -2311,6 +2311,148 @@ app.get('/api/b2/verify', async (req, res) => {
   }
 })
 
+// --- B2 repair ---------------------------------------------------------------
+// Re-uploads stems that are stubs or missing in B2, taking the bytes from the
+// local shipping copy (which is correct and correctly named). Defaults to a dry
+// run so you can see coverage before anything is written.
+//   GET /api/b2/repair?dryRun=1            what could be fixed, and what cannot
+//   GET /api/b2/repair?dryRun=0&limit=100  actually re-upload, capped
+async function _b2GetUploadUrl(bucketId) {
+  const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  const r = await _b2Request({
+    method: 'POST', hostname: apiHost, urlPath: '/b2api/v3/b2_get_upload_url',
+    headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+    body: { bucketId }
+  })
+  if (r.status !== 200) throw new Error(r.body?.message || `get_upload_url HTTP ${r.status}`)
+  return r.body
+}
+
+function _indexShipping(root) {
+  // filename -> [absolute paths]. Duplicates are kept so we can refuse to guess.
+  const idx = new Map()
+  const walk = dir => {
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) walk(full)
+      else if (/\.(wav|mp3|aif|aiff)$/i.test(e.name)) {
+        if (!idx.has(e.name)) idx.set(e.name, [])
+        idx.get(e.name).push(full)
+      }
+    }
+  }
+  walk(root)
+  return idx
+}
+
+app.get('/api/b2/repair', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let shippingRoot = null
+    try {
+      const c = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
+      shippingRoot = c.hausjup
+    } catch {}
+    if (!shippingRoot || !fs.existsSync(shippingRoot)) {
+      return res.json({ ok: false, error: `shipping folder not found: ${shippingRoot}` })
+    }
+
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Request({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } })
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const rows = (await pgPool.query(
+      `SELECT m.mix_stem_id, m.sku_root, m.filename, m.b2_key
+         FROM mix_stems m WHERE m.b2_key IS NOT NULL`)).rows
+    const wanted = new Set(rows.map(r => r.b2_key))
+
+    const sizes = new Map()
+    let startFileName = null, pages = 0
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Request({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } })
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) if (wanted.has(f.fileName)) sizes.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 100)
+
+    const broken = rows.filter(r => {
+      const s = sizes.get(r.b2_key)
+      return s === undefined || s < STUB_LIMIT
+    })
+
+    const idx = _indexShipping(shippingRoot)
+    const repairable = [], noLocal = [], ambiguous = []
+    for (const r of broken) {
+      const hits = idx.get(r.filename) || []
+      if (hits.length === 1)      repairable.push({ ...r, localPath: hits[0] })
+      else if (hits.length === 0) noLocal.push(r)
+      else                        ambiguous.push({ ...r, candidates: hits })
+    }
+
+    if (dryRun) {
+      console.log(`[b2-repair] DRY RUN — ${broken.length} broken, ${repairable.length} repairable, ${noLocal.length} no local copy, ${ambiguous.length} ambiguous`)
+      return res.json({ ok: true, dryRun: true, shippingRoot,
+        counts: { broken: broken.length, repairable: repairable.length,
+                  noLocal: noLocal.length, ambiguous: ambiguous.length },
+        noLocalSample: noLocal.slice(0, 50), ambiguousSample: ambiguous.slice(0, 20) })
+    }
+
+    const todo = limit ? repairable.slice(0, limit) : repairable
+    let fixed = 0
+    const failures = []
+    for (const r of todo) {
+      try {
+        const buf = fs.readFileSync(r.localPath)
+        if (buf.length < STUB_LIMIT) { failures.push({ ...r, error: `local file is only ${buf.length} bytes` }); continue }
+        const up = await _b2GetUploadUrl(bucketId)
+        const sha1 = crypto.createHash('sha1').update(buf).digest('hex')
+        const mime = r.filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav'
+        const result = await _b2Request({
+          method: 'POST',
+          hostname: up.uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1'),
+          urlPath: up.uploadUrl.replace(/^https?:\/\/[^/]+/, ''),
+          isBuffer: true, body: buf,
+          headers: { 'Authorization': up.authorizationToken,
+                     'X-Bz-File-Name': encodeURIComponent(r.b2_key).replace(/%2F/g, '/'),
+                     'Content-Type': mime, 'X-Bz-Content-Sha1': sha1 }
+        })
+        const parsed = JSON.parse(result.body.toString())
+        if (result.status !== 200) { failures.push({ ...r, error: parsed?.message || `HTTP ${result.status}` }); continue }
+        if (parsed.contentLength !== buf.length) {
+          failures.push({ ...r, error: `B2 stored ${parsed.contentLength}, expected ${buf.length}` }); continue
+        }
+        fixed++
+        if (fixed % 25 === 0) console.log(`[b2-repair] ${fixed}/${todo.length}`)
+      } catch (e) { failures.push({ ...r, error: e.message }) }
+    }
+    console.log(`[b2-repair] done — ${fixed} re-uploaded, ${failures.length} failed`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, fixed,
+               failed: failures.length, remaining: repairable.length - todo.length,
+               noLocal: noLocal.length, failures: failures.slice(0, 50) })
+  } catch (e) {
+    console.error('[b2-repair] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
