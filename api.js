@@ -2251,9 +2251,23 @@ app.get('/api/b2/verify', async (req, res) => {
   const prefix = req.query.prefix || ''
   const STUB_LIMIT = 1024
   try {
+    // Query Postgres FIRST. Listing 250k+ B2 objects takes minutes, and running
+    // it before the query left the pg connection idle long enough to die with
+    // "Connection terminated unexpectedly" on the full-catalogue sweep.
+    const q = since
+      ? `SELECT m.sku_root, m.filename, m.b2_key, t.title
+           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
+          WHERE m.b2_key IS NOT NULL AND t.created_at >= $1`
+      : `SELECT m.sku_root, m.filename, m.b2_key, t.title
+           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
+          WHERE m.b2_key IS NOT NULL`
+    const rows = (await pgPool.query(q, since ? [since] : [])).rows
+    // Only remember sizes for keys we actually care about -- no point holding
+    // 250k entries when we are asking about a fraction of them.
+    const wanted = new Set(rows.map(r => r.b2_key))
     const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
     const sizes = new Map()
-    let startFileName = null, pages = 0
+    let startFileName = null, pages = 0, listed = 0
     do {
       const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
       if (prefix)        params.set('prefix', prefix)
@@ -2265,19 +2279,11 @@ app.get('/api/b2/verify', async (req, res) => {
       })
       const body = r.body   // already parsed
       if (r.status !== 200) return res.json({ ok: false, error: body?.message || `list failed HTTP ${r.status}` })
-      for (const f of body.files || []) sizes.set(f.fileName, f.contentLength)
+      for (const f of body.files || []) if (wanted.has(f.fileName)) sizes.set(f.fileName, f.contentLength)
+      listed += (body.files || []).length
       startFileName = body.nextFileName
       pages++
     } while (startFileName && pages < 100)
-
-    const q = since
-      ? `SELECT m.sku_root, m.filename, m.b2_key, t.title
-           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
-          WHERE m.b2_key IS NOT NULL AND t.created_at >= $1`
-      : `SELECT m.sku_root, m.filename, m.b2_key, t.title
-           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
-          WHERE m.b2_key IS NOT NULL`
-    const rows = (await pgPool.query(q, since ? [since] : [])).rows
 
     const bad = []
     let ok = 0, stub = 0, missing = 0
@@ -2289,15 +2295,15 @@ app.get('/api/b2/verify', async (req, res) => {
     }
 
     const report = { generated: new Date().toISOString(), bucketId, prefix, since,
-                     b2_objects_listed: sizes.size, rows_checked: rows.length, ok, stub, missing, bad }
+                     b2_objects_listed: listed, rows_checked: rows.length, ok, stub, missing, bad }
     let reportPath = null
     try {
       reportPath = path.join(__dirname, `b2-verify-${Date.now()}.json`)
       fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
     } catch (e) { console.warn('[b2-verify] could not write report:', e.message) }
 
-    console.log(`[b2-verify] ${ok} ok, ${stub} stub, ${missing} missing (of ${rows.length} rows, ${sizes.size} objects)`)
-    res.json({ ok: true, b2_objects_listed: sizes.size, rows_checked: rows.length,
+    console.log(`[b2-verify] ${ok} ok, ${stub} stub, ${missing} missing (of ${rows.length} rows, ${listed} objects)`)
+    res.json({ ok: true, b2_objects_listed: listed, rows_checked: rows.length,
                counts: { ok, stub, missing }, reportPath, sample: bad.slice(0, 200) })
   } catch (e) {
     console.error('[b2-verify] error:', e.message)
