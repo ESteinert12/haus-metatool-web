@@ -2175,11 +2175,26 @@ app.post('/api/b2/get-upload-url', async (req, res) => {
 // Upload: browser sends file to server, server pushes to B2
 app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'Not authorized' })
-  const { uploadUrl, uploadAuthToken, b2FileName, mimeType } = req.body
+  const { uploadUrl, uploadAuthToken, b2FileName, mimeType, filePath } = req.body
   const tempPath = req.file?.path
-  if (!tempPath) return res.json({ ok: false, error: 'No file received' })
+  // Two shapes: a multipart upload (browser drag-and-drop) leaves a temp file,
+  // or an absolute path (intake) which we read in place -- the audio is already
+  // on this machine, so there is no reason to push it through the browser.
+  let sourcePath = tempPath
+  if (!sourcePath && filePath) {
+    if (!path.isAbsolute(filePath)) return res.json({ ok: false, error: 'filePath must be absolute' })
+    if (!fs.existsSync(filePath))   return res.json({ ok: false, error: `file not found: ${filePath}` })
+    sourcePath = filePath
+  }
+  if (!sourcePath) return res.json({ ok: false, error: 'No file received' })
   try {
-    const fileBuffer = fs.readFileSync(tempPath)
+    const fileBuffer = fs.readFileSync(sourcePath)
+    // Refuse implausibly small audio. This is the check that would have caught
+    // the path-as-payload bug on the first upload instead of after the fact.
+    if (/\.(wav|mp3|aif|aiff)$/i.test(b2FileName || '') && fileBuffer.length < 1024) {
+      if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
+      return res.json({ ok: false, error: `refusing to upload ${fileBuffer.length}-byte audio file (${b2FileName}) — source looks empty or is a placeholder` })
+    }
     const sha1       = crypto.createHash('sha1').update(fileBuffer).digest('hex')
     const uploadHost = uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1')
     const uploadPath = uploadUrl.replace(/^https?:\/\/[^/]+/, '')
@@ -2193,7 +2208,7 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
         'X-Bz-Content-Sha1': sha1
       }
     })
-    try { fs.unlinkSync(tempPath) } catch {}
+    if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
     const parsed = JSON.parse(result.body.toString())
     if (result.status === 200) {
       const downloadUrl = `${b2Auth.downloadUrl}/file/${parsed.bucketName}/${parsed.fileName}`
@@ -2201,7 +2216,7 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
     }
     res.json({ ok: false, error: parsed?.message || `HTTP ${result.status}` })
   } catch (e) {
-    try { fs.unlinkSync(tempPath) } catch {}
+    if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
     res.json({ ok: false, error: e.message })
   }
 })
