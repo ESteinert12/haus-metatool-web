@@ -11695,7 +11695,7 @@ async function executeIntake(snapshot = null) {
           // proves *something* is there — it may be an older take, and this drop a
           // re-delivery. Archive it if we can; otherwise leave it and report.
           {
-            const archiveDupe = cfg.finish || (cfg.intake ? `${cfg.intake}/../_PROCESSED` : null)
+            const archiveDupe = `${destDirDupe}/_source`
             let archived = false
             if (archiveDupe && archiveDupe !== cfg.intake) {
               const mk = await window.haus.shell.exec(`mkdir -p "${archiveDupe}"`)
@@ -11876,8 +11876,15 @@ async function executeIntake(snapshot = null) {
     const md = `# ${title}\n\n**Composer:** ${info.id}\n**Key:** ${info.key}\n**Genre 1:** ${info.genre}\n**Genre 2:** ${info.subGenre || '—'}\n${skuLine}${dupeLine}${kslLine}${mmwLine}${bpmLine}${vocalsLine}${descLine}**Type:** ${info.isJup ? 'JUP' : 'Regular'}\n**Date Intake:** ${now}\n\n## Files\n${renamedFiles.map(f => `- ${f}`).join('\n')}\n`
     await window.haus.fs.writeFile(`${destDir}/${mdName}`, md)
 
-    // Move source folder to archive/finished location instead of deleting
-    const archiveDir = cfg.finish || (cfg.intake ? `${cfg.intake}/../_PROCESSED` : null)
+    // Move the source folder in beside its own deliverables, in SHIPPING.
+    // It used to go to cfg.finish (3. ATMOS_Finish), which is a separate legacy
+    // project folder for an old show -- consumed sources were being dumped in
+    // there and it could never empty out. Shipping is on local disk (Downloads),
+    // deliberately not Dropbox, to avoid cloud-storage stubs and partial uploads.
+    // One SKU = one folder, source included, all deleted together once the client
+    // has it and B2 is confirmed. The dupe check below globs -maxdepth 1, so a
+    // _source subfolder is invisible to it.
+    const archiveDir = `${destDir}/_source`
     if (archiveDir && archiveDir !== cfg.intake) {
       // Create archive folder if needed
       const mkArchive = await window.haus.shell.exec(`mkdir -p "${archiveDir}"`)
