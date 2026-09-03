@@ -2230,8 +2230,22 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
 app.get('/api/b2/verify', async (req, res) => {
   if (!b2Auth)  return res.json({ ok: false, error: 'B2 not authorized' })
   if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
-  const bucketId = req.query.bucketId
-  if (!bucketId) return res.json({ ok: false, error: 'bucketId required' })
+  let bucketId = req.query.bucketId
+  if (!bucketId) {
+    // Resolve haus-music by name, same as the other B2 routes do, so callers
+    // do not have to go hunting for an id.
+    try {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Request({
+        method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+      const bb = JSON.parse(br.body.toString())
+      bucketId = (bb.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    } catch (e) { return res.json({ ok: false, error: `could not resolve bucket: ${e.message}` }) }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+  }
   const since  = req.query.since  || null
   const prefix = req.query.prefix || ''
   const STUB_LIMIT = 1024
