@@ -2328,6 +2328,26 @@ async function _b2GetUploadUrl(bucketId) {
   return r.body
 }
 
+// The archive Dropbox mirrors the B2 bucket exactly, one level down: the bucket's
+// top-level album folder maps to a numbered ARCHIVE_ folder and everything below
+// is identical. So an archive path can be DERIVED from the b2_key rather than
+// guessed by filename -- one exact candidate per row, no ambiguity.
+// '5. DNU' is deliberately absent: Do Not Use.
+const ARCHIVE_ALBUM_DIRS = {
+  stratus: '1. ARCHIVE_Stratus',
+  cumulus: '2. ARCHIVE_Cumulus',
+  cirrus:  '3. ARCHIVE_Cirrus',
+  nimbus:  '4. ARCHIVE_Nimbus',
+}
+function _archivePathForKey(archiveRoot, b2Key) {
+  if (!archiveRoot || !b2Key) return null
+  const parts = String(b2Key).split('/')
+  if (parts.length < 2) return null
+  const dir = ARCHIVE_ALBUM_DIRS[parts[0].toLowerCase()]
+  if (!dir) return null
+  return path.join(archiveRoot, dir, ...parts.slice(1))
+}
+
 function _indexShipping(root) {
   // filename -> [absolute paths]. Duplicates are kept so we can refuse to guess.
   const idx = new Map()
@@ -2413,18 +2433,29 @@ app.get('/api/b2/repair', async (req, res) => {
         idx.get(name).push(...paths)
       }
     }
+    const archiveRoot = req.query.archiveRoot || null
     const repairable = [], noLocal = [], ambiguous = []
+    let fromShipping = 0, fromArchive = 0
     for (const r of broken) {
       const hits = idx.get(r.filename) || []
-      if (hits.length === 1)      repairable.push({ ...r, localPath: hits[0] })
-      else if (hits.length === 0) noLocal.push(r)
-      else                        ambiguous.push({ ...r, candidates: hits })
+      if (hits.length === 1) { repairable.push({ ...r, localPath: hits[0], source: 'shipping' }); fromShipping++; continue }
+      // Shipping could not place it. Try the archive, whose path is derivable.
+      const archived = _archivePathForKey(archiveRoot, r.b2_key)
+      if (archived) {
+        let exists = false
+        try { exists = fs.existsSync(archived) } catch {}
+        if (exists) { repairable.push({ ...r, localPath: archived, source: 'archive' }); fromArchive++; continue }
+      }
+      if (hits.length === 0) noLocal.push(r)
+      else                   ambiguous.push({ ...r, candidates: hits })
     }
 
     if (dryRun) {
       console.log(`[b2-repair] DRY RUN — ${broken.length} broken, ${repairable.length} repairable, ${noLocal.length} no local copy, ${ambiguous.length} ambiguous`)
       return res.json({ ok: true, dryRun: true, shippingRoots,
+        archiveRoot: archiveRoot || '(not supplied)',
         counts: { broken: broken.length, repairable: repairable.length,
+                  fromShipping, fromArchive,
                   noLocal: noLocal.length, ambiguous: ambiguous.length },
         noLocalSample: noLocal.slice(0, 50), ambiguousSample: ambiguous.slice(0, 20) })
     }
