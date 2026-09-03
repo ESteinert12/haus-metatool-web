@@ -207,6 +207,26 @@ async function runServerMigrations(pool) {
     )
   `)
   console.log('✅ staged_files ready')
+
+  // ksl had no constraints at all, so the INSERT ... ON CONFLICT (ksl_name) in
+  // addIntakeTagNew failed every time -- new KSL tags appeared in the dropdown
+  // for the session and were never persisted. rmo already had UNIQUE(rmo_name),
+  // which is why that half worked. Applied by hand 2026-09-03 (2840 rows, no
+  // duplicates); guarded here so a fresh database gets it too.
+  try {
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = 'ksl'::regclass AND conname = 'ksl_ksl_name_key'
+        ) THEN
+          ALTER TABLE ksl ADD CONSTRAINT ksl_ksl_name_key UNIQUE (ksl_name);
+        END IF;
+      END $$;
+    `)
+    console.log('✅ ksl unique constraint ready')
+  } catch (e) { console.warn('[schema] ksl unique constraint:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
