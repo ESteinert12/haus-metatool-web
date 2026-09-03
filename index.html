@@ -5620,6 +5620,7 @@ async function loadCatalogPG() {
   const countLabel = document.getElementById('track-count-label')
   if (countLabel) countLabel.textContent = 'Loading from database…'
   const badge = document.getElementById('pg-catalog-badge')
+  renderTrackListState('loading')
   try {
     const rows = await pgQ(
       `SELECT t.sku_root, t.title, t.key, t.bpm, t.composer_id, t.description,
@@ -5638,9 +5639,14 @@ async function loadCatalogPG() {
        WHERE COALESCE(t.status, 'active') = 'active'
        ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
     )
-    if (!Array.isArray(rows)) {
-      console.error('[loadCatalogPG] failed to fetch rows')
-      if (countLabel) countLabel.textContent = 'DB error loading collection'
+    // pgFail() returns a MARKED ARRAY, so Array.isArray() is true for a failed
+    // query -- the old check waved failures straight through and the panel
+    // rendered as an empty collection. pgFailed() is the real test.
+    if (!Array.isArray(rows) || pgFailed(rows)) {
+      const msg = (rows && rows.error) || 'failed to fetch rows'
+      console.error('[loadCatalogPG]', msg)
+      if (countLabel) countLabel.textContent = 'Could not load collection'
+      renderTrackListState(/not logged in|not connected/i.test(msg) ? 'auth' : 'error', msg)
       return
     }
     allTracks = rows.map(r => ({
@@ -6594,6 +6600,42 @@ async function loadCatalogFiles() {
   renderTrackList(allTracks)
 }
 
+function renderTrackListState(kind, detail = '') {
+  // Empty, still-loading, failed and logged-out all used to render as a blank
+  // panel, so "the collection is empty" and "your session expired" looked
+  // identical. Each state now says what it is and what to do about it.
+  const list = document.getElementById('track-list')
+  if (!list) return
+  const box = (icon, title, body, action = '') => `
+    <div style="padding:40px 24px;text-align:center;color:var(--text3)">
+      <i class="ti ${icon}" style="font-size:26px;opacity:.55;display:block;margin-bottom:10px"></i>
+      <div style="font-size:13px;font-weight:600;color:var(--text2);margin-bottom:4px">${title}</div>
+      <div style="font-size:12px;line-height:1.5;max-width:340px;margin:0 auto">${body}</div>
+      ${action}
+    </div>`
+  const retry = `<button class="btn" onclick="loadCatalogPG()" style="margin-top:14px;font-size:12px">
+      <i class="ti ti-refresh"></i> Try again</button>`
+
+  if (kind === 'loading') {
+    setHTML(list, box('ti-loader-2', 'Loading the collection…', 'Fetching tracks from the database.'))
+  } else if (kind === 'auth') {
+    setHTML(list, box('ti-lock', 'Not signed in',
+      'Your session expired, so the collection could not be loaded. Sign in and it will reload.'))
+  } else if (kind === 'error') {
+    setHTML(list, box('ti-alert-triangle', 'Could not load the collection',
+      detail ? esc(detail) : 'The database request failed.', retry))
+  } else {
+    const q = (document.getElementById('catalog-search')?.value || '').trim()
+    if (q) {
+      setHTML(list, box('ti-search-off', 'No matches',
+        `Nothing matches “${esc(q)}”. Try a shorter search, or clear the filters.`))
+    } else {
+      setHTML(list, box('ti-music-off', 'No tracks to show',
+        'The collection loaded but came back empty. If that is unexpected, reload.', retry))
+    }
+  }
+}
+
 function renderTrackList(tracks, skipLabelUpdate = false) {
   // Render only up to CATALOG_DISPLAY_LIMIT to prevent UI freeze
   const displayTracks = tracks.slice(0, CATALOG_DISPLAY_LIMIT)
@@ -6603,6 +6645,15 @@ function renderTrackList(tracks, skipLabelUpdate = false) {
 
   const list = document.getElementById('track-list')
   if (!list) return
+
+  if (!displayTracks.length) {
+    renderTrackListState('empty')
+    if (!skipLabelUpdate) {
+      const lbl = document.getElementById('track-count-label')
+      if (lbl) lbl.textContent = '0 tracks'
+    }
+    return
+  }
 
   list.innerHTML = displayTracks.map((t, i) => {
     const sku = t.sku || t.titleId || ''
