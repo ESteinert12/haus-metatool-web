@@ -2742,6 +2742,120 @@ app.get('/api/b2/link', async (req, res) => {
   }
 })
 
+// --- B2 self-heal ------------------------------------------------------------
+// The archive Dropbox is cloud-only, so it cannot be read from disk. But the
+// bucket contains duplicates: the same file uploaded twice under slightly
+// different folder spellings (a composer typo, a longer form of a name, a
+// "_Snapped" suffix). The link dry run found 6,877 such pairs. So where a stub
+// has a healthy twin elsewhere in the bucket, B2 can repair itself -- a
+// server-side copy, no download, no upload, no bandwidth through the Mac.
+//
+// Same guards as the linker: the twin must carry the same sku_root in its path,
+// be at least 1KB, and be the only candidate. Never guesses.
+//   GET /api/b2/heal?dryRun=1   what could be healed from within the bucket
+//   GET /api/b2/heal?dryRun=0   perform the server-side copies
+app.get('/api/b2/heal', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const rows = (await pgPool.query(
+      `SELECT mix_stem_id, sku_root, filename, b2_key
+         FROM mix_stems WHERE b2_key IS NOT NULL`)).rows
+
+    const byKey = new Map(), byName = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `heal page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        byKey.set(f.fileName, { size: f.contentLength, id: f.fileId })
+        const base = f.fileName.split('/').pop()
+        if (!byName.has(base)) byName.set(base, [])
+        byName.get(base).push({ key: f.fileName, size: f.contentLength, id: f.fileId })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const healable = [], noTwin = []
+    for (const r of rows) {
+      const cur = byKey.get(r.b2_key)
+      if (cur && cur.size >= STUB_LIMIT) continue          // already fine
+      const twins = (byName.get(r.filename) || []).filter(c =>
+        c.key !== r.b2_key && c.size >= STUB_LIMIT && c.key.includes('/' + r.sku_root))
+      if (twins.length === 1) healable.push({ ...r, from: twins[0].key, fromId: twins[0].id, size: twins[0].size })
+      else if (twins.length > 1) {
+        const sizes = new Set(twins.map(t => t.size))
+        if (sizes.size === 1) {
+          const pick = twins.slice().sort((a, b) => a.key.length - b.key.length || a.key.localeCompare(b.key))[0]
+          healable.push({ ...r, from: pick.key, fromId: pick.id, size: pick.size, tieBreak: true })
+        } else noTwin.push({ ...r, problem: 'multiple twins of differing size', candidates: twins })
+      }
+      else noTwin.push({ ...r, problem: cur ? 'stub, no healthy twin' : 'missing, no twin' })
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-heal-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        counts: { broken: healable.length + noTwin.length, healable: healable.length, noTwin: noTwin.length },
+        healable, noTwin }, null, 2))
+    } catch (e) { console.warn('[b2-heal] could not write report:', e.message) }
+
+    if (dryRun) {
+      console.log(`[b2-heal] DRY RUN — ${healable.length} healable from within the bucket, ${noTwin.length} without a twin`)
+      return res.json({ ok: true, dryRun: true,
+        counts: { broken: healable.length + noTwin.length, healable: healable.length, noTwin: noTwin.length },
+        reportPath, healableSample: healable.slice(0, 20), noTwinSample: noTwin.slice(0, 20) })
+    }
+
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const todo = limit ? healable.slice(0, limit) : healable
+    let copied = 0
+    const failures = []
+    for (const h of todo) {
+      try {
+        const r = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_copy_file',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { sourceFileId: h.fromId, fileName: h.b2_key, destinationBucketId: bucketId }
+        }, h.filename)
+        if (r.status !== 200) { failures.push({ ...h, error: r.body?.message || `HTTP ${r.status}` }); continue }
+        if (r.body.contentLength !== h.size) {
+          failures.push({ ...h, error: `copy landed ${r.body.contentLength}, expected ${h.size}` }); continue
+        }
+        copied++
+        if (copied % 100 === 0) console.log(`[b2-heal] ${copied}/${todo.length}`)
+      } catch (e) { failures.push({ ...h, error: e.message }) }
+    }
+    console.log(`[b2-heal] done — ${copied} copied within B2, ${failures.length} failed`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, copied, failed: failures.length,
+               remaining: healable.length - todo.length, noTwin: noTwin.length,
+               reportPath, failures: failures.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-heal] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
