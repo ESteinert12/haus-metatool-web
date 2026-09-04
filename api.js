@@ -1136,7 +1136,10 @@ app.get('/api/b2/list-buckets', async (req, res) => {
   try {
     const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
     const result  = await _b2Request({
-      method: 'GET', hostname: apiHost, urlPath: '/b2api/v3/b2_list_buckets',
+      // b2_list_buckets REQUIRES accountId in v3. Without it B2 returns an error,
+      // so this endpoint had never once returned a bucket list.
+      method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
       headers: { 'Authorization': b2Auth.authorizationToken }
     })
     if (result.status === 200) return res.json({ ok: true, buckets: result.body.buckets || [] })
