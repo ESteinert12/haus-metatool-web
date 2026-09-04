@@ -11851,8 +11851,32 @@ async function executeIntake(snapshot = null) {
       console.log('[executeIntake] dedup applied:', dedupedMap.map(r => r.orig + ' → ' + r.name))
     }
 
+    // ── Pre-flight: is every source file actually ON THIS DISK? ──────────────
+    // A Dropbox online-only file reports its full logical size but occupies no
+    // blocks. Copying one yields a placeholder or an error, and until now a
+    // "successful" cp was taken at face value. Refuse to start rather than
+    // ship a track built from files that were never downloaded.
+    const srcSizes = new Map()
+    {
+      const st = await window.haus.shell.exec(
+        `find "${d.path}" -maxdepth 1 -type f -print0 | xargs -0 stat -f "%z %b %N" 2>/dev/null`)
+      const dataless = []
+      for (const line of String(st?.stdout || '').split('\n')) {
+        const m = line.match(/^(\d+) (\d+) (.+)$/)
+        if (!m) continue
+        const size = parseInt(m[1]), blocks = parseInt(m[2]), base = m[3].split('/').pop()
+        srcSizes.set(base, size)
+        if (size > 0 && blocks === 0) dataless.push(base)
+      }
+      if (dataless.length) {
+        await window.haus.shell.exec(`rmdir "${destDir}"`)
+        throw new Error(`"${title}" was not imported.\n\n${dataless.length} file(s) are still online-only in Dropbox and have not downloaded to this Mac:\n\n${dataless.slice(0, 8).join('\n')}${dataless.length > 8 ? `\n…and ${dataless.length - 8} more` : ''}\n\nRight-click the folder in Finder and choose "Make Available Offline", wait for the icons to turn green, then try again.\n\nNothing was uploaded and the staging folder is untouched.`)
+      }
+    }
+
     const renamedFiles = []
     let cpErrors = 0
+    const cpFailed = []
     for (const { orig: fname, name: newName } of dedupedMap) {
       const src = `${d.path}/${fname}`
       _intakeProgress('Copying files…', newName)
@@ -11860,10 +11884,19 @@ async function executeIntake(snapshot = null) {
       const cpR = await window.haus.shell.exec(`cp "${src}" "${destDir}/${newName}"`)
       if (cpR?.err) {
         console.error('[executeIntake] cp error:', cpR.err, 'src:', src)
-        cpErrors++
-      } else {
-        renamedFiles.push(newName)
+        cpErrors++; cpFailed.push(`${fname} (${cpR.err})`)
+        continue
       }
+      // cp reporting success is not proof the bytes arrived. Compare sizes.
+      const chk = await window.haus.shell.exec(`stat -f %z "${destDir}/${newName}"`)
+      const got  = parseInt(String(chk?.stdout || '').trim())
+      const want = srcSizes.get(fname)
+      if (!got || (want && got !== want)) {
+        console.error(`[executeIntake] size mismatch: ${newName} is ${got}, source is ${want}`)
+        cpErrors++; cpFailed.push(`${fname} (copied ${got} of ${want} bytes)`)
+        continue
+      }
+      renamedFiles.push(newName)
     }
     // Safety check: if every copy failed, files weren't locally synced (Dropbox placeholder).
     // Delete the empty dest folder and throw — staging stays intact for retry.
@@ -11871,8 +11904,12 @@ async function executeIntake(snapshot = null) {
       await window.haus.shell.exec(`rmdir "${destDir}"`)  // rmdir, not rm -rf: refuses if anything did land there
       throw new Error(`No files could be copied for "${title}".\n\nFiles may not be fully synced from Dropbox — wait for the Dropbox sync icon to clear, then try again.\n\nThe staging folder has been preserved for retry.`)
     }
+    // A partial copy used to proceed: the track got a SKU, rows for whatever
+    // landed, and a green tick, while quietly shipping without some of its
+    // stems. Fail the whole track instead -- staging is untouched, so it can
+    // simply be run again once the files are all present.
     if (cpErrors > 0) {
-      console.warn(`[executeIntake] ${cpErrors} file(s) failed to copy for "${title}" — proceeding with ${renamedFiles.length} successful`)
+      throw new Error(`"${title}" was not imported.\n\n${cpErrors} of ${dedupedMap.length} file(s) did not copy correctly:\n\n${cpFailed.slice(0, 8).join('\n')}${cpFailed.length > 8 ? `\n…and ${cpFailed.length - 8} more` : ''}\n\nThis usually means Dropbox has not finished syncing. Nothing was uploaded and the staging folder is untouched — try again once the files are fully downloaded.`)
     }
 
     // Convert FULL WAV → MP3
