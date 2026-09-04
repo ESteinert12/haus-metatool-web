@@ -8699,7 +8699,8 @@ function renderIntakeBrowserTracks() {
     // You cannot audition what is not on disk, so flag it in the list rather
     // than letting someone fill in a whole form and only then discover it.
     const cloudTag = d._cloudOnly
-      ? `<span title="${d._cloudOnly} file(s) have not downloaded from Dropbox. Right-click the folder in Finder and choose Make Available Offline." style="font-size:9px;font-weight:700;color:#fff;background:#c0782b;padding:1px 5px;border-radius:3px;margin-left:4px;flex-shrink:0">NOT SYNCED ${d._cloudOnly}</span>` : ''
+      ? `<span title="${d._cloudOnly} file(s) have not downloaded from Dropbox." style="font-size:9px;font-weight:700;color:#fff;background:#c0782b;padding:1px 5px;border-radius:3px;margin-left:4px;flex-shrink:0">NOT SYNCED ${d._cloudOnly}</span>`
+        + `<button id="dl-btn-${i}" onclick="event.stopPropagation();downloadDrop(${i})" title="Force Dropbox to download this drop's audio" style="font-size:9px;font-weight:700;margin-left:4px;padding:1px 6px;border-radius:3px;border:1px solid #c0782b;background:#fff;color:#c0782b;cursor:pointer;flex-shrink:0">Download</button>` : ''
     const composerName = d._composerName || d.guessedID || '?'
     return `<div id="intake-tr-${i}" class="${cls.join(' ')}" onclick="loadIntakeTrackForm(${i})"
       style="${bg}">
@@ -8743,6 +8744,42 @@ async function _loadIntakeComposerNames() {
 }
 
 // ── Intake: batch dupe check + bg job status bar ───────────────────────────
+
+// Force Dropbox to materialise a drop's files. macOS has no "download this"
+// API for the Dropbox file provider, but reading a file makes it fetch --
+// which is exactly what `cat > /dev/null` does. Verified afterwards by block
+// count, the same measure the NOT SYNCED badge uses, so success is proven
+// rather than assumed.
+async function downloadDrop(i) {
+  const d = intakeDrops[i]
+  if (!d) return
+  const btn = document.getElementById(`dl-btn-${i}`)
+  if (btn) { btn.disabled = true; btn.textContent = 'Downloading…' }
+  try {
+    // 20 min: a lot can be several hundred MB on a slow link.
+    const r = await window.haus.shell.exec(
+      `find "${d.path}" -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -exec cat {} + > /dev/null 2>&1; echo done`)
+    if (r?.err) throw new Error(r.err)
+
+    // Re-measure rather than trust that cat finished the job.
+    const st = await window.haus.shell.exec(
+      `find "${d.path}" -maxdepth 1 -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -print0 | xargs -0 stat -f "%z %b %N" 2>/dev/null`)
+    let stillCloud = 0
+    for (const line of String(st?.stdout || '').split('\n')) {
+      const m = line.match(/^(\d+) (\d+) (.+)$/)
+      if (m && parseInt(m[1]) > 0 && parseInt(m[2]) === 0) stillCloud++
+    }
+    d._cloudOnly = stillCloud
+    renderIntakeBrowserTracks()
+    if (stillCloud) {
+      alert(`${stillCloud} file(s) still have not downloaded.\n\nDropbox may still be working, or may be stuck on this folder. Wait a moment and try again — if it does not clear, check that Dropbox is running and has space.`)
+    }
+  } catch (e) {
+    console.error('[intake] download failed:', e.message)
+    alert(`Could not download "${d.name}".\n\n${e.message}`)
+    if (btn) { btn.disabled = false; btn.textContent = 'Download' }
+  }
+}
 
 let _cloudCheckRunning = false
 async function _checkIntakeCloudOnly() {
