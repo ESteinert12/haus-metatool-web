@@ -5649,8 +5649,19 @@ async function loadCatalogPG() {
        LEFT JOIN primary_genres   pg  ON pg.primary_genre_id  = t.primary_genre_id
        LEFT JOIN secondary_genres sg  ON sg.secondary_genre_id = t.secondary_genre_id
        LEFT JOIN mood_1           m1  ON m1.mood_1_id          = t.mood_1_id
-       LEFT JOIN lot_titles       lt  ON lt.sku_root           = t.sku_root
-       LEFT JOIN lots             l   ON l.lot_id              = lt.lot_id
+       -- A title can belong to MANY lots (24,782 of them do; one is in 18). Joining
+       -- lot_titles straight through fanned the result out to 33,203 rows for 32,736
+       -- titles -- 467 songs appeared twice in the Collection panel. Take the most
+       -- recent lot only. NOT string_agg: t.lot is fed to parseShowName() and the
+       -- production filter, which need a single lot name.
+       LEFT JOIN LATERAL (
+         SELECT l2.lot_name
+           FROM lot_titles lt2
+           JOIN lots l2 ON l2.lot_id = lt2.lot_id
+          WHERE lt2.sku_root = t.sku_root
+          ORDER BY lt2.added_at DESC NULLS LAST, lt2.lot_id DESC
+          LIMIT 1
+       ) l ON TRUE
        WHERE COALESCE(t.status, 'active') = 'active'
        ORDER BY t.release_date DESC NULLS LAST, t.title ASC`
     )
