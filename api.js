@@ -3069,6 +3069,108 @@ app.get('/api/b2/relocate-strays', async (req, res) => {
   }
 })
 
+// ─── Hide stray bucket-root objects ─────────────────────────────────────────
+// After /api/b2/relocate-strays moved the 92 objects into their proper collection
+// folders, the originals still sit at the bucket root (R48/, R67/, R82/, S20/,
+// S73/). This hides them: b2_hide_file writes a hide marker so they vanish from
+// listings and from the app, while the bytes stay recoverable. NOT a delete --
+// b2_delete_file_version is permanent and is deliberately not implemented here.
+//
+// The guard that matters: a candidate is SKIPPED if any mix_stems row still
+// references that key. "Nothing references it" has been wrong twice this week,
+// so it is checked against the database rather than assumed.
+// Dry run unless ?dryRun=0.
+app.get('/api/b2/hide-strays', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // DB first, before the long listing, so the connection is not left idle.
+    const referenced = new Set((await pgPool.query(
+      `SELECT DISTINCT b2_key FROM mix_stems WHERE b2_key IS NOT NULL`)).rows.map(r => r.b2_key))
+
+    const candidates = [], stillReferenced = []
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `hide page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        const top = String(f.fileName).split('/')[0] + '/'
+        if (COLLECTION_PREFIXES.includes(top)) continue          // in a real collection
+        if (!String(f.fileName).includes('/')) continue           // loose file at the root, leave it
+        if (referenced.has(f.fileName)) { stillReferenced.push(f.fileName); continue }
+        candidates.push({ key: f.fileName, size: f.contentLength })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const byRoot = {}
+    let bytes = 0
+    for (const c of candidates) {
+      const root = c.key.split('/')[0]
+      byRoot[root] = (byRoot[root] || 0) + 1
+      bytes += c.size || 0
+    }
+    const counts = { candidates: candidates.length, stillReferenced: stillReferenced.length,
+                     byRoot, bytesHidden: bytes }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-hide-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        counts, candidates, stillReferenced }, null, 2))
+    } catch (e) { console.warn('[b2-hide] could not write report:', e.message) }
+
+    if (dryRun) {
+      console.log(`[b2-hide] DRY RUN — ${candidates.length} to hide, ${stillReferenced.length} skipped (still referenced)`)
+      return res.json({ ok: true, dryRun: true, counts, reportPath,
+        sample: candidates.slice(0, 20).map(c => c.key), stillReferenced: stillReferenced.slice(0, 20) })
+    }
+
+    // Refuse to run blind: if anything is still referenced, stop and report it.
+    if (stillReferenced.length) {
+      return res.json({ ok: false, error: `${stillReferenced.length} candidate keys are still referenced by mix_stems — refusing to hide anything`,
+                        stillReferenced: stillReferenced.slice(0, 20), reportPath })
+    }
+
+    const todo = limit ? candidates.slice(0, limit) : candidates
+    let hidden = 0
+    const failures = []
+    for (const c of todo) {
+      try {
+        const r = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_hide_file',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { bucketId, fileName: c.key } }, c.key)
+        if (r.status !== 200) { failures.push({ ...c, error: r.body?.message || `HTTP ${r.status}` }); continue }
+        hidden++
+      } catch (e) { failures.push({ ...c, error: e.message }) }
+    }
+    console.log(`[b2-hide] done — ${hidden} hidden, ${failures.length} failed. Bytes are recoverable; nothing was deleted.`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, hidden, failed: failures.length,
+               remaining: candidates.length - todo.length, reportPath, failures: failures.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-hide] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
