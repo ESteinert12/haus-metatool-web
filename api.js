@@ -3069,6 +3069,20 @@ app.get('/api/b2/relocate-strays', async (req, res) => {
   }
 })
 
+// A pooled connection can go stale while a long B2 listing runs, surfacing as
+// "Connection terminated unexpectedly" on the next query. Retry once: the pool
+// hands back a fresh client on the second attempt.
+async function _pgRetry(sql, params = [], label = 'query') {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await pgPool.query(sql, params) }
+    catch (e) {
+      if (attempt === 1) throw e
+      console.warn(`[pg] ${label} failed (${e.message}) — retrying with a fresh connection`)
+      await new Promise(r => setTimeout(r, 1000))
+    }
+  }
+}
+
 // ─── Hide stray bucket-root objects ─────────────────────────────────────────
 // After /api/b2/relocate-strays moved the 92 objects into their proper collection
 // folders, the originals still sit at the bucket root (R48/, R67/, R82/, S20/,
@@ -3096,11 +3110,11 @@ app.get('/api/b2/hide-strays', async (req, res) => {
     }
     if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
 
-    // DB first, before the long listing, so the connection is not left idle.
-    const referenced = new Set((await pgPool.query(
-      `SELECT DISTINCT b2_key FROM mix_stems WHERE b2_key IS NOT NULL`)).rows.map(r => r.b2_key))
-
-    const candidates = [], stillReferenced = []
+    // Deliberately NOT querying Postgres first. The referenced-key set is consumed
+    // while filtering, which happens AFTER a multi-minute bucket listing -- holding
+    // a result across that is what killed the connection. List first, then ask
+    // Postgres immediately before the answer is used.
+    const found = []
     let pages = 0, startFileName = null
     do {
       const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
@@ -3113,12 +3127,21 @@ app.get('/api/b2/hide-strays', async (req, res) => {
         const top = String(f.fileName).split('/')[0] + '/'
         if (COLLECTION_PREFIXES.includes(top)) continue          // in a real collection
         if (!String(f.fileName).includes('/')) continue           // loose file at the root, leave it
-        if (referenced.has(f.fileName)) { stillReferenced.push(f.fileName); continue }
-        candidates.push({ key: f.fileName, size: f.contentLength })
+        found.push({ key: f.fileName, size: f.contentLength })
       }
       startFileName = r.body.nextFileName
       pages++
     } while (startFileName && pages < 200)
+
+    // Now — and only now — check what the catalogue still points at.
+    const referenced = new Set((await _pgRetry(
+      `SELECT DISTINCT b2_key FROM mix_stems WHERE b2_key IS NOT NULL`, [], 'hide-strays referenced keys'
+    )).rows.map(r => r.b2_key))
+    const candidates = [], stillReferenced = []
+    for (const f of found) {
+      if (referenced.has(f.key)) stillReferenced.push(f.key)
+      else candidates.push(f)
+    }
 
     const byRoot = {}
     let bytes = 0
