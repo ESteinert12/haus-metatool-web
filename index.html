@@ -8757,9 +8757,19 @@ async function downloadDrop(i) {
   if (btn) { btn.disabled = true; btn.textContent = 'Downloading…' }
   try {
     // 20 min: a lot can be several hundred MB on a slow link.
+    // Capture stderr, discard the audio itself. Written as `2>&1 > /dev/null`
+    // (order matters): stderr goes to the captured stream, stdout to nowhere.
+    // The first version suppressed BOTH and then echoed "done", so a total
+    // failure was indistinguishable from success -- exactly the mistake this
+    // whole week has been about.
     const r = await window.haus.shell.exec(
-      `find "${d.path}" -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -exec cat {} + > /dev/null 2>&1; echo done`)
+      `find "${d.path}" -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -exec cat {} + 2>&1 > /dev/null; echo "EXIT:$?"`)
+    const out  = String(r?.stdout || '').trim()
+    const code = (out.match(/EXIT:(\d+)\s*$/) || [])[1]
+    const errText = out.replace(/EXIT:\d+\s*$/, '').trim()
     if (r?.err) throw new Error(r.err)
+    if (errText) console.warn('[intake] download stderr:', errText)
+    if (code && code !== '0') throw new Error(errText || `read failed (exit ${code})`)
 
     // Re-measure rather than trust that cat finished the job.
     const st = await window.haus.shell.exec(
@@ -8772,11 +8782,12 @@ async function downloadDrop(i) {
     d._cloudOnly = stillCloud
     renderIntakeBrowserTracks()
     if (stillCloud) {
-      alert(`${stillCloud} file(s) still have not downloaded.\n\nDropbox may still be working, or may be stuck on this folder. Wait a moment and try again — if it does not clear, check that Dropbox is running and has space.`)
+      alert(`${stillCloud} file(s) are still not downloaded.\n\n${errText ? 'Dropbox said:\n' + errText.split('\n').slice(0, 3).join('\n') + '\n\n' : ''}Reading the files did not make Dropbox fetch them. Use Finder: right-click the folder, choose "Make Available Offline", and watch until every file is solid.`)
     }
   } catch (e) {
     console.error('[intake] download failed:', e.message)
-    alert(`Could not download "${d.name}".\n\n${e.message}`)
+    alert(`Could not download "${d.name}".\n\n${e.message}\n\nIf this says "Resource deadlock avoided" or similar, Dropbox is refusing to materialise the file on read. Use Finder: right-click the folder and choose "Make Available Offline".`)
+  } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Download' }
   }
 }
