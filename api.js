@@ -3086,6 +3086,274 @@ async function _pgRetry(sql, params = [], label = 'query') {
   }
 }
 
+// ─── Refresh the stub audit from LIVE state ─────────────────────────────────
+// /api/b2/recovery-from-dropbox and /api/b2/start-recovery read their work list
+// from B2_FULL_STUB_AUDIT.csv -- a STATIC snapshot taken 2026-08-10, before the
+// recovery. It still lists 30,703 stubs / 15,009 SKUs, none of which reflects the
+// 41,327 relinked, 486 healed and 573 re-uploaded on 2026-09-03. Running the
+// recovery against it would re-fetch thousands of files that are already correct.
+//
+// This regenerates that CSV from what B2 and Postgres hold right now, in the
+// identical 6-column format, so the recovery code needs no changes.
+// Broken = the object is ABSENT from the bucket, or under 1KB (a stub).
+// The old CSV is renamed aside, never overwritten in place.
+app.get('/api/b2/stub-audit-refresh', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const write = req.query.write === '1'
+  const STUB_LIMIT = 1024
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+    const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // Bucket first; Postgres afterwards, close to the point of use.
+    const sizeOf = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `audit page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) sizeOf.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const rows = (await _pgRetry(
+      `SELECT ms.sku_root, ms.filename, ms.b2_key, t.title
+         FROM mix_stems ms
+         LEFT JOIN titles t ON t.sku_root = ms.sku_root
+        WHERE ms.b2_key IS NOT NULL`, [], 'stub audit rows')).rows
+
+    const broken = []
+    let missing = 0, stub = 0
+    for (const r of rows) {
+      const size = sizeOf.get(r.b2_key)
+      if (size === undefined) { broken.push({ ...r, size: 0, why: 'missing' }); missing++ }
+      else if (size < STUB_LIMIT) { broken.push({ ...r, size, why: 'stub' }); stub++ }
+    }
+
+    const q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`
+    const lines = ['Composer ID,Song Title,SKU,Collection,File Size (bytes),B2 Path']
+    for (const b of broken) {
+      const composerId = String(b.sku_root || '').match(/^[A-Za-z]\d{2}[a-z]?/i)?.[0] || ''
+      const collection = String(b.b2_key).split('/')[0].toUpperCase()
+      lines.push([q(composerId), q(b.title), q(b.sku_root), q(collection), b.size, q(b.b2_key)].join(','))
+    }
+    const csv = lines.join('\n') + '\n'
+
+    const csvPath = path.join(os.homedir(), 'Documents/Claude/Projects/ATMOSPHERE/B2_FULL_STUB_AUDIT.csv')
+    const skus = new Set(broken.map(b => b.sku_root))
+    const counts = { checked: rows.length, broken: broken.length, missing, stub,
+                     distinctSkus: skus.size, csvLines: lines.length - 1 }
+
+    if (!write) {
+      return res.json({ ok: true, dryRun: true, counts, csvPath,
+        note: 'nothing written - call again with ?write=1 to replace the CSV (old one renamed aside)',
+        sample: broken.slice(0, 10).map(b => ({ sku: b.sku_root, why: b.why, key: b.b2_key })) })
+    }
+
+    let backup = null
+    if (fs.existsSync(csvPath)) {
+      backup = csvPath.replace(/\.csv$/, `.stale-${Date.now()}.csv`)
+      fs.renameSync(csvPath, backup)
+    }
+    fs.writeFileSync(csvPath, csv)
+    console.log(`[stub-audit] wrote ${broken.length} broken rows (${skus.size} SKUs); old CSV -> ${backup}`)
+    res.json({ ok: true, dryRun: false, counts, csvPath, backup })
+  } catch (e) {
+    console.error('[stub-audit] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ─── Recover broken B2 objects from the Dropbox archive ─────────────────────
+// Replaces /api/b2/start-recovery, which is left in place but should NOT be used:
+// it uploaded to `${collection}/${composer}/${filename}` -- missing the SKU/title
+// folder -- never updated mix_stems, sent no X-Bz-Content-Sha1 (B2 requires it),
+// and passed the key raw in X-Bz-File-Name, which breaks on the spaces and
+// apostrophes these keys are full of. It also read a work list from a CSV frozen
+// on 2026-08-10.
+//
+// This works from live state and from ONE fact: the Dropbox archive mirrors the
+// B2 layout, so `nimbus/R48_X_NIMBUS/SKU_Title/f.wav` lives at
+// `/4. ARCHIVE_Nimbus/R48_X_NIMBUS/SKU_Title/f.wav`. Exactly one candidate per
+// row -- nothing is constructed or guessed.
+//
+// Because the file is uploaded to the b2_key the row ALREADY has, there is no
+// database write at all, and a re-run naturally skips whatever is now healthy.
+// Dry run unless ?dryRun=0.  ?limit=N to do a small batch first.
+app.get('/api/b2/recover-broken', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let dbxToken
+    try { dbxToken = await _dropboxToken() }
+    catch (e) { return res.json({ ok: false, error: e.message }) }
+
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+    const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // Bucket listing first, Postgres immediately before use.
+    const sizeOf = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `recover page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) sizeOf.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const rows = (await _pgRetry(
+      `SELECT mix_stem_id, sku_root, filename, b2_key
+         FROM mix_stems WHERE b2_key IS NOT NULL`, [], 'recover-broken rows')).rows
+
+    const work = [], unmappable = []
+    for (const r of rows) {
+      const size = sizeOf.get(r.b2_key)
+      if (size !== undefined && size >= STUB_LIMIT) continue        // healthy
+      const parts = String(r.b2_key).split('/')
+      const dir = ARCHIVE_ALBUM_DIRS[parts[0].toLowerCase()]
+      if (!dir || parts.length < 3) { unmappable.push({ ...r, reason: `no archive mapping for "${parts[0]}"` }); continue }
+      work.push({ ...r, currentSize: size === undefined ? null : size,
+                  dbxPath: '/' + dir + '/' + parts.slice(1).join('/') })
+    }
+
+    const todo = limit ? work.slice(0, limit) : work
+    const results = { present: 0, absentInDropbox: 0, tooSmallInDropbox: 0,
+                      uploaded: 0, failed: 0 }
+    const absent = [], failures = [], ready = []
+
+    for (const w of todo) {
+      // Metadata first: never download to discover a file is not there.
+      const meta = await _b2Retry({
+        method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/get_metadata',
+        headers: { 'Authorization': `Bearer ${await _dropboxToken()}`, 'Content-Type': 'application/json' },
+        body: { path: w.dbxPath }
+      }, `meta ${w.filename}`).catch(e => ({ status: 0, body: { error_summary: e.message } }))
+
+      if (meta.status !== 200) {
+        results.absentInDropbox++
+        absent.push({ sku: w.sku_root, key: w.b2_key, dbxPath: w.dbxPath,
+                      error: meta.body?.error_summary || `HTTP ${meta.status}` })
+        continue
+      }
+      const dbxSize = meta.body.size
+      if (!(dbxSize >= STUB_LIMIT)) {
+        results.tooSmallInDropbox++
+        absent.push({ sku: w.sku_root, key: w.b2_key, dbxPath: w.dbxPath, error: `archive copy is ${dbxSize} bytes` })
+        continue
+      }
+      results.present++
+      if (dryRun) { if (ready.length < 20) ready.push({ sku: w.sku_root, key: w.b2_key, dbxSize }); continue }
+
+      try {
+        const dl = await _b2Retry({
+          method: 'POST', hostname: 'content.dropboxapi.com', urlPath: '/2/files/download',
+          headers: { 'Authorization': `Bearer ${await _dropboxToken()}`,
+                     'Dropbox-API-Arg': JSON.stringify({ path: w.dbxPath }) },
+          isBuffer: true
+        }, `download ${w.filename}`)
+        if (dl.status !== 200 || !Buffer.isBuffer(dl.body) || dl.body.length !== dbxSize) {
+          results.failed++
+          failures.push({ sku: w.sku_root, key: w.b2_key,
+                          error: `download gave ${Buffer.isBuffer(dl.body) ? dl.body.length : 'non-buffer'}, expected ${dbxSize}` })
+          continue
+        }
+
+        const up = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_get_upload_url',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { bucketId } }, 'get upload url')
+        if (up.status !== 200) { results.failed++; failures.push({ sku: w.sku_root, key: w.b2_key, error: `upload url HTTP ${up.status}` }); continue }
+
+        const host = up.body.uploadUrl.replace(/^https?:\/\//, '').split('/')[0]
+        const upPath = up.body.uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+        const sha1 = crypto.createHash('sha1').update(dl.body).digest('hex')
+        // Percent-encode each segment: these keys contain spaces and apostrophes.
+        const encodedName = String(w.b2_key).split('/').map(encodeURIComponent).join('/')
+
+        const put = await _b2Retry({
+          method: 'POST', hostname: host, urlPath: upPath,
+          headers: {
+            'Authorization': up.body.authorizationToken,
+            'X-Bz-File-Name': encodedName,
+            'Content-Type': 'b2/x-auto',
+            'X-Bz-Content-Sha1': sha1,
+            'Content-Length': dl.body.length
+          },
+          body: dl.body, isBuffer: true
+        }, `upload ${w.filename}`)
+
+        const putBody = Buffer.isBuffer(put.body) ? JSON.parse(put.body.toString()) : put.body
+        if (put.status !== 200) { results.failed++; failures.push({ sku: w.sku_root, key: w.b2_key, error: putBody?.message || `upload HTTP ${put.status}` }); continue }
+        if (putBody.contentLength !== dbxSize) {
+          results.failed++
+          failures.push({ sku: w.sku_root, key: w.b2_key, error: `B2 stored ${putBody.contentLength}, expected ${dbxSize}` })
+          continue
+        }
+        results.uploaded++
+        if (results.uploaded % 25 === 0) console.log(`[recover] ${results.uploaded}/${todo.length} uploaded`)
+      } catch (e) {
+        results.failed++
+        failures.push({ sku: w.sku_root, key: w.b2_key, error: e.message })
+      }
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-recover-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        dryRun, counts: { broken: work.length, attempted: todo.length, ...results,
+                          unmappable: unmappable.length },
+        absent, failures, unmappable }, null, 2))
+    } catch (e) { console.warn('[recover] could not write report:', e.message) }
+
+    console.log(`[recover] ${dryRun ? 'DRY RUN' : 'DONE'} — broken ${work.length}, in archive ${results.present}, absent ${results.absentInDropbox}, uploaded ${results.uploaded}, failed ${results.failed}`)
+    res.json({ ok: true, dryRun,
+      counts: { broken: work.length, attempted: todo.length, ...results, unmappable: unmappable.length },
+      remaining: work.length - todo.length, reportPath,
+      readySample: ready, absentSample: absent.slice(0, 10), failures: failures.slice(0, 10) })
+  } catch (e) {
+    console.error('[recover] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// Plain Dropbox directory listing, for working out the archive's real shape
+// rather than assuming it mirrors B2. ?path=/4. ARCHIVE_Nimbus  (empty = root)
+app.get('/api/dropbox/ls', async (req, res) => {
+  try {
+    const p = req.query.path === undefined ? '' : String(req.query.path)
+    const r = await _b2Retry({
+      method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/list_folder',
+      headers: { 'Authorization': `Bearer ${await _dropboxToken()}`, 'Content-Type': 'application/json' },
+      body: { path: p, limit: 200 }
+    }, `ls ${p || '/'}`)
+    if (r.status !== 200) return res.json({ ok: false, path: p, error: r.body?.error_summary || `HTTP ${r.status}` })
+    res.json({ ok: true, path: p, hasMore: r.body.has_more,
+      entries: (r.body.entries || []).map(e => ({ type: e['.tag'], name: e.name, size: e.size })) })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
 // ─── Hide stray bucket-root objects ─────────────────────────────────────────
 // After /api/b2/relocate-strays moved the 92 objects into their proper collection
 // folders, the originals still sit at the bucket root (R48/, R67/, R82/, S20/,
