@@ -8754,39 +8754,56 @@ async function downloadDrop(i) {
   const d = intakeDrops[i]
   if (!d) return
   const btn = document.getElementById(`dl-btn-${i}`)
-  if (btn) { btn.disabled = true; btn.textContent = 'Downloading…' }
+  const setBtn = t => { if (btn) btn.textContent = t }
+  if (btn) btn.disabled = true
+  setBtn('Checking…')
+  const findAudio = p => `find "${p}" -maxdepth 1 -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\)`
+  const hollowIn = out => {
+    const list = []
+    for (const line of String(out || '').split('\n')) {
+      const m = line.match(/^(\d+) (\d+) (.+)$/)
+      if (m && parseInt(m[1]) > 0 && parseInt(m[2]) === 0) list.push(m[3])
+    }
+    return list
+  }
   try {
-    // 20 min: a lot can be several hundred MB on a slow link.
-    // Capture stderr, discard the audio itself. Written as `2>&1 > /dev/null`
-    // (order matters): stderr goes to the captured stream, stdout to nowhere.
-    // The first version suppressed BOTH and then echoed "done", so a total
-    // failure was indistinguishable from success -- exactly the mistake this
-    // whole week has been about.
+    const st = await window.haus.shell.exec(`${findAudio(d.path)} -print0 | xargs -0 stat -f "%z %b %N" 2>/dev/null`)
+    const hollow = hollowIn(st?.stdout)
+    if (!hollow.length) { d._cloudOnly = 0; renderIntakeBrowserTracks(); return }
+
+    // Probe ONE file with a 1-byte read before committing to anything long.
+    // Reading is the only lever available -- macOS exposes no download API for
+    // the Dropbox file provider -- and if Dropbox refuses, it refuses at once.
+    // The first version skipped this and ground away for four minutes moving
+    // zero bytes before reporting nothing at all.
+    setBtn('Testing…')
+    const probe = await window.haus.shell.exec(
+      `head -c 1 "${hollow[0].replace(/"/g, '\\"')}" 2>&1 >/dev/null; echo "EXIT:$?"`)
+    const pout  = String(probe?.stdout || '').trim()
+    const pcode = (pout.match(/EXIT:(\d+)\s*$/) || [])[1]
+    const perr  = pout.replace(/EXIT:\d+\s*$/, '').trim()
+    if (pcode && pcode !== '0') {
+      alert(`Dropbox will not download "${d.name}" on request.\n\n${perr || 'The read was refused.'}\n\nThis is a Dropbox limitation rather than a fault in the app: files can only be fetched through Dropbox itself.\n\nIn Finder, right-click the folder and choose "Make Available Offline" — then check the badge here to confirm it actually worked.`)
+      return
+    }
+
+    setBtn(`Downloading ${hollow.length}…`)
     const r = await window.haus.shell.exec(
       `find "${d.path}" -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -exec cat {} + 2>&1 > /dev/null; echo "EXIT:$?"`)
-    const out  = String(r?.stdout || '').trim()
-    const code = (out.match(/EXIT:(\d+)\s*$/) || [])[1]
-    const errText = out.replace(/EXIT:\d+\s*$/, '').trim()
-    if (r?.err) throw new Error(r.err)
+    const errText = String(r?.stdout || '').trim().replace(/EXIT:\d+\s*$/, '').trim()
     if (errText) console.warn('[intake] download stderr:', errText)
-    if (code && code !== '0') throw new Error(errText || `read failed (exit ${code})`)
 
-    // Re-measure rather than trust that cat finished the job.
-    const st = await window.haus.shell.exec(
-      `find "${d.path}" -maxdepth 1 -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -print0 | xargs -0 stat -f "%z %b %N" 2>/dev/null`)
-    let stillCloud = 0
-    for (const line of String(st?.stdout || '').split('\n')) {
-      const m = line.match(/^(\d+) (\d+) (.+)$/)
-      if (m && parseInt(m[1]) > 0 && parseInt(m[2]) === 0) stillCloud++
-    }
-    d._cloudOnly = stillCloud
+    // Re-measure. Never call it done because a command returned.
+    const st2 = await window.haus.shell.exec(`${findAudio(d.path)} -print0 | xargs -0 stat -f "%z %b %N" 2>/dev/null`)
+    const still = hollowIn(st2?.stdout)
+    d._cloudOnly = still.length
     renderIntakeBrowserTracks()
-    if (stillCloud) {
-      alert(`${stillCloud} file(s) are still not downloaded.\n\n${errText ? 'Dropbox said:\n' + errText.split('\n').slice(0, 3).join('\n') + '\n\n' : ''}Reading the files did not make Dropbox fetch them. Use Finder: right-click the folder, choose "Make Available Offline", and watch until every file is solid.`)
+    if (still.length) {
+      alert(`${still.length} of ${hollow.length} file(s) are still not on disk.\n\n${errText ? errText.split('\n').slice(0, 3).join('\n') + '\n\n' : ''}Finish it in Finder: right-click the folder and choose "Make Available Offline".`)
     }
   } catch (e) {
     console.error('[intake] download failed:', e.message)
-    alert(`Could not download "${d.name}".\n\n${e.message}\n\nIf this says "Resource deadlock avoided" or similar, Dropbox is refusing to materialise the file on read. Use Finder: right-click the folder and choose "Make Available Offline".`)
+    alert(`Could not download "${d.name}".\n\n${e.message}`)
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Download' }
   }
