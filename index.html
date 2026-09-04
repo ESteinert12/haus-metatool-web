@@ -65,10 +65,11 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 /* The composer/genre line carries an INLINE color:#6F927E, and inline styles beat
    class rules -- so on hover it stayed sage on a sage background and disappeared.
    !important is genuinely needed here to override the inline style.
-   NOTE: clay (#C17A5E) and the sage hover background have nearly identical
-   luminance (0.260 vs 0.252, ~1.03:1). If it reads as murky, darkening the hover
-   background is the fix -- the text colour is not the problem. */
-.intake-tr:not(.active):not(.uploading):not(.error):not(.done):hover > div:last-child{color:#C17A5E !important}
+   Clay (#C17A5E) was tried and read as murky: it sits at almost the same
+   luminance as the sage hover background (0.260 vs 0.252, ~1.03:1). White is
+   3.5:1 against that sage, which is why the title above it has always been
+   legible. */
+.intake-tr:not(.active):not(.uploading):not(.error):not(.done):hover > div:last-child{color:#fff !important}
 .intake-tr.active{background:#E7F0EA;color:#1a1a1a}
 .intake-tr.active:hover{background:#daeae0;color:#1a1a1a}
 .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
