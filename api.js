@@ -127,6 +127,41 @@ function _b2Request(opts) {
   })
 }
 
+// ─── Dropbox auth ───────────────────────────────────────────────────────────
+// Dropbox stopped issuing long-lived access tokens in 2021. A token generated in
+// the app console expires in ~4 HOURS, which is almost certainly why earlier
+// recovery runs stopped part-way and looked like a mysterious download failure.
+// Prefer app key + secret + refresh token (a refresh token does not expire) and
+// mint a short-lived access token on demand, cached until a minute before it
+// lapses. A long run therefore re-mints mid-flight instead of dying.
+// Falls back to a static DROPBOX_OLD_TOKEN if that is all that is configured.
+let _dbxTok = { value: null, expires: 0 }
+async function _dropboxToken() {
+  const { DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_OLD_TOKEN } = process.env
+  if (!DROPBOX_APP_KEY || !DROPBOX_APP_SECRET || !DROPBOX_REFRESH_TOKEN) {
+    if (DROPBOX_OLD_TOKEN) return DROPBOX_OLD_TOKEN   // legacy static token, expires
+    throw new Error('Dropbox not configured — set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN in .env')
+  }
+  if (_dbxTok.value && Date.now() < _dbxTok.expires) return _dbxTok.value
+  const form = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: DROPBOX_REFRESH_TOKEN }).toString()
+  const r = await _b2Request({
+    method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/oauth2/token',
+    headers: {
+      'Authorization': 'Basic ' + Buffer.from(`${DROPBOX_APP_KEY}:${DROPBOX_APP_SECRET}`).toString('base64'),
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: Buffer.from(form), isBuffer: true
+  })
+  let parsed
+  try { parsed = JSON.parse(r.body.toString()) } catch { parsed = {} }
+  if (r.status !== 200 || !parsed.access_token) {
+    throw new Error(`Dropbox token refresh failed (HTTP ${r.status}): ${parsed.error_description || parsed.error || r.body.toString().slice(0, 200)}`)
+  }
+  _dbxTok = { value: parsed.access_token, expires: Date.now() + ((parsed.expires_in || 14400) - 60) * 1000 }
+  console.log(`[dropbox] minted access token, valid ~${Math.round((parsed.expires_in || 14400) / 60)} min`)
+  return _dbxTok.value
+}
+
 function fmHttp(opts) {
   return new Promise((resolve, reject) => {
     const { method, host, urlPath, body, token, user, pass } = opts
@@ -1512,8 +1547,9 @@ app.get('/api/b2/batch-upload-shipping', async (req, res) => {
 app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
 
-  const dropboxToken = process.env.DROPBOX_OLD_TOKEN
-  if (!dropboxToken) return res.json({ ok: false, error: 'DROPBOX_OLD_TOKEN not set' })
+  let dropboxToken
+  try { dropboxToken = await _dropboxToken() }
+  catch (e) { return res.json({ ok: false, error: e.message }) }
 
   console.log('[b2/recovery] Starting WAV file recovery from old Dropbox (composer-by-composer)...')
 
@@ -1630,8 +1666,11 @@ app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
 app.get('/api/b2/start-recovery', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
 
-  const dropboxToken = process.env.DROPBOX_OLD_TOKEN
-  if (!dropboxToken) return res.json({ ok: false, error: 'DROPBOX_OLD_TOKEN not set' })
+  // Fail fast if Dropbox is not configured, but do NOT capture the token: this run
+  // can last hours and a minted access token lasts ~4. Each use site re-mints via
+  // the cached _dropboxToken().
+  try { await _dropboxToken() }
+  catch (e) { return res.json({ ok: false, error: e.message }) }
 
   // Return immediately - recovery runs in background
   res.json({ ok: true, status: 'recovery_started', message: 'Download/upload started. Check server logs for progress.' })
@@ -1660,7 +1699,7 @@ app.get('/api/b2/start-recovery', async (req, res) => {
             hostname: 'api.dropboxapi.com',
             urlPath: '/2/files/list_folder',
             headers: {
-              'Authorization': `Bearer ${dropboxToken}`,
+              'Authorization': `Bearer ${await _dropboxToken()}`,
               'Content-Type': 'application/json'
             },
             body: { path: `/${collection}` }
@@ -1685,7 +1724,7 @@ app.get('/api/b2/start-recovery', async (req, res) => {
                 hostname: 'api.dropboxapi.com',
                 urlPath: '/2/files/list_folder',
                 headers: {
-                  'Authorization': `Bearer ${dropboxToken}`,
+                  'Authorization': `Bearer ${await _dropboxToken()}`,
                   'Content-Type': 'application/json'
                 },
                 body: { path: composerPath }
@@ -1703,7 +1742,7 @@ app.get('/api/b2/start-recovery', async (req, res) => {
                     hostname: 'api.dropboxapi.com',
                     urlPath: '/2/files/list_folder',
                     headers: {
-                      'Authorization': `Bearer ${dropboxToken}`,
+                      'Authorization': `Bearer ${await _dropboxToken()}`,
                       'Content-Type': 'application/json'
                     },
                     body: { path: entry.path_display }
@@ -1732,7 +1771,7 @@ app.get('/api/b2/start-recovery', async (req, res) => {
                     hostname: 'content.dropboxapi.com',
                     urlPath: '/2/files/download',
                     headers: {
-                      'Authorization': `Bearer ${dropboxToken}`,
+                      'Authorization': `Bearer ${await _dropboxToken()}`,
                       'Dropbox-API-Arg': JSON.stringify({ path: wavFile.path_display })
                     }
                   })
