@@ -1972,7 +1972,7 @@ async function b2Connect() {
 }
 
 // Upload a single local file to B2, returns public download URL or null
-const ALBUM_NAMES = { '1':'Cumulus','2':'Stratus','3':'Cirrus','4':'Nimbus','5':'Altostratus','6':'Cumulonimbus' }
+const ALBUM_NAMES = { '1':'Stratus','2':'Cumulus','3':'Cirrus','4':'Nimbus','5':'Altostratus','6':'Cumulonimbus' }
 function albumName() {
   return ALBUM_NAMES[String(cfg.albumDigit || DEFAULT_CFG.albumDigit || '4')] || 'Nimbus'
 }
@@ -1980,7 +1980,7 @@ function albumName() {
 /// Build the B2 composer folder name: e.g. "R13_Ben Zwerin_NIMBUS"
 // Uses the 3-char composer prefix (not full ID) so all variants share one folder.
 // Pass albumOverride to use a specific album (e.g. derived from a track's own sku album digit).
-async function b2ComposerFolder(composerId, albumOverride) {
+async function b2ComposerFolder(composerId, albumOverride, opts = {}) {
   const album = albumOverride || albumName()
   // Strip variant letter → 3-char prefix (e.g. R13a → R13, C32b → C32)
   const prefix = composerId.slice(0, 3).toUpperCase()
@@ -1992,7 +1992,14 @@ async function b2ComposerFolder(composerId, albumOverride) {
     const row = await pgQ(
       `SELECT full_name FROM composers WHERE upper(composer_id) = $1 LIMIT 1`, [prefix]
     )
-    fullName = row?.[0]?.full_name || prefix
+    fullName = row?.[0]?.full_name || null
+  }
+  // strict: refuse rather than invent a folder name we can't verify. Non-strict
+  // keeps the old behaviour (fall back to the bare prefix as the name) so the
+  // five existing call sites are unchanged.
+  if (!fullName) {
+    if (opts.strict) return null
+    fullName = prefix
   }
   return `${album.toLowerCase()}/${prefix}_${fullName}_${album.toUpperCase()}`
 }
@@ -10895,7 +10902,22 @@ async function b2BackfillMigrate(statusElId = 'ops-migrate-status') {
     if (!m) continue
     const skuRoot    = m[1]
     const composerId = skuRoot.slice(0, 3)
-    const composerFolder = composerId
+    // BUG (fixed 2026-09-04): this was `const composerFolder = composerId`, i.e. the
+    // bare 3-char prefix, so every file landed at the BUCKET ROOT as
+    //   R48/R48a5744_Caught In Your Spell/HAUS_....wav
+    // instead of
+    //   nimbus/R48_Michael Toland_NIMBUS/R48a5744_.../HAUS_....wav
+    // 92 mix_stems rows were written that way 24-27 Aug. Derive the album from the
+    // sku's own trailing digit and REFUSE the track if anything can't be resolved,
+    // rather than inventing a path.
+    const skuAlbum = ALBUM_NAMES[skuRoot.slice(-1)] || null
+    if (!skuAlbum) {
+      log(`SKIP ${track.name} - unknown album digit in ${skuRoot}`); errors++; continue
+    }
+    const composerFolder = await b2ComposerFolder(composerId, skuAlbum, { strict: true })
+    if (!composerFolder) {
+      log(`SKIP ${track.name} - no composer record for ${composerId}, refusing to upload`); errors++; continue
+    }
     const files = Array.from(await window.haus.fs.readDir(track.path) || [])
       .filter(f => !f.isDirectory && /\.(wav|mp3|aif|aiff)$/i.test(f.name))
     for (const f of files) {

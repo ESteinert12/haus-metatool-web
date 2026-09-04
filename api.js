@@ -2856,6 +2856,180 @@ app.get('/api/b2/heal', async (req, res) => {
   }
 })
 
+// ─── Relocate stray bucket-root objects ──────────────────────────────────────
+// b2BackfillMigrate() (index.html) used the bare 3-char composer prefix as the
+// whole folder, so 92 rows written 24-27 Aug landed at the BUCKET ROOT:
+//   R48/R48a5744_Caught In Your Spell/HAUS_....wav
+// rather than
+//   nimbus/R48_Michael Toland_NIMBUS/R48a5744_.../HAUS_....wav
+// The source bug is fixed; this moves the objects already written that way.
+// Server-side b2_copy_file only -- nothing is downloaded or re-uploaded, and the
+// stray originals are LEFT IN PLACE (deleting them is a separate decision).
+// Dry run unless ?dryRun=0.
+const ALBUM_BY_DIGIT = { '1': 'stratus', '2': 'cumulus', '3': 'cirrus', '4': 'nimbus' }
+const COLLECTION_PREFIXES = ['nimbus/', 'stratus/', 'cirrus/', 'cumulus/', 'music/']
+
+app.get('/api/b2/relocate-strays', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let bucketId = req.query.bucketId
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    if (!bucketId) {
+      const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // 1. Rows whose key is not under a known collection prefix. Query FIRST, before
+    //    the long bucket listing, so the PG connection is not left idle (that is what
+    //    killed the first full sweep).
+    const notLike = COLLECTION_PREFIXES.map((_, i) => `b2_key NOT LIKE $${i + 1}`).join(' AND ')
+    const strays = (await pgPool.query(
+      `SELECT mix_stem_id, sku_root, filename, b2_key
+         FROM mix_stems
+        WHERE b2_key IS NOT NULL AND ${notLike}
+        ORDER BY b2_key`,
+      COLLECTION_PREFIXES.map(p => p + '%'))).rows
+
+    if (!strays.length) return res.json({ ok: true, dryRun, counts: { strays: 0 }, note: 'no stray keys found' })
+
+    // 2. Composer names, one query.
+    const prefixes = [...new Set(strays.map(r => r.sku_root.slice(0, 3).toUpperCase()))]
+    const cRows = (await pgPool.query(
+      `SELECT upper(composer_id) AS cid, full_name FROM composers WHERE upper(composer_id) = ANY($1)`,
+      [prefixes])).rows
+    const nameOf = new Map(cRows.map(r => [r.cid, r.full_name]))
+
+    // 3. Bucket inventory.
+    const byKey = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `relocate page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) byKey.set(f.fileName, { size: f.contentLength, id: f.fileId })
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    // 4. Plan. Anything unresolvable is refused, never guessed.
+    const plan = [], refused = []
+    for (const r of strays) {
+      const prefix = r.sku_root.slice(0, 3).toUpperCase()
+      const digit  = r.sku_root.slice(-1)
+      const album  = ALBUM_BY_DIGIT[digit]
+      if (!album) { refused.push({ ...r, reason: `unknown album digit '${digit}'` }); continue }
+      const fullName = nameOf.get(prefix)
+      if (!fullName) { refused.push({ ...r, reason: `no composers row for ${prefix}` }); continue }
+
+      const rest = String(r.b2_key).split('/').slice(1).join('/')
+      if (!rest) { refused.push({ ...r, reason: 'key has no path below the root segment' }); continue }
+      const newKey = `${album}/${prefix}_${fullName}_${album.toUpperCase()}/${rest}`
+      if (newKey === r.b2_key) { refused.push({ ...r, reason: 'already correct' }); continue }
+
+      const src = byKey.get(r.b2_key)
+      if (!src) { refused.push({ ...r, reason: 'stray object not present in bucket' }); continue }
+      if (src.size < STUB_LIMIT) { refused.push({ ...r, reason: `source is a ${src.size}-byte stub` }); continue }
+
+      const dst = byKey.get(newKey)
+      if (dst && dst.size === src.size) { plan.push({ ...r, newKey, size: src.size, action: 'relink' }); continue }
+      if (dst && dst.size !== src.size) {
+        refused.push({ ...r, newKey, reason: `destination exists at ${dst.size} bytes, source is ${src.size}` }); continue
+      }
+      plan.push({ ...r, newKey, srcId: src.id, size: src.size, action: 'copy' })
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-relocate-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        counts: { strays: strays.length, plan: plan.length, refused: refused.length },
+        plan, refused }, null, 2))
+    } catch (e) { console.warn('[b2-relocate] could not write report:', e.message) }
+
+    const counts = {
+      strays: strays.length,
+      copy:   plan.filter(p => p.action === 'copy').length,
+      relink: plan.filter(p => p.action === 'relink').length,
+      refused: refused.length,
+    }
+    if (dryRun) {
+      console.log(`[b2-relocate] DRY RUN - ${counts.copy} to copy, ${counts.relink} relink-only, ${counts.refused} refused`)
+      return res.json({ ok: true, dryRun: true, counts, reportPath,
+        planSample: plan.slice(0, 20), refusedSample: refused.slice(0, 20) })
+    }
+
+    // 5. Execute. Copy, verify the byte count, only then update the row.
+    const todo = limit ? plan.slice(0, limit) : plan
+    let copied = 0, relinked = 0
+    const failures = []
+    // Do every B2 copy FIRST and bank the verified successes. The DB update used to
+    // sit inside this loop, which meant the Neon connection idled through the whole
+    // bucket listing and then through every copy -- it dropped on the first UPDATE
+    // ("Connection terminated unexpectedly") and nothing was recorded. Copies are
+    // idempotent (a re-run sees them as 'relink'), so this ordering is safe.
+    const done = []
+    for (const p of todo) {
+      try {
+        if (p.action === 'copy') {
+          const r = await _b2Retry({ method: 'POST', hostname: apiHost,
+            urlPath: '/b2api/v3/b2_copy_file',
+            headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+            body: { sourceFileId: p.srcId, fileName: p.newKey, destinationBucketId: bucketId }
+          }, p.filename)
+          if (r.status !== 200) { failures.push({ ...p, error: r.body?.message || `HTTP ${r.status}` }); continue }
+          if (r.body.contentLength !== p.size) {
+            failures.push({ ...p, error: `copy landed ${r.body.contentLength}, expected ${p.size}` }); continue
+          }
+          copied++
+        } else relinked++
+        done.push(p)
+        if (done.length % 25 === 0) console.log(`[b2-relocate] ${done.length}/${todo.length} copied`)
+      } catch (e) { failures.push({ ...p, error: e.message }) }
+    }
+
+    // Record the verified moves in batches of 200 via unnest(). Retried once, because
+    // the pool's connection may well have gone stale during the copies -- the retry
+    // gets a fresh one.
+    let updated = 0
+    for (let i = 0; i < done.length; i += 200) {
+      const chunk = done.slice(i, i + 200)
+      const ids   = chunk.map(c => c.mix_stem_id)
+      const keys  = chunk.map(c => c.newKey)
+      const sql   = `UPDATE mix_stems m SET b2_key = u.k
+                       FROM (SELECT unnest($1::int[]) AS id, unnest($2::text[]) AS k) u
+                      WHERE m.mix_stem_id = u.id`
+      let ok = false
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        try { const r = await pgPool.query(sql, [ids, keys]); updated += r.rowCount; ok = true }
+        catch (e) {
+          if (attempt === 0) { console.warn('[b2-relocate] update chunk failed, retrying:', e.message); await new Promise(r => setTimeout(r, 1000)) }
+          else chunk.forEach(c => failures.push({ ...c, error: 'copied to B2 but DB update failed: ' + e.message }))
+        }
+      }
+    }
+    if (updated !== done.length) {
+      console.warn(`[b2-relocate] WARNING: ${done.length} objects in place but only ${updated} rows updated -- re-run to reconcile`)
+    }
+    console.log(`[b2-relocate] done - ${copied} copied, ${relinked} relinked, ${updated} rows updated, ${failures.length} failed. Stray originals left in place.`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, copied, relinked,
+               updated, failed: failures.length, remaining: plan.length - todo.length,
+               refused: refused.length, reportPath, failures: failures.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-relocate] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 app.post('/api/b2/download-file', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
   const { url, destPath } = req.body
