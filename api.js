@@ -1656,7 +1656,7 @@ app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
       foundInDropbox: foundCount,
       skusToRecover: Object.values(composerSkus).reduce((sum, set) => sum + set.size, 0),
       message: `Ready to recover ${Object.values(composerSkus).reduce((sum, set) => sum + set.size, 0)} WAV files from ${foundCount} composer folders`,
-      nextStep: 'Call /api/b2/start-recovery to begin downloading and uploading files (runs in background)'
+      nextStep: 'Work list only. Use /api/b2/recover-broken (dry run by default) to move audio.'
     })
 
   } catch (e) {
@@ -1666,191 +1666,11 @@ app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
 })
 
 // START RECOVERY: Download from old Dropbox, upload to B2 (runs in background)
-app.get('/api/b2/start-recovery', async (req, res) => {
-  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
-
-  // Fail fast if Dropbox is not configured, but do NOT capture the token: this run
-  // can last hours and a minted access token lasts ~4. Each use site re-mints via
-  // the cached _dropboxToken().
-  try { await _dropboxToken() }
-  catch (e) { return res.json({ ok: false, error: e.message }) }
-
-  // Return immediately - recovery runs in background
-  res.json({ ok: true, status: 'recovery_started', message: 'Download/upload started. Check server logs for progress.' })
-
-  // Run recovery in background (no await)
-  ;(async () => {
-    console.log('\n' + '='.repeat(70))
-    console.log('[RECOVERY] WAV File Recovery - Download from Old Dropbox, Upload to B2')
-    console.log('='.repeat(70))
-
-    try {
-      const tmpDir = path.join(os.tmpdir(), 'haus-recovery')
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true })
-
-      const archiveCollections = ['1. ARCHIVE_Stratus', '2. ARCHIVE_Cumulus', '3. ARCHIVE_Cirrus', '4. ARCHIVE_Nimbus']
-      let uploadedCount = 0
-      let errorCount = 0
-
-      for (const collection of archiveCollections) {
-        console.log(`\n[RECOVERY] Processing ${collection}...`)
-
-        try {
-          // List composer folders
-          const listRes = await _b2Request({
-            method: 'POST',
-            hostname: 'api.dropboxapi.com',
-            urlPath: '/2/files/list_folder',
-            headers: {
-              'Authorization': `Bearer ${await _dropboxToken()}`,
-              'Content-Type': 'application/json'
-            },
-            body: { path: `/${collection}` }
-          })
-
-          if (listRes.status !== 200 || !listRes.body.entries) {
-            console.log(`[RECOVERY] Failed to list ${collection}`)
-            continue
-          }
-
-          const composerFolders = listRes.body.entries.filter(e => e['.tag'] === 'folder')
-          console.log(`[RECOVERY] Found ${composerFolders.length} composer folders`)
-
-          // Process each composer
-          for (const composer of composerFolders) {
-            const composerPath = `/${collection}/${composer.name}`
-
-            try {
-              // List files in composer folder
-              const filesRes = await _b2Request({
-                method: 'POST',
-                hostname: 'api.dropboxapi.com',
-                urlPath: '/2/files/list_folder',
-                headers: {
-                  'Authorization': `Bearer ${await _dropboxToken()}`,
-                  'Content-Type': 'application/json'
-                },
-                body: { path: composerPath }
-              })
-
-              if (filesRes.status !== 200 || !filesRes.body.entries) continue
-
-              // Find WAV files in subfolders
-              const wavFiles = []
-              for (const entry of filesRes.body.entries) {
-                if (entry['.tag'] === 'folder') {
-                  // List files in song folder
-                  const songFilesRes = await _b2Request({
-                    method: 'POST',
-                    hostname: 'api.dropboxapi.com',
-                    urlPath: '/2/files/list_folder',
-                    headers: {
-                      'Authorization': `Bearer ${await _dropboxToken()}`,
-                      'Content-Type': 'application/json'
-                    },
-                    body: { path: entry.path_display }
-                  })
-
-                  if (songFilesRes.status === 200 && songFilesRes.body.entries) {
-                    for (const file of songFilesRes.body.entries) {
-                      if (file.name && file.name.endsWith('.wav')) {
-                        wavFiles.push(file)
-                      }
-                    }
-                  }
-                }
-              }
-
-              if (wavFiles.length === 0) continue
-
-              console.log(`[RECOVERY]   ${composer.name}: ${wavFiles.length} WAV files`)
-
-              // Download and upload each WAV file
-              for (const wavFile of wavFiles) {
-                try {
-                  // Download from Dropbox
-                  const dlRes = await _b2Request({
-                    method: 'POST',
-                    hostname: 'content.dropboxapi.com',
-                    urlPath: '/2/files/download',
-                    headers: {
-                      'Authorization': `Bearer ${await _dropboxToken()}`,
-                      'Dropbox-API-Arg': JSON.stringify({ path: wavFile.path_display })
-                    }
-                  })
-
-                  if (dlRes.status !== 200) {
-                    errorCount++
-                    continue
-                  }
-
-                  // Save locally
-                  const localPath = path.join(tmpDir, wavFile.name)
-                  fs.writeFileSync(localPath, dlRes.body)
-
-                  // Upload to B2
-                  const uploadUrl = `${collection}/${composer.name}/${wavFile.name}`
-
-                  const urlRes = await _b2Request({
-                    method: 'POST',
-                    hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
-                    urlPath: '/b2api/v3/b2_get_upload_url',
-                    headers: { 'Authorization': b2Auth.authorizationToken },
-                    body: { bucketId: b2Auth.allowed?.bucketId }
-                  })
-
-                  if (urlRes.status === 200) {
-                    const uploadUrlStr = urlRes.body.uploadUrl
-                    const uploadHostname = uploadUrlStr.replace(/^https?:\/\//, '').split('/')[0]
-                    const uploadPath = uploadUrlStr.replace(/^https?:\/\/[^/]+/, '')
-                    const fileData = fs.readFileSync(localPath)
-
-                    const uploadRes = await _b2Request({
-                      method: 'POST',
-                      hostname: uploadHostname,
-                      urlPath: uploadPath,
-                      headers: {
-                        'Authorization': urlRes.body.authorizationToken,
-                        'X-Bz-File-Name': uploadUrl,
-                        'X-Bz-Content-Type': 'application/octet-stream',
-                        'Content-Length': fileData.length
-                      },
-                      body: fileData,
-                      isBuffer: true
-                    })
-
-                    if (uploadRes.status === 200) {
-                      uploadedCount++
-                    } else {
-                      errorCount++
-                    }
-                  }
-
-                  // Clean up
-                  try { fs.unlinkSync(localPath) } catch (e) {}
-                } catch (e) {
-                  errorCount++
-                }
-              }
-            } catch (e) {
-              console.log(`[RECOVERY]   Error processing ${composer.name}: ${e.message}`)
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 100))
-          }
-        } catch (e) {
-          console.log(`[RECOVERY] Error with ${collection}: ${e.message}`)
-        }
-      }
-
-      console.log('\n' + '='.repeat(70))
-      console.log(`[RECOVERY] COMPLETE: ${uploadedCount} uploaded, ${errorCount} errors`)
-      console.log('='.repeat(70) + '\n')
-    } catch (e) {
-      console.error('[RECOVERY] Fatal error:', e.message)
-    }
-  })()
-})
+// /api/b2/start-recovery was REMOVED 2026-09-04. It uploaded to
+//   `${collection}/${composer}/${filename}` -- missing the SKU/title folder --
+// never updated mix_stems, sent no X-Bz-Content-Sha1, passed the key raw in
+// X-Bz-File-Name (breaks on spaces/apostrophes), and took its work list from a
+// CSV frozen 2026-08-10. Use /api/b2/recover-broken. Git history has the old code.
 
 // ─── B2 Missing Files Checker API ──────────────────────────────────────────
 app.get('/api/b2/inventory', (req, res) => {
@@ -3174,7 +2994,7 @@ app.get('/api/b2/stub-audit-refresh', async (req, res) => {
 })
 
 // ─── Recover broken B2 objects from the Dropbox archive ─────────────────────
-// Replaces /api/b2/start-recovery, which is left in place but should NOT be used:
+// Replaces /api/b2/start-recovery, removed 2026-09-04. That endpoint was broken:
 // it uploaded to `${collection}/${composer}/${filename}` -- missing the SKU/title
 // folder -- never updated mix_stems, sent no X-Bz-Content-Sha1 (B2 requires it),
 // and passed the key raw in X-Bz-File-Name, which breaks on the spaces and

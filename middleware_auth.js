@@ -53,7 +53,6 @@ const PUBLIC_ROUTES = [
   '/b2/get-song-lots',
   '/b2/full-audit',
   '/b2/recovery-from-dropbox',
-  '/b2/start-recovery',
 
   // Config
   '/cfg/server-paths'

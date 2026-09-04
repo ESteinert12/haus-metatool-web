@@ -509,13 +509,17 @@ webview{flex:1;border:none}
             <button class="btn" onclick="opsIndexB2Cancel()" id="ops-index-cancel" style="display:none;white-space:nowrap">Cancel</button>
             <span id="ops-index-status" style="font-size:12px;color:var(--text3)">Scans B2 for every unindexed track and writes b2_key to mix_stems. Run this once after migration.</span>
           </div>
+          <!-- RETIRED 2026-09-04: "Backfill Committed Lots -> B2" and
+               "Backfill MIGRATE -> B2". Both read cfg.hausjup, the Dropbox
+               shipping folder, whose audio is cloud-only placeholders (full
+               logical size, ZERO blocks) - so they could no longer upload real
+               audio, only appear to. Neither had a dry run, a report or a
+               confirmation, and the MIGRATE one wrote the 92 bucket-root keys.
+               Replacement: /api/b2/recover-broken, which reads over the Dropbox
+               API instead of from disk, is dry-run by default and verifies byte
+               counts. See AUDIO_BACKLOG_MASTER_PLAN.md. -->
           <div style="display:flex;align-items:center;gap:10px">
-            <button class="btn" onclick="opsMigrateB2()" id="ops-b2-btn" style="white-space:nowrap"><i class="ti ti-cloud-upload"></i> Backfill Committed Lots → B2</button>
-            <span id="ops-b2-status" style="font-size:12px;color:var(--text3)">Uploads committed lot folders in ATMOS_Shipping. Skips MIGRATE and any draft lots.</span>
-          </div>
-          <div style="display:flex;align-items:center;gap:10px">
-            <button class="btn" onclick="opsMigrateFinish()" id="ops-migrate-btn" style="white-space:nowrap"><i class="ti ti-package-export"></i> Backfill MIGRATE → B2</button>
-            <span id="ops-migrate-status" style="font-size:12px;color:var(--text3)">Uploads finished tracks from ATMOS_Shipping/MIGRATE.</span>
+            <span style="font-size:12px;color:var(--text3)">B2 backfill has moved to the API recovery route — see the master plan. The old one-click backfills were retired 2026-09-04.</span>
           </div>
           <div style="display:flex;flex-direction:column;gap:6px">
             <div style="display:flex;align-items:center;gap:10px">
@@ -10703,6 +10707,11 @@ async function lrSave(skuRoot) {
 // Upload all files in ATMOS_Shipping to B2 under the correct composer folder.
 // Skips files already in B2 (b2_key already set in mix_stems).
 async function b2Backfill(statusElId = 'b2-connect-result') {
+  // RETIRED 2026-09-04 -- reads the Dropbox shipping folder, which holds
+  // cloud-only placeholders. Uploading from it produces stubs. Use the API
+  // route (/api/b2/recover-broken) instead.
+  alert('This backfill is retired: it reads Dropbox placeholder files and would upload empty audio. Use the API recovery route instead.')
+  return
   if (!b2Connected || !b2BucketId) { alert('B2 not connected'); return }
   if (!cfg.hausjup) { alert('Shipping folder not configured'); return }
 
@@ -10893,6 +10902,11 @@ async function opsIndexB2() {
 // Uploads all track folders in ATMOS_Shipping/MIGRATE to B2.
 // No lot-status check — Finish Queue already committed these to the DB.
 async function b2BackfillMigrate(statusElId = 'ops-migrate-status') {
+  // RETIRED 2026-09-04 -- reads the Dropbox shipping folder, which holds
+  // cloud-only placeholders. Uploading from it produces stubs. Use the API
+  // route (/api/b2/recover-broken) instead.
+  alert('This backfill is retired: it reads Dropbox placeholder files and would upload empty audio. Use the API recovery route instead.')
+  return
   if (!b2Connected || !b2BucketId) { alert('B2 not connected'); return }
   if (!cfg.hausjup) { alert('Shipping folder not configured'); return }
 
