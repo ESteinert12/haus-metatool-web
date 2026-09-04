@@ -8776,12 +8776,20 @@ async function downloadDrop(i) {
     // the Dropbox file provider -- and if Dropbox refuses, it refuses at once.
     // The first version skipped this and ground away for four minutes moving
     // zero bytes before reporting nothing at all.
+    // The probe needs a HARD timeout. When Dropbox is wedged the read does not
+    // fail -- it blocks forever, so "it errors instantly" was wrong too: the
+    // probe sat for 90 seconds. macOS has no GNU `timeout`, but perl's alarm
+    // does the job: SIGALRM after 8s, which surfaces as exit 142.
     setBtn('Testing…')
     const probe = await window.haus.shell.exec(
-      `head -c 1 "${hollow[0].replace(/"/g, '\\"')}" 2>&1 >/dev/null; echo "EXIT:$?"`)
+      `perl -e 'alarm 8; exec @ARGV or exit 127' head -c 1 "${hollow[0].replace(/"/g, '\\"')}" 2>&1 >/dev/null; echo "EXIT:$?"`)
     const pout  = String(probe?.stdout || '').trim()
     const pcode = (pout.match(/EXIT:(\d+)\s*$/) || [])[1]
-    const perr  = pout.replace(/EXIT:\d+\s*$/, '').trim()
+    let   perr  = pout.replace(/EXIT:\d+\s*$/, '').trim()
+    if (pcode === '142' || pcode === '14') {
+      alert(`Dropbox is not responding for "${d.name}".\n\nThe file did not begin downloading within 8 seconds — Dropbox is most likely stuck. Check the menu bar: if it says "Syncing…" but nothing is moving, quit Dropbox and relaunch it, and restart the Mac if that does not clear it.\n\nNothing was changed here.`)
+      return
+    }
     if (pcode && pcode !== '0') {
       alert(`Dropbox will not download "${d.name}" on request.\n\n${perr || 'The read was refused.'}\n\nThis is a Dropbox limitation rather than a fault in the app: files can only be fetched through Dropbox itself.\n\nIn Finder, right-click the folder and choose "Make Available Offline" — then check the badge here to confirm it actually worked.`)
       return
