@@ -62,6 +62,13 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 .track-row:hover *{color:#fff!important}
 .intake-tr{cursor:pointer;padding:9px 10px;border-radius:6px;margin-bottom:3px;transition:background 0.12s}
 .intake-tr:not(.active):not(.uploading):not(.error):not(.done):hover{background:#6F9276;color:white}
+/* The composer/genre line carries an INLINE color:#6F927E, and inline styles beat
+   class rules -- so on hover it stayed sage on a sage background and disappeared.
+   !important is genuinely needed here to override the inline style.
+   NOTE: clay (#C17A5E) and the sage hover background have nearly identical
+   luminance (0.260 vs 0.252, ~1.03:1). If it reads as murky, darkening the hover
+   background is the fix -- the text colour is not the problem. */
+.intake-tr:not(.active):not(.uploading):not(.error):not(.done):hover > div:last-child{color:#C17A5E !important}
 .intake-tr.active{background:#E7F0EA;color:#1a1a1a}
 .intake-tr.active:hover{background:#daeae0;color:#1a1a1a}
 .btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
