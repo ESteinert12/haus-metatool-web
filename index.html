@@ -8166,7 +8166,8 @@ async function scanStagingForClient(clientName) {
 
   renderIntakeBrowserTracks()
   updateIntakeBadge(intakeDrops.length)
-  _checkIntakeDupes()  // background — updates badges when ready
+  _checkIntakeDupes()      // background — updates badges when ready
+  _checkIntakeCloudOnly()  // background — flags drops Dropbox has not downloaded
 }
 
 // Dead code — old intake layout (used #track-section / #intake-track-list which no longer exist).
@@ -8694,13 +8695,18 @@ function renderIntakeBrowserTracks() {
     else if (done)               icon = '<i class="ti ti-circle-check" style="font-size:11px;color:var(--green,#22c55e);flex-shrink:0"></i>'
     const dupeTag = d._isDupe && !done
       ? `<span title="Already in the catalog as ${esc(d._dupeSkuRoot || '?')} - same title and composer. Verify before importing." style="font-size:9px;font-weight:700;color:#fff;background:#e53935;padding:1px 5px;border-radius:3px;margin-left:4px;flex-shrink:0">DUPE ${esc(d._dupeSkuRoot || '')}</span>` : ''
+    // A Dropbox online-only file reports its full size but occupies no blocks.
+    // You cannot audition what is not on disk, so flag it in the list rather
+    // than letting someone fill in a whole form and only then discover it.
+    const cloudTag = d._cloudOnly
+      ? `<span title="${d._cloudOnly} file(s) have not downloaded from Dropbox. Right-click the folder in Finder and choose Make Available Offline." style="font-size:9px;font-weight:700;color:#fff;background:#c0782b;padding:1px 5px;border-radius:3px;margin-left:4px;flex-shrink:0">NOT SYNCED ${d._cloudOnly}</span>` : ''
     const composerName = d._composerName || d.guessedID || '?'
     return `<div id="intake-tr-${i}" class="${cls.join(' ')}" onclick="loadIntakeTrackForm(${i})"
       style="${bg}">
       <div style="display:flex;align-items:center;gap:6px">
         ${icon}
         <div style="font-size:12px;font-weight:600;line-height:1.3;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</div>
-        ${dupeTag}
+        ${dupeTag}${cloudTag}
       </div>
       <div style="font-size:11px;color:#6F927E;margin-top:2px;font-weight:500">${esc(composerName)}${d.guessedTag ? ' | ' + esc(d.guessedTag) : ''}</div>
     </div>`
@@ -8737,6 +8743,36 @@ async function _loadIntakeComposerNames() {
 }
 
 // ── Intake: batch dupe check + bg job status bar ───────────────────────────
+
+let _cloudCheckRunning = false
+async function _checkIntakeCloudOnly() {
+  if (_cloudCheckRunning || !intakeDrops.length) return
+  _cloudCheckRunning = true
+  try {
+    // One stat pass over the whole staging tree rather than a call per folder.
+    const staging = cfg.staging || cfg.intake
+    if (!staging) return
+    const r = await window.haus.shell.exec(
+      `find "${staging}" -maxdepth 3 -type f \\( -iname '*.wav' -o -iname '*.mp3' -o -iname '*.aif' -o -iname '*.aiff' \\) -print0 | xargs -0 stat -f "%z %b %N" 2>/dev/null`)
+    const counts = new Map()
+    for (const line of String(r?.stdout || '').split('\n')) {
+      const m = line.match(/^(\d+) (\d+) (.+)$/)
+      if (!m) continue
+      if (parseInt(m[1]) > 0 && parseInt(m[2]) === 0) {
+        const dir = m[3].slice(0, m[3].lastIndexOf('/'))
+        counts.set(dir, (counts.get(dir) || 0) + 1)
+      }
+    }
+    let changed = false
+    for (const d of intakeDrops) {
+      const n = counts.get(d.path) || 0
+      if (d._cloudOnly !== n) { d._cloudOnly = n; changed = true }
+    }
+    if (changed) renderIntakeBrowserTracks()
+  } catch (e) {
+    console.warn('[intake] cloud-only check failed:', e.message)
+  } finally { _cloudCheckRunning = false }
+}
 
 async function _checkIntakeDupes() {
   if (!pgConnected || !intakeDrops.length) return
