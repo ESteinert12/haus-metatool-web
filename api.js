@@ -135,19 +135,29 @@ function _b2Request(opts) {
 // mint a short-lived access token on demand, cached until a minute before it
 // lapses. A long run therefore re-mints mid-flight instead of dying.
 // Falls back to a static DROPBOX_OLD_TOKEN if that is all that is configured.
-let _dbxTok = { value: null, expires: 0 }
-async function _dropboxToken() {
-  const { DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_OLD_TOKEN } = process.env
-  if (!DROPBOX_APP_KEY || !DROPBOX_APP_SECRET || !DROPBOX_REFRESH_TOKEN) {
-    if (DROPBOX_OLD_TOKEN) return DROPBOX_OLD_TOKEN   // legacy static token, expires
-    throw new Error('Dropbox not configured — set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN in .env')
+// TWO Dropbox accounts, confirmed 2026-09-04 by listing each root:
+//   'archive'  — DROPBOX_*           — holds ONLY 1.–4. ARCHIVE_* and 5. DNU
+//   'uploader' — DROPBOX_UPLOADER_*  — the working account, holds 2. COLLECTION UPLOADER
+// They are separate Dropbox accounts with separate apps (the first app hit its
+// user limit, so the second account has its own). Ask for the one you need.
+const _dbxTok = { archive: { value: null, expires: 0 }, uploader: { value: null, expires: 0 } }
+async function _dropboxToken(account = 'archive') {
+  if (account !== 'archive' && account !== 'uploader') throw new Error(`unknown Dropbox account "${account}"`)
+  const pfx = account === 'uploader' ? 'DROPBOX_UPLOADER_' : 'DROPBOX_'
+  const appKey = process.env[pfx + 'APP_KEY']
+  const appSecret = process.env[pfx + 'APP_SECRET']
+  const refresh = process.env[pfx + 'REFRESH_TOKEN']
+  const cache = _dbxTok[account]
+  if (!appKey || !appSecret || !refresh) {
+    if (account === 'archive' && process.env.DROPBOX_OLD_TOKEN) return process.env.DROPBOX_OLD_TOKEN
+    throw new Error(`Dropbox "${account}" not configured — set ${pfx}APP_KEY, ${pfx}APP_SECRET and ${pfx}REFRESH_TOKEN in .env`)
   }
-  if (_dbxTok.value && Date.now() < _dbxTok.expires) return _dbxTok.value
-  const form = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: DROPBOX_REFRESH_TOKEN }).toString()
+  if (cache.value && Date.now() < cache.expires) return cache.value
+  const form = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: refresh }).toString()
   const r = await _b2Request({
     method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/oauth2/token',
     headers: {
-      'Authorization': 'Basic ' + Buffer.from(`${DROPBOX_APP_KEY}:${DROPBOX_APP_SECRET}`).toString('base64'),
+      'Authorization': 'Basic ' + Buffer.from(`${appKey}:${appSecret}`).toString('base64'),
       'Content-Type': 'application/x-www-form-urlencoded'
     },
     body: Buffer.from(form), isBuffer: true
@@ -155,11 +165,12 @@ async function _dropboxToken() {
   let parsed
   try { parsed = JSON.parse(r.body.toString()) } catch { parsed = {} }
   if (r.status !== 200 || !parsed.access_token) {
-    throw new Error(`Dropbox token refresh failed (HTTP ${r.status}): ${parsed.error_description || parsed.error || r.body.toString().slice(0, 200)}`)
+    throw new Error(`Dropbox "${account}" token refresh failed (HTTP ${r.status}): ${parsed.error_description || parsed.error || r.body.toString().slice(0, 200)}`)
   }
-  _dbxTok = { value: parsed.access_token, expires: Date.now() + ((parsed.expires_in || 14400) - 60) * 1000 }
-  console.log(`[dropbox] minted access token, valid ~${Math.round((parsed.expires_in || 14400) / 60)} min`)
-  return _dbxTok.value
+  cache.value = parsed.access_token
+  cache.expires = Date.now() + ((parsed.expires_in || 14400) - 60) * 1000
+  console.log(`[dropbox] minted ${account} access token, valid ~${Math.round((parsed.expires_in || 14400) / 60)} min`)
+  return cache.value
 }
 
 function fmHttp(opts) {
@@ -961,8 +972,36 @@ app.get('/api/b2/stream', async (req, res) => {
     const total = buf.length
     console.log(`[b2/stream] downloaded ${total} bytes, serving`)
 
-    // Detect stub files: B2 contains a local path instead of real audio data
+    // Detect stub files: B2 contains a local path instead of real audio data.
     if (total < 1000) {
+      // FIRST: try the same key with a .wav extension. The player prefers the mp3
+      // (chosen = mp3 || wav), so a stubbed mp3 kills playback even when the wav
+      // beside it in B2 is perfectly good -- which is exactly the state the
+      // CORRECTIONS restore leaves a song in, since composers send wavs only.
+      // Same key, different extension: derived, not guessed.
+      if (/\.mp3$/i.test(key)) {
+        const wavKey = key.replace(/\.mp3$/i, '.wav')
+        console.log(`[b2/stream] stub — trying wav sibling: ${wavKey}`)
+        try {
+          const wavPath = `/file/haus-music/${wavKey.split('/').map(x => encodeURIComponent(x)).join('/')}`
+          const wavBuf = await new Promise((resolve, reject) => {
+            const r2 = https.request({ hostname: downloadHost, path: wavPath, method: 'GET',
+              headers: { 'Authorization': b2Auth.authorizationToken } }, r => {
+              if (r.statusCode !== 200 && r.statusCode !== 206) { r.resume(); return reject(new Error(`wav sibling HTTP ${r.statusCode}`)) }
+              const cs = []; r.on('data', d => cs.push(d)); r.on('end', () => resolve(Buffer.concat(cs))); r.on('error', reject)
+            })
+            r2.on('error', reject); r2.end()
+          })
+          if (wavBuf.length >= 1000) {
+            console.log(`[b2/stream] serving wav sibling instead (${wavBuf.length} bytes)`)
+            res.setHeader('Content-Type', 'audio/wav')
+            res.setHeader('Content-Length', wavBuf.length)
+            res.setHeader('Accept-Ranges', 'bytes')
+            return res.end(wavBuf)
+          }
+          console.log(`[b2/stream] wav sibling is also small (${wavBuf.length}) — falling through`)
+        } catch (e) { console.log(`[b2/stream] wav sibling unavailable: ${e.message}`) }
+      }
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
         console.log(`[b2/stream] stub detected — serving local file: ${bodyStr}`)
@@ -3046,50 +3085,64 @@ app.get('/api/b2/recover-broken', async (req, res) => {
       `SELECT mix_stem_id, sku_root, filename, b2_key
          FROM mix_stems WHERE b2_key IS NOT NULL`, [], 'recover-broken rows')).rows
 
+    // Two possible sources, tried in this order. Both are DERIVED from the row's own
+    // b2_key -- verified 2026-09-04 that the folder and filename segments match the
+    // Dropbox tree exactly (11 of 11 for R11a6994).
+    //   uploader: the pending SOHO material, never uploaded to B2
+    //             /2. COLLECTION UPLOADER/2. ATMOS_Shipping/MIGRATE/<song folder>/<file>
+    //   archive:  the old archive account, which mirrors the B2 layout
+    //             /4. ARCHIVE_Nimbus/<composer folder>/<song folder>/<file>
+    const MIGRATE_ROOT = '/2. COLLECTION UPLOADER/2. ATMOS_Shipping/MIGRATE'
     const work = [], unmappable = []
     for (const r of rows) {
       const size = sizeOf.get(r.b2_key)
       if (size !== undefined && size >= STUB_LIMIT) continue        // healthy
       const parts = String(r.b2_key).split('/')
+      if (parts.length < 4) { unmappable.push({ ...r, reason: `b2_key has only ${parts.length} segments` }); continue }
+      const songFolder = parts[2], fileName = parts.slice(3).join('/')
+      const candidates = [{ account: 'uploader', path: `${MIGRATE_ROOT}/${songFolder}/${fileName}` }]
       const dir = ARCHIVE_ALBUM_DIRS[parts[0].toLowerCase()]
-      if (!dir || parts.length < 3) { unmappable.push({ ...r, reason: `no archive mapping for "${parts[0]}"` }); continue }
-      work.push({ ...r, currentSize: size === undefined ? null : size,
-                  dbxPath: '/' + dir + '/' + parts.slice(1).join('/') })
+      if (dir) candidates.push({ account: 'archive', path: '/' + dir + '/' + parts.slice(1).join('/') })
+      if (!candidates.length) { unmappable.push({ ...r, reason: `no source mapping for "${parts[0]}"` }); continue }
+      work.push({ ...r, currentSize: size === undefined ? null : size, candidates })
     }
 
     const todo = limit ? work.slice(0, limit) : work
     const results = { present: 0, absentInDropbox: 0, tooSmallInDropbox: 0,
                       uploaded: 0, failed: 0 }
+    const bySource = {}
     const absent = [], failures = [], ready = []
 
     for (const w of todo) {
-      // Metadata first: never download to discover a file is not there.
-      const meta = await _b2Retry({
-        method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/get_metadata',
-        headers: { 'Authorization': `Bearer ${await _dropboxToken()}`, 'Content-Type': 'application/json' },
-        body: { path: w.dbxPath }
-      }, `meta ${w.filename}`).catch(e => ({ status: 0, body: { error_summary: e.message } }))
-
-      if (meta.status !== 200) {
+      // Metadata first, per candidate: never download to discover a file is not there.
+      let hit = null, tried = []
+      for (const c of w.candidates) {
+        const meta = await _b2Retry({
+          method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/get_metadata',
+          headers: await _dropboxHeaders(c.account, { 'Content-Type': 'application/json' }),
+          body: { path: c.path }
+        }, `meta ${c.account} ${w.filename}`).catch(e => ({ status: 0, body: { error_summary: e.message } }))
+        if (meta.status === 200 && meta.body.size >= STUB_LIMIT) { hit = { ...c, size: meta.body.size }; break }
+        tried.push(`${c.account}: ${meta.status === 200 ? meta.body.size + ' bytes' : (meta.body?.error_summary || 'HTTP ' + meta.status)}`)
+      }
+      if (!hit) {
         results.absentInDropbox++
-        absent.push({ sku: w.sku_root, key: w.b2_key, dbxPath: w.dbxPath,
-                      error: meta.body?.error_summary || `HTTP ${meta.status}` })
+        absent.push({ sku: w.sku_root, key: w.b2_key, tried })
         continue
       }
-      const dbxSize = meta.body.size
-      if (!(dbxSize >= STUB_LIMIT)) {
-        results.tooSmallInDropbox++
-        absent.push({ sku: w.sku_root, key: w.b2_key, dbxPath: w.dbxPath, error: `archive copy is ${dbxSize} bytes` })
-        continue
-      }
+      w.account = hit.account
+      w.dbxPath = hit.path
+      const dbxSize = hit.size
       results.present++
-      if (dryRun) { if (ready.length < 20) ready.push({ sku: w.sku_root, key: w.b2_key, dbxSize }); continue }
+      if (dryRun) bySource[w.account] = (bySource[w.account] || 0) + 1
+      if (dryRun) { if (ready.length < 20) ready.push({ sku: w.sku_root, source: w.account, dbxSize, key: w.b2_key }); continue }
+      bySource[w.account] = (bySource[w.account] || 0) + 1
 
       try {
         const dl = await _b2Retry({
           method: 'POST', hostname: 'content.dropboxapi.com', urlPath: '/2/files/download',
-          headers: { 'Authorization': `Bearer ${await _dropboxToken()}`,
-                     'Dropbox-API-Arg': JSON.stringify({ path: w.dbxPath }) },
+          headers: await _dropboxHeaders(w.account || 'archive',
+                     { 'Dropbox-API-Arg': JSON.stringify({ path: w.dbxPath }) }),
           isBuffer: true
         }, `download ${w.filename}`)
         if (dl.status !== 200 || !Buffer.isBuffer(dl.body) || dl.body.length !== dbxSize) {
@@ -3149,7 +3202,7 @@ app.get('/api/b2/recover-broken', async (req, res) => {
 
     console.log(`[recover] ${dryRun ? 'DRY RUN' : 'DONE'} — broken ${work.length}, in archive ${results.present}, absent ${results.absentInDropbox}, uploaded ${results.uploaded}, failed ${results.failed}`)
     res.json({ ok: true, dryRun,
-      counts: { broken: work.length, attempted: todo.length, ...results, unmappable: unmappable.length },
+      counts: { broken: work.length, attempted: todo.length, ...results, unmappable: unmappable.length, bySource },
       remaining: work.length - todo.length, reportPath,
       readySample: ready, absentSample: absent.slice(0, 10), failures: failures.slice(0, 10) })
   } catch (e) {
@@ -3158,20 +3211,392 @@ app.get('/api/b2/recover-broken', async (req, res) => {
   }
 })
 
+// Which Dropbox account is a token actually on, and does it have a team space?
+// If root_info.root_namespace_id differs from home_namespace_id the account is a
+// TEAM member: the API defaults to the PERSONAL namespace and the team folders are
+// invisible until a Dropbox-API-Path-Root header is sent. That is the likely reason
+// /2. COLLECTION UPLOADER looked almost empty through the API on 4 Sep while Finder
+// showed it full.
+// Team accounts: the API defaults to the member's PERSONAL namespace, which for
+// hausteam@hausmusic.com is an OLD directory tree -- /2. COLLECTION UPLOADER there
+// holds only MISC while Finder shows the real, current folders. The live files are
+// in the TEAM namespace, reachable only by sending Dropbox-API-Path-Root. Discovered
+// 2026-09-04 by listing the same path two ways and not believing the first answer.
+// root_info is fetched once per account and cached; false means "not a team account,
+// no header needed".
+const _dbxRoot = { archive: null, uploader: null }
+async function _dropboxHeaders(account = 'archive', extra = {}) {
+  const token = await _dropboxToken(account)
+  if (_dbxRoot[account] === null) {
+    const r = await _b2Retry({
+      method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/users/get_current_account',
+      headers: { 'Authorization': `Bearer ${token}` }
+    }, `root ${account}`)
+    const ri = r.status === 200 ? r.body?.root_info : null
+    _dbxRoot[account] = (ri && ri.root_namespace_id && ri.root_namespace_id !== ri.home_namespace_id)
+      ? ri.root_namespace_id : false
+    console.log(_dbxRoot[account]
+      ? `[dropbox] ${account} is a team account — using team root namespace ${_dbxRoot[account]}`
+      : `[dropbox] ${account} has no separate team namespace`)
+  }
+  const h = { 'Authorization': `Bearer ${token}`, ...extra }
+  if (_dbxRoot[account]) h['Dropbox-API-Path-Root'] = JSON.stringify({ '.tag': 'root', root: String(_dbxRoot[account]) })
+  return h
+}
+
+app.get('/api/dropbox/whoami', async (req, res) => {
+  try {
+    const account = req.query.account === 'uploader' ? 'uploader' : 'archive'
+    const r = await _b2Retry({
+      method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/users/get_current_account',
+      headers: { 'Authorization': `Bearer ${await _dropboxToken(account)}` }
+    }, `whoami ${account}`)
+    if (r.status !== 200) return res.json({ ok: false, account, error: r.body?.error_summary || `HTTP ${r.status}` })
+    const b = r.body
+    res.json({ ok: true, account,
+      email: b.email, name: b.name?.display_name, accountId: b.account_id,
+      accountType: b.account_type?.['.tag'], teamName: b.team?.name || null,
+      rootInfo: b.root_info,
+      needsPathRoot: !!(b.root_info && b.root_info.root_namespace_id !== b.root_info.home_namespace_id) })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Ask Dropbox WHERE a file is, instead of deriving a path and hoping. Added
+// 2026-09-04 when the API and Finder disagreed about /2. COLLECTION UPLOADER and
+// neither the wrong-account nor the team-namespace theory explained it.
+// ?q=<filename>&account=uploader|archive
+app.get('/api/dropbox/find', async (req, res) => {
+  try {
+    const q = String(req.query.q || '').trim()
+    if (!q) return res.json({ ok: false, error: 'pass ?q=<filename or fragment>' })
+    const account = req.query.account === 'uploader' ? 'uploader' : 'archive'
+    const r = await _b2Retry({
+      method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/search_v2',
+      headers: await _dropboxHeaders(account, { 'Content-Type': 'application/json' }),
+      body: { query: q, options: { max_results: 20, filename_only: true } }
+    }, `find ${q}`)
+    if (r.status !== 200) return res.json({ ok: false, account, error: r.body?.error_summary || `HTTP ${r.status}` })
+    const hits = (r.body.matches || []).map(m => {
+      const md = m.metadata?.metadata || m.metadata
+      return { path: md?.path_display, size: md?.size, type: md?.['.tag'] }
+    })
+    res.json({ ok: true, account, query: q, count: hits.length, hits })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
 // Plain Dropbox directory listing, for working out the archive's real shape
 // rather than assuming it mirrors B2. ?path=/4. ARCHIVE_Nimbus  (empty = root)
 app.get('/api/dropbox/ls', async (req, res) => {
   try {
     const p = req.query.path === undefined ? '' : String(req.query.path)
-    const r = await _b2Retry({
-      method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/list_folder',
-      headers: { 'Authorization': `Bearer ${await _dropboxToken()}`, 'Content-Type': 'application/json' },
-      body: { path: p, limit: 200 }
-    }, `ls ${p || '/'}`)
-    if (r.status !== 200) return res.json({ ok: false, path: p, error: r.body?.error_summary || `HTTP ${r.status}` })
-    res.json({ ok: true, path: p, hasMore: r.body.has_more,
-      entries: (r.body.entries || []).map(e => ({ type: e['.tag'], name: e.name, size: e.size })) })
+    const account = req.query.account === 'uploader' ? 'uploader' : 'archive'
+    // MUST paginate. Dropbox returns has_more with a cursor and will happily hand
+    // back a partial first page -- that is why /2. COLLECTION UPLOADER appeared to
+    // contain only MISC on 2026-09-04, and why the derived path looked wrong when it
+    // was right all along. Follow the cursor to exhaustion.
+    const entries = []
+    let cursor = null, pages = 0
+    do {
+      const r = cursor
+        ? await _b2Retry({
+            method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/list_folder/continue',
+            headers: await _dropboxHeaders(account, { 'Content-Type': 'application/json' }),
+            body: { cursor }
+          }, `ls cont ${account}`)
+        : await _b2Retry({
+            method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/list_folder',
+            headers: await _dropboxHeaders(account, { 'Content-Type': 'application/json' }),
+            body: { path: p, limit: 2000 }
+          }, `ls ${account} ${p || '/'}`)
+      if (r.status !== 200) return res.json({ ok: false, account, path: p, error: r.body?.error_summary || `HTTP ${r.status}` })
+      for (const e of r.body.entries || []) entries.push({ type: e['.tag'], name: e.name, size: e.size })
+      cursor = r.body.has_more ? r.body.cursor : null
+      pages++
+    } while (cursor && pages < 100)
+    res.json({ ok: true, account, path: p, pages, complete: !cursor, count: entries.length, entries })
   } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ─── CORRECTIONS matcher (READ ONLY) ────────────────────────────────────────
+// The 981 broken stems (170 SKUs) are lots that went through the code that lied
+// about success. Composers re-sent the audio into 2. ATMOS_Shipping/CORRECTIONS
+// under their own naming: 161 folders, 952 audio files, REAL bytes on disk (not
+// Dropbox placeholders).
+//
+// This matches those files to the existing broken mix_stems rows. It writes
+// NOTHING. Uploading, if approved, goes to the b2_key each row ALREADY has, so
+// there is never a new SKU and never a database write.
+//
+// It refuses at SONG granularity: if any file in a folder is uncertain, the whole
+// song is quarantined. Half-matching a song is the worst outcome — one wrong stem
+// inside an otherwise correct track is the least visible kind of wrong.
+
+// Strict sibling of detectStemName(). The one in index.html RETURNS 'FULL' for
+// anything it does not recognise, so `..._LongSting.wav` silently becomes the full
+// mix. Here an unknown role returns null and quarantines the song.
+function _roleOfSegment(v) {
+  if (/^NODNB$/.test(v))       return 'NoDNB'
+  if (/^DNB$/.test(v))         return 'DNB'
+  if (/^ALT[A-Z]?$/.test(v))   return v === 'ALT' ? 'ALT' : 'ALT' + v.slice(3).toLowerCase()
+  if (/^BUMPER[A-Z]?$/.test(v))return v === 'BUMPER' ? 'BUMPER' : 'BUMPER' + v.slice(6).toLowerCase()
+  if (/^STINGA$/.test(v))      return 'STINGa'
+  if (/^STING$/.test(v))       return 'STING'
+  if (/^NODRUMS?$/.test(v))    return 'NoDrums'
+  if (/^NOVOX$/.test(v))       return 'NoVox'
+  if (/^NOLEAD$/.test(v))      return 'NoLead'
+  if (/^PIANO$/.test(v))       return 'PIANO'
+  if (/^GUITARS?$/.test(v))    return 'GUITARS'
+  if (/^(FULL|FULLMIX)[A-Z]?$/.test(v)) return 'FULL'
+  return null
+}
+// Composers put the role ANYWHERE in the name, not only at the end:
+//   HAUS_S86b_Everything's Bigger In Texas_A_ALT_TEX HEARTLAND.wav
+// so scan every underscore segment. Segments must match a role token EXACTLY,
+// which preserves the fix that stopped "StingRay" being read as STING.
+// Unknown -> null, which quarantines the song. It never assumes FULL, unlike
+// detectStemName() in index.html, which returns 'FULL' for anything unrecognised
+// and is therefore mislabelling odd stems during normal intake too.
+function _stemRoleStrict(filename) {
+  const base = String(filename).replace(/\.[^.]+$/, '')
+  const segs = base.split('_').map(x => x.trim().toUpperCase()).filter(Boolean)
+  const hits = []
+  for (const v of segs) { const r = _roleOfSegment(v); if (r) hits.push(r) }
+  if (hits.length === 1) return hits[0]
+  if (hits.length > 1) return hits[hits.length - 1]   // e.g. ..._ALT_..._STING
+  return null
+}
+
+const _ext = f => (String(f).match(/\.([^.]+)$/) || [,''])[1].toLowerCase()
+const _norm = s => String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '')
+function _titleScore(a, b) {
+  const x = _norm(a), y = _norm(b)
+  if (!x || !y) return 0
+  if (x === y) return 3
+  if (x.includes(y) || y.includes(x)) return 2
+  const ta = new Set(String(a).toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2))
+  const tb = new Set(String(b).toLowerCase().split(/[^a-z0-9]+/).filter(w => w.length > 2))
+  if (!ta.size || !tb.size) return 0
+  let hit = 0; for (const w of ta) if (tb.has(w)) hit++
+  const ratio = hit / Math.min(ta.size, tb.size)
+  return ratio >= 0.75 ? 1 : 0
+}
+
+function _correctionsRoot() {
+  for (const b of ['1. COLLECTION UPLOADER', '2. COLLECTION UPLOADER', 'COLLECTION UPLOADER']) {
+    const p = path.join(os.homedir(), 'Library/CloudStorage/Dropbox', b, '2. ATMOS_Shipping/CORRECTIONS')
+    if (fs.existsSync(p)) return p
+  }
+  return null
+}
+
+app.get('/api/corrections/match', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const STUB_LIMIT = 1024
+  try {
+    const root = _correctionsRoot()
+    if (!root) return res.json({ ok: false, error: 'CORRECTIONS folder not found under any COLLECTION UPLOADER variant' })
+
+    // 1. Which rows are actually broken (object missing or a stub in B2).
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+    const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const sizeOf = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `match page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) sizeOf.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName; pages++
+    } while (startFileName && pages < 200)
+
+    const rows = (await _pgRetry(
+      `SELECT ms.mix_stem_id, ms.sku_root, ms.filename, ms.b2_key, t.title, t.key AS song_key
+         FROM mix_stems ms LEFT JOIN titles t ON t.sku_root = ms.sku_root
+        WHERE ms.b2_key IS NOT NULL`, [], 'corrections broken rows')).rows
+
+    // Track EVERY song, not just broken ones. A folder whose song is already
+    // healthy is "nothing to do", not "unmatched" -- e.g. R48a_FALLEN PRIDE is
+    // R48a4004, one of the 92 relocated and fixed on 2026-09-04.
+    const bySku = new Map()
+    for (const r of rows) {
+      if (!bySku.has(r.sku_root)) bySku.set(r.sku_root, { sku: r.sku_root, title: r.title, key: r.song_key, stems: [], broken: [] })
+      const e = bySku.get(r.sku_root)
+      const st = { mix_stem_id: r.mix_stem_id, filename: r.filename, b2_key: r.b2_key, role: _stemRoleStrict(r.filename) }
+      e.stems.push(st)
+      const sz = sizeOf.get(r.b2_key)
+      if (!(sz !== undefined && sz >= STUB_LIMIT)) e.broken.push(st)
+    }
+    const allSongs = [...bySku.values()]
+    const brokenSkus = allSongs.filter(x => x.broken.length)
+
+    // 2. Walk CORRECTIONS.
+    const confident = [], ambiguous = [], unmatched = [], alreadyFine = []
+    const only = req.query.folder ? String(req.query.folder) : null
+    const limitSongs = parseInt(req.query.limit || '0') || 0
+    for (const folder of fs.readdirSync(root, { withFileTypes: true })) {
+      if (!folder.isDirectory()) continue
+      if (only && folder.name !== only) continue
+      const fdir = path.join(root, folder.name)
+      const files = fs.readdirSync(fdir).filter(f => /\.(wav|mp3|aif|aiff)$/i.test(f))
+      if (!files.length) { unmatched.push({ folder: folder.name, reason: 'no audio files' }); continue }
+
+      const stripped = folder.name.replace(/^HAUS[_ ]/i, '')
+      const pm = stripped.match(/^([A-Za-z]\d{2})([a-z]?)[_ ]+(.*)$/)
+      const prefix = pm ? pm[1].toUpperCase() : null
+      const folderTitle = pm ? pm[3] : stripped
+
+      const pool = prefix
+        ? allSongs.filter(s => s.sku.slice(0, 3).toUpperCase() === prefix)
+        : allSongs
+      if (!pool.length) { unmatched.push({ folder: folder.name, prefix, reason: prefix ? `no songs at all for composer ${prefix}` : 'no composer prefix in folder name' }); continue }
+
+      const scored = pool.map(s => ({ s, score: _titleScore(folderTitle, s.title) })).filter(x => x.score > 0)
+        .sort((a, b) => b.score - a.score)
+      if (!scored.length) { unmatched.push({ folder: folder.name, prefix, folderTitle, candidatesConsidered: pool.length, reason: 'no title match among this composer broken songs' }); continue }
+      const best = scored[0]
+      const tied = scored.filter(x => x.score === best.score)
+      if (tied.length > 1) {
+        ambiguous.push({ folder: folder.name, prefix, folderTitle, reason: 'multiple songs match the title equally well',
+                         candidates: tied.map(x => ({ sku: x.s.sku, title: x.s.title })) }); continue
+      }
+
+      // 3. Map files to stem rows by role. Any unknown role, unmatched role, or
+      //    collision quarantines the whole song.
+      const song = best.s
+      if (!song.broken.length) {
+        alreadyFine.push({ folder: folder.name, sku: song.sku, dbTitle: song.title, files: files.length,
+                           note: 'song has no broken stems — nothing to upload' })
+        continue
+      }
+      // Map against ALL of the song's stems, not just the broken ones. A composer
+      // re-sends the WHOLE song, so files matching healthy stems are simply nothing
+      // to do -- treating them as problems quarantined otherwise-perfect songs.
+      // Key on role AND extension. Every song has both ..._FULL.wav and ..._FULL.mp3,
+      // so matching on role alone found two candidates for one file, refused, and
+      // quarantined the song -- 88 of them, for this one omission.
+      const wantByRole = new Map()
+      for (const st of song.stems) if (st.role) {
+        const k = st.role + '|' + _ext(st.filename)
+        if (!wantByRole.has(k)) wantByRole.set(k, []); wantByRole.get(k).push(st)
+      }
+      const brokenIds = new Set(song.broken.map(st => st.mix_stem_id))
+      const pairs = [], problems = [], usedIds = new Set()
+      let skippedHealthy = 0
+      for (const f of files) {
+        const role = _stemRoleStrict(f)
+        if (!role) { problems.push(`${f}: unrecognised stem role`); continue }
+        const opts = (wantByRole.get(role + '|' + _ext(f)) || []).filter(st => !usedIds.has(st.mix_stem_id))
+        if (!opts.length) { problems.push(`${f}: role ${role} (.${_ext(f)}) has no unfilled stem on ${song.sku}`); continue }
+        if (opts.length > 1) { problems.push(`${f}: role ${role} (.${_ext(f)}) matches ${opts.length} stems on ${song.sku}`); continue }
+        usedIds.add(opts[0].mix_stem_id)
+        if (!brokenIds.has(opts[0].mix_stem_id)) { skippedHealthy++; continue }   // already fine in B2
+        pairs.push({ file: f, srcPath: path.join(fdir, f), size: (() => { try { return fs.statSync(path.join(fdir, f)).size } catch { return null } })(),
+                     mix_stem_id: opts[0].mix_stem_id, targetFilename: opts[0].filename, b2_key: opts[0].b2_key, role })
+      }
+      const unfilledAll = song.broken.filter(st => !usedIds.has(st.mix_stem_id))
+      // Composers send wavs; the mp3 is transcoded. An unfilled .mp3 whose .wav
+      // sibling of the same role WAS matched is not missing audio -- it is a file to
+      // regenerate. It must not quarantine the song, but it IS reported, because the
+      // PLAYER PREFERS THE MP3 and the song will not play until it exists.
+      const matchedRoles = new Set(pairs.map(pr => pr.role))
+      const mp3Derivable = unfilledAll.filter(st => _ext(st.filename) === 'mp3' && matchedRoles.has(st.role))
+      const unfilled = unfilledAll.filter(st => !mp3Derivable.includes(st))
+      const entry = { folder: folder.name, sku: song.sku, dbTitle: song.title, folderTitle, titleScore: best.score,
+                      dbStems: song.stems.map(st => ({ f: st.filename, role: st.role, broken: brokenIds.has(st.mix_stem_id) })),
+                      diskFiles: files.map(f => ({ f, role: _stemRoleStrict(f) })),
+                      files: files.length, matched: pairs.length, skippedHealthy,
+                      unfilledStems: unfilled.length, mp3ToRegenerate: mp3Derivable.length,
+                      mp3Pairs: mp3Derivable.map(st => ({ mix_stem_id: st.mix_stem_id, b2_key: st.b2_key, role: st.role })),
+                      problems, pairs }
+      if (problems.length || unfilled.length) { entry.reason = problems.length ? 'file/role problems' : `${unfilled.length} broken stems have no file`; ambiguous.push(entry) }
+      else confident.push(entry)
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `corrections-match-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(), root,
+        counts: { brokenSkus: brokenSkus.length, folders: confident.length + ambiguous.length + unmatched.length + alreadyFine.length,
+                  confident: confident.length, ambiguous: ambiguous.length, unmatched: unmatched.length,
+                  alreadyFine: alreadyFine.length, filesMatched: confident.reduce((n, c) => n + c.matched, 0) },
+        confident, ambiguous, unmatched, alreadyFine }, null, 2))
+    } catch (e) { console.warn('[corrections] report:', e.message) }
+
+    const counts = { brokenSkus: brokenSkus.length, folders: confident.length + ambiguous.length + unmatched.length + alreadyFine.length,
+                     confident: confident.length, ambiguous: ambiguous.length, unmatched: unmatched.length,
+                     alreadyFine: alreadyFine.length, filesMatched: confident.reduce((n, c) => n + c.matched, 0) }
+    console.log(`[corrections] READ ONLY — ${counts.confident} confident, ${counts.ambiguous} ambiguous, ${counts.unmatched} unmatched`)
+    // ── APPLY (?apply=1) ─────────────────────────────────────────────────────
+    // CONFIDENT songs only. Uploads each matched file to the b2_key its row
+    // ALREADY has, so there is no database write, no new SKU, and a re-run simply
+    // finds the song healthy. Renames on disk only AFTER B2 confirms the byte
+    // count, so a failed upload never leaves a renamed source behind.
+    // ?limit=N limits the number of SONGS.
+    if (req.query.apply === '1') {
+      const songs = limitSongs ? confident.slice(0, limitSongs) : confident
+      const done = { songs: 0, uploaded: 0, renamed: 0, failed: 0 }
+      const failures = []
+      for (const song of songs) {
+        let songOk = true
+        for (const pr of song.pairs) {
+          try {
+            const buf = fs.readFileSync(pr.srcPath)
+            if (buf.length < STUB_LIMIT) { failures.push({ ...pr, error: `source is ${buf.length} bytes` }); done.failed++; songOk = false; continue }
+            if (pr.size != null && buf.length !== pr.size) { failures.push({ ...pr, error: `source changed since scan (${buf.length} vs ${pr.size})` }); done.failed++; songOk = false; continue }
+
+            const up = await _b2Retry({ method: 'POST', hostname: apiHost,
+              urlPath: '/b2api/v3/b2_get_upload_url',
+              headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+              body: { bucketId } }, 'get upload url')
+            if (up.status !== 200) { failures.push({ ...pr, error: `upload url HTTP ${up.status}` }); done.failed++; songOk = false; continue }
+
+            const host   = up.body.uploadUrl.replace(/^https?:\/\//, '').split('/')[0]
+            const upPath = up.body.uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+            const sha1   = crypto.createHash('sha1').update(buf).digest('hex')
+            const encodedName = String(pr.b2_key).split('/').map(encodeURIComponent).join('/')
+
+            const put = await _b2Retry({ method: 'POST', hostname: host, urlPath: upPath,
+              headers: { 'Authorization': up.body.authorizationToken, 'X-Bz-File-Name': encodedName,
+                         'Content-Type': 'b2/x-auto', 'X-Bz-Content-Sha1': sha1, 'Content-Length': buf.length },
+              body: buf, isBuffer: true }, `upload ${pr.file}`)
+            const pb = Buffer.isBuffer(put.body) ? JSON.parse(put.body.toString()) : put.body
+            if (put.status !== 200) { failures.push({ ...pr, error: pb?.message || `upload HTTP ${put.status}` }); done.failed++; songOk = false; continue }
+            if (pb.contentLength !== buf.length) { failures.push({ ...pr, error: `B2 stored ${pb.contentLength}, expected ${buf.length}` }); done.failed++; songOk = false; continue }
+            done.uploaded++
+
+            // Only now is it safe to rename the source to the canonical name.
+            try {
+              const dest = path.join(path.dirname(pr.srcPath), pr.targetFilename)
+              if (dest !== pr.srcPath && !fs.existsSync(dest)) { fs.renameSync(pr.srcPath, dest); done.renamed++ }
+            } catch (e) { console.warn(`[corrections] rename failed for ${pr.file}: ${e.message}`) }
+          } catch (e) { failures.push({ ...pr, error: e.message }); done.failed++; songOk = false }
+        }
+        if (songOk) done.songs++
+      }
+      console.log(`[corrections] APPLIED — ${done.songs} songs, ${done.uploaded} uploaded, ${done.renamed} renamed, ${done.failed} failed`)
+      return res.json({ ok: true, applied: true, matcherVersion: 3, counts, done,
+        remainingConfident: confident.length - songs.length, reportPath,
+        failures: failures.slice(0, 20) })
+    }
+
+    if (only) return res.json({ ok: true, matcherVersion: 3, only, counts, confident, ambiguous, unmatched, alreadyFine })
+    res.json({ ok: true, readOnly: true, matcherVersion: 3, counts, reportPath,
+      confidentSample: confident.slice(0, 5).map(c => ({ folder: c.folder, sku: c.sku, dbTitle: c.dbTitle, matched: c.matched })),
+      ambiguousSample: ambiguous.slice(0, 8).map(a => ({ folder: a.folder, sku: a.sku, reason: a.reason, problems: (a.problems || []).slice(0, 3) })),
+      unmatchedSample: unmatched.slice(0, 8) })
+  } catch (e) {
+    console.error('[corrections] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
 })
 
 // ─── Hide stray bucket-root objects ─────────────────────────────────────────
