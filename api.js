@@ -202,10 +202,10 @@ function _configuredRoots() {
   const roots = []
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
-    for (const k of FS_ROOT_KEYS) if (cfg[k]) roots.push(path.resolve(cfg[k]))
+    for (const k of FS_ROOT_KEYS) if (cfg[k]) roots.push(_resolveReal(cfg[k]))
   } catch {}
   for (const extra of (process.env.HAUS_FS_EXTRA_ROOTS || '').split(':')) {
-    if (extra.trim()) roots.push(path.resolve(extra.trim()))
+    if (extra.trim()) roots.push(_resolveReal(extra.trim()))
   }
   return roots
 }
@@ -235,25 +235,38 @@ function _guard(p, roots, kind) {
   return real
 }
 
-// os.tmpdir() is NOT /tmp on macOS — it resolves to the per-user $TMPDIR under
+// Every root goes through _resolveReal, the same resolution the caller's path gets.
+// A root left unresolved silently refuses everything under it whenever the path to
+// it crosses a symlink — which on macOS is the normal case, not an edge case:
+// os.tmpdir() reports /var/folders/... and /var is a symlink to /private/var, so a
+// candidate resolves to /private/var/folders/... and matches no root at all. The
+// same trap catches any working folder reached through a symlink.
+//
+// os.tmpdir() is also NOT /tmp on macOS — it is the per-user $TMPDIR under
 // /var/folders. index.html's Excel IP export writes /tmp/gen_ip.py and
 // /tmp/ip_data.json and then runs python3 over them, so /tmp has to be a root in
 // its own right or that export silently fails: writeFile returns false, nothing
 // checks it, and the shell.exec that follows runs a script that was never written.
 function _tempRoots() {
-  const roots = [path.resolve(os.tmpdir())]
-  try { const t = fs.realpathSync('/tmp'); if (!roots.includes(t)) roots.push(t) } catch {}
+  const roots = []
+  for (const d of [os.tmpdir(), '/tmp']) {
+    const r = _resolveReal(d)
+    if (!roots.includes(r)) roots.push(r)
+  }
   return roots
 }
 // ~/Downloads is a write root because the lot export defaults there
 // (index.html: _exportFolder = home + '/Downloads').
 function _writeRoots() {
-  return [..._configuredRoots(), ..._tempRoots(), path.join(path.resolve(os.homedir()), 'Downloads')]
+  return _dedupe([..._configuredRoots(), ..._tempRoots(), _resolveReal(path.join(os.homedir(), 'Downloads'))])
 }
 // Reads add only the app directory, for the migration .sql files index.html
 // reads at boot (index.html: sqlPath, derived from shell.appPath()).
 function _readRoots() {
-  return [..._writeRoots(), path.resolve(__dirname)]
+  return _dedupe([..._writeRoots(), _resolveReal(__dirname)])
+}
+function _dedupe(list) {
+  return list.filter((v, i) => v && list.indexOf(v) === i)
 }
 function _safeRead(p) {
   return _guard(p, _readRoots(), 'read')

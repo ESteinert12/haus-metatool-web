@@ -25,9 +25,16 @@ if (a < 0 || b < 0 || b <= a) {
 
 const FX = path.join(os.homedir(), 'haus-fs-guard-test')
 const WORK = path.join(FX, 'work'), APPDIR = path.join(FX, 'appdir')
+// LINKED is a root configured by a path that crosses a symlink. This is the
+// platform-independent stand-in for macOS, where os.tmpdir() reports
+// /var/folders/... and /var is a symlink to /private/var — a root left
+// unresolved there matches nothing that resolves under it.
+const LINKED_REAL = path.join(FX, 'linked-real'), LINKED = path.join(FX, 'linked')
 fs.rmSync(FX, { recursive: true, force: true })
-for (const d of [path.join(WORK, 'sub'), path.join(WORK, '.hidden'), path.join(FX, 'outside'), APPDIR]) fs.mkdirSync(d, { recursive: true })
-process.env.HAUS_FS_EXTRA_ROOTS = WORK
+for (const d of [path.join(WORK, 'sub'), path.join(WORK, '.hidden'), path.join(FX, 'outside'), APPDIR, LINKED_REAL]) fs.mkdirSync(d, { recursive: true })
+try { fs.symlinkSync(LINKED_REAL, LINKED) } catch {}
+fs.writeFileSync(path.join(LINKED_REAL, 'e.wav'), 'x')
+process.env.HAUS_FS_EXTRA_ROOTS = [WORK, LINKED].join(':')
 
 // __dirname inside the guard is the app directory — point it at the fixture so
 // the app-dir read case is verifiable without reading out of the real repo.
@@ -67,6 +74,8 @@ t('~/Downloads (the pasted CSV)',     g._safeRead(DL_FIXTURE), true)
 t('app dir migration .sql',           g._safeRead(path.join(APPDIR, 'migration_099.sql')), true)
 t('os.tmpdir()',                      g._safeRead(path.join(os.tmpdir(), 't.txt')), true)
 t('literal /tmp (macOS != tmpdir)',   g._safeRead('/tmp/t.txt'), true)
+t('root configured via a symlink',    g._safeRead(path.join(LINKED, 'e.wav')), true)
+t('  ...same file, real path',        g._safeRead(path.join(LINKED_REAL, 'e.wav')), true)
 
 console.log('\nREAD — denied outside the roots')
 t('home file outside Downloads',      g._safeRead(SECRET), false)
@@ -90,6 +99,7 @@ t('/tmp/ip_data.json (Excel export)', g._safeWrite('/tmp/ip_data.json'), true)
 t('app dir is NOT writable',          g._safeWrite(path.join(APPDIR, 'x.js')), false)
 t('home outside Downloads',           g._safeWrite(path.join(home, 'x.csv')), false)
 t('dotfile inside a root',            g._safeWrite(path.join(WORK, '.env')), false)
+t('root configured via a symlink',    g._safeWrite(path.join(LINKED, 'out.wav')), true)
 
 fs.rmSync(FX, { recursive: true, force: true })
 fs.rmSync(SECRET, { force: true })
