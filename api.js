@@ -118,7 +118,6 @@ const ADMIN_ROUTES = [
   'POST /shell/exec',
   'POST /applescript',
   'POST /fs/write-file',
-  'POST /fs/mkdir',
   'POST /cfg/server-paths',
   'POST /pg/connect',
   'POST /db/migrate-client-ids',
@@ -183,10 +182,16 @@ function _verifyPassword(pw, stored) {
 
 // ─── Filesystem access control ─────────────────────────────────────────────
 // Every /api/fs/* handler resolves its caller-supplied path through one of these.
-// Reads are allowed anywhere under the user's home (plus the app dir, for the
-// migration .sql files index.html reads at boot, and tmp). Writes are confined to
-// the four configured working folders and tmp — an app that files deliverables into
-// Dropbox has no reason to write anywhere else.
+// Writes are confined to the four configured working folders, tmp, and ~/Downloads
+// (where the lot export defaults) — an app that files deliverables into Dropbox has
+// no reason to write anywhere else. Reads are the same set plus the app dir, for the
+// migration .sql files index.html reads at boot.
+//
+// Reads used to be allowed anywhere under the user's home. Nothing in the app needs
+// that: the only two read call sites are the boot migrations (app dir) and the
+// FileMaker backfill's pasted CSV path, which belongs in a working folder or
+// Downloads like every other file this app touches. A denied read logs one
+// "[fs-guard] read denied (outside roots)" line with the offending path.
 //
 // One rule covers the sensitive cases: no path segment may begin with a dot. That
 // excludes .ssh, .aws, .env, .config and .haus-workspace-cfg.json in a single check,
@@ -230,13 +235,28 @@ function _guard(p, roots, kind) {
   return real
 }
 
-function _safeRead(p) {
-  return _guard(p, [..._configuredRoots(), path.resolve(os.homedir()), path.resolve(os.tmpdir()), path.resolve(__dirname)], 'read')
+// os.tmpdir() is NOT /tmp on macOS — it resolves to the per-user $TMPDIR under
+// /var/folders. index.html's Excel IP export writes /tmp/gen_ip.py and
+// /tmp/ip_data.json and then runs python3 over them, so /tmp has to be a root in
+// its own right or that export silently fails: writeFile returns false, nothing
+// checks it, and the shell.exec that follows runs a script that was never written.
+function _tempRoots() {
+  const roots = [path.resolve(os.tmpdir())]
+  try { const t = fs.realpathSync('/tmp'); if (!roots.includes(t)) roots.push(t) } catch {}
+  return roots
 }
 // ~/Downloads is a write root because the lot export defaults there
 // (index.html: _exportFolder = home + '/Downloads').
 function _writeRoots() {
-  return [..._configuredRoots(), path.resolve(os.tmpdir()), path.join(path.resolve(os.homedir()), 'Downloads')]
+  return [..._configuredRoots(), ..._tempRoots(), path.join(path.resolve(os.homedir()), 'Downloads')]
+}
+// Reads add only the app directory, for the migration .sql files index.html
+// reads at boot (index.html: sqlPath, derived from shell.appPath()).
+function _readRoots() {
+  return [..._writeRoots(), path.resolve(__dirname)]
+}
+function _safeRead(p) {
+  return _guard(p, _readRoots(), 'read')
 }
 function _safeWrite(p) {
   return _guard(p, _writeRoots(), 'write')
@@ -249,7 +269,7 @@ const _DENIED = { ok: false, error: 'Path not allowed' }
 function _logFsRoots() {
   const cfg = _configuredRoots()
   console.log('[fs-guard] write roots:', _writeRoots().join('  |  '))
-  console.log('[fs-guard] read  roots:', [...cfg, path.resolve(os.homedir()), path.resolve(os.tmpdir()), path.resolve(__dirname)].join('  |  '))
+  console.log('[fs-guard] read  roots:', _readRoots().join('  |  '))
   if (!cfg.length) {
     console.warn('[fs-guard] ⚠ no working folders configured — /api/fs/* writes will be refused')
     console.warn('[fs-guard]   set them in Settings (admin), or via HAUS_FS_EXTRA_ROOTS')
@@ -718,29 +738,6 @@ app.post('/api/fs/audio-status', async (req, res) => {
   } catch (e) { res.json({ mp3: 'error', wav: 'error' }) }
 })
 
-app.post('/api/fs/count-files', (req, res) => {
-  // This built a shell string with the caller's dirPath and ext interpolated into it
-  // and ran it through execSync. A double quote in either one broke out of the quoting
-  // and ran arbitrary commands — and the route was reachable without logging in.
-  // Counting files needs no shell at all.
-  const dirPath = _safeRead(req.body.dirPath)
-  if (!dirPath) return res.json(0)
-  const ext = typeof req.body.ext === 'string' ? req.body.ext.replace(/^\./, '').toLowerCase() : null
-  try {
-    let count = 0
-    const walk = (dir) => {
-      for (const item of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (item.name.startsWith('.')) continue
-        const full = path.join(dir, item.name)
-        if (item.isDirectory()) walk(full)
-        else if (!ext || path.extname(item.name).slice(1).toLowerCase() === ext) count++
-      }
-    }
-    walk(dirPath)
-    res.json(count)
-  } catch { res.json(0) }
-})
-
 app.post('/api/fs/path-exists', (req, res) => {
   const filePath = _safeRead(req.body.filePath)
   res.json(filePath ? fs.existsSync(filePath) : false)
@@ -761,15 +758,6 @@ app.post('/api/fs/write-file', (req, res) => {
     fs.writeFileSync(filePath, req.body.content ?? '', 'utf8')
     res.json(true)
   } catch { res.json(false) }
-})
-
-app.post('/api/fs/mkdir', (req, res) => {
-  const dirPath = _safeWrite(req.body.dirPath)
-  if (!dirPath) return res.json(_DENIED)
-  try {
-    fs.mkdirSync(dirPath, { recursive: true })
-    res.json({ ok: true, path: dirPath })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
 app.post('/api/fs/folder-stats', (req, res) => {
