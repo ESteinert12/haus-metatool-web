@@ -936,6 +936,28 @@ app.post('/api/fm/databases', async (req, res) => {
 // Downloads the entire B2 file into memory first, then serves it with full
 // Range request support. Buffering avoids Cloudflare tunnel truncation of
 // long-running streaming responses.
+// Fetch the .wav sibling of an mp3 key from B2. The player picks `mp3 || wav`, so a
+// missing OR stubbed mp3 kills a song whose wav is perfect. Same key, different
+// extension: derived, not guessed. Returns a Buffer, or null.
+async function _b2WavSibling(key, downloadHost) {
+  if (!/\.mp3$/i.test(key)) return null
+  const wavKey = key.replace(/\.mp3$/i, '.wav')
+  const wavPath = `/file/haus-music/${wavKey.split('/').map(x => encodeURIComponent(x)).join('/')}`
+  try {
+    const buf = await new Promise((resolve, reject) => {
+      const r2 = https.request({ hostname: downloadHost, path: wavPath, method: 'GET',
+        headers: { 'Authorization': b2Auth.authorizationToken } }, r => {
+        if (r.statusCode !== 200 && r.statusCode !== 206) { r.resume(); return reject(new Error(`wav sibling HTTP ${r.statusCode}`)) }
+        const cs = []; r.on('data', d => cs.push(d)); r.on('end', () => resolve(Buffer.concat(cs))); r.on('error', reject)
+      })
+      r2.on('error', reject); r2.end()
+    })
+    if (buf.length < 1000) { console.log(`[b2/stream] wav sibling is only ${buf.length} bytes`); return null }
+    console.log(`[b2/stream] serving wav sibling ${wavKey} (${buf.length} bytes)`)
+    return buf
+  } catch (e) { console.log(`[b2/stream] wav sibling unavailable: ${e.message}`); return null }
+}
+
 app.get('/api/b2/stream', async (req, res) => {
   if (!b2Auth) return res.status(503).json({ error: 'B2 not authorized' })
   const key = req.query.key
@@ -989,28 +1011,12 @@ app.get('/api/b2/stream', async (req, res) => {
       // beside it in B2 is perfectly good -- which is exactly the state the
       // CORRECTIONS restore leaves a song in, since composers send wavs only.
       // Same key, different extension: derived, not guessed.
-      if (/\.mp3$/i.test(key)) {
-        const wavKey = key.replace(/\.mp3$/i, '.wav')
-        console.log(`[b2/stream] stub — trying wav sibling: ${wavKey}`)
-        try {
-          const wavPath = `/file/haus-music/${wavKey.split('/').map(x => encodeURIComponent(x)).join('/')}`
-          const wavBuf = await new Promise((resolve, reject) => {
-            const r2 = https.request({ hostname: downloadHost, path: wavPath, method: 'GET',
-              headers: { 'Authorization': b2Auth.authorizationToken } }, r => {
-              if (r.statusCode !== 200 && r.statusCode !== 206) { r.resume(); return reject(new Error(`wav sibling HTTP ${r.statusCode}`)) }
-              const cs = []; r.on('data', d => cs.push(d)); r.on('end', () => resolve(Buffer.concat(cs))); r.on('error', reject)
-            })
-            r2.on('error', reject); r2.end()
-          })
-          if (wavBuf.length >= 1000) {
-            console.log(`[b2/stream] serving wav sibling instead (${wavBuf.length} bytes)`)
-            res.setHeader('Content-Type', 'audio/wav')
-            res.setHeader('Content-Length', wavBuf.length)
-            res.setHeader('Accept-Ranges', 'bytes')
-            return res.end(wavBuf)
-          }
-          console.log(`[b2/stream] wav sibling is also small (${wavBuf.length}) — falling through`)
-        } catch (e) { console.log(`[b2/stream] wav sibling unavailable: ${e.message}`) }
+      const sib = await _b2WavSibling(key, downloadHost)
+      if (sib) {
+        res.setHeader('Content-Type', 'audio/wav')
+        res.setHeader('Content-Length', sib.length)
+        res.setHeader('Accept-Ranges', 'bytes')
+        return res.end(sib)
       }
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
@@ -1111,6 +1117,20 @@ app.get('/api/b2/stream', async (req, res) => {
       res.end(buf)
     }
   } catch (e) {
+    // The mp3 may be ABSENT rather than stubbed -- B2 returns 404 and we reject
+    // before ever reaching the stub branch, so the wav fallback never fired and the
+    // song 404'd in the player. Same fallback, applied to the missing case too.
+    if (!res.headersSent) {
+      try {
+        const sib = await _b2WavSibling(key, downloadHost)
+        if (sib) {
+          res.setHeader('Content-Type', 'audio/wav')
+          res.setHeader('Content-Length', sib.length)
+          res.setHeader('Accept-Ranges', 'bytes')
+          return res.end(sib)
+        }
+      } catch (e2) { console.log('[b2/stream] fallback after error failed:', e2.message) }
+    }
     console.error('[b2/stream] error:', e.message, e.detail || '')
     if (!res.headersSent) res.status(e.status || 502).json({ error: e.message, detail: e.detail })
   }
@@ -3472,8 +3492,15 @@ app.get('/api/corrections/match', async (req, res) => {
       const scored = pool.map(s => ({ s, score: _titleScore(folderTitle, s.title) })).filter(x => x.score > 0)
         .sort((a, b) => b.score - a.score)
       if (!scored.length) { unmatched.push({ folder: folder.name, prefix, folderTitle, candidatesConsidered: pool.length, reason: 'no title match among this composer broken songs' }); continue }
+      // Break ties by SPECIFICITY: the longest matching title wins, because it
+      // explains more of the folder name. Folder names carry tags (-CLT,
+      // _Asharpm_CTYEDM) so an exact match is rare and nearly everything scored as
+      // "one contains the other" -- where `Secrets` tied with `Buffet Of Secrets`.
+      // All 22 ties were obvious to a human; the scorer just never asked which match
+      // was more specific.
+      scored.sort((a, b) => (b.score - a.score) || (_norm(b.s.title).length - _norm(a.s.title).length))
       const best = scored[0]
-      const tied = scored.filter(x => x.score === best.score)
+      const tied = scored.filter(x => x.score === best.score && _norm(x.s.title).length === _norm(best.s.title).length)
       if (tied.length > 1) {
         ambiguous.push({ folder: folder.name, prefix, folderTitle, reason: 'multiple songs match the title equally well',
                          candidates: tied.map(x => ({ sku: x.s.sku, title: x.s.title })) }); continue

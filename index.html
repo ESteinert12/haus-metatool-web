@@ -3260,26 +3260,45 @@ async function peekTitle(skuRoot) {
 }
 
 function detectStemName(filename) {
-  // Extract the version token from the last underscore segment (before the extension).
-  // HAUS filenames: HAUS_Title_Key_ComposerID_VERSION.ext — version is always the last segment.
-  // Checking the full filename with includes() causes false-positives for title words
-  // that contain these substrings (e.g. "StingRay" → STING, "Altitude" → ALT).
-  const base    = filename.replace(/\.[^.]+$/, '')
-  const lastUs  = base.lastIndexOf('_')
-  const version = (lastUs >= 0 ? base.slice(lastUs + 1) : base).toUpperCase()
-
-  if (/^NODNB$/i.test(version))           return 'NoDNB'
-  if (/^DNB$/.test(version))              return 'DNB'
-  if (/^ALT/.test(version))               return 'ALT'
-  if (/^BUMPER/.test(version))            return 'BUMPER'
-  if (/^STINGA$/i.test(version))          return 'STINGa'
-  if (/^STING/.test(version))             return 'STING'
-  if (/^NODRUMS?$/i.test(version))        return 'NoDrums'
-  if (/^NOVOX$/i.test(version))           return 'NoVox'
-  if (/^NOLEAD$/i.test(version))          return 'NoLead'
-  if (/^PIANO$/i.test(version))           return 'PIANO'
-  if (/^GUITARS?$/i.test(version))        return 'GUITARS'
-  return 'FULL'
+  // Returns the stem role, or the raw token when it is not recognised -- NEVER
+  // 'FULL'. The old version returned 'FULL' for anything it did not know, so a
+  // `..._LongSting.wav` or `..._30.wav` was recorded as the full mix. That matters:
+  // several queries pick a song's full mix with upper(stem_name)='FULL', so a
+  // mislabelled bumper can be served AS the full track. Measured damage across the
+  // catalogue's life: ~275 rows (2026-09-08).
+  //
+  // Three changes from the original:
+  //  1. Scan EVERY underscore segment, not only the last. Composers put the role in
+  //     the middle: HAUS_S86b_Everything's Bigger In Texas_A_ALT_TEX HEARTLAND.wav
+  //  2. PRESERVE the variant letter. ALTa/ALTb and BUMPERa are distinct stems; the
+  //     old /^ALT/ collapsed them all to ALT and lost the distinction.
+  //  3. Unknown -> return the token as written. Recording what was actually there
+  //     lets a human see it; inventing 'FULL' hides it.
+  // Segments must match a role EXACTLY, which keeps the earlier fix that stopped
+  // "StingRay" being read as STING.
+  const ROLES = [
+    ['NODNB', 'NoDNB'], ['DNB', 'DNB'], ['NODRUMS', 'NoDrums'], ['DRUMS', 'DRUMS'],
+    ['NOVOX', 'NoVox'], ['NOLEAD', 'NoLead'], ['NOLEADS', 'NoLead'],
+    ['NOSYNTHS', 'NoSynths'], ['NOSTRINGS', 'NoStrings'], ['NOPIANO', 'NoPiano'],
+    ['NOBASS', 'NoBass'], ['PIANO', 'PIANO'], ['GUITARS', 'GUITARS'],
+    ['LOWGTR', 'LowGtr'], ['PERC', 'PERC'], ['SIB', 'SIB'], ['30', '30'],
+  ]
+  const VARIANT = [['STING', 'STING'], ['BUMPER', 'BUMPER'], ['ALT', 'ALT'], ['FULL', 'FULL']]
+  const base = String(filename).replace(/\.[^.]+$/, '')
+  const segs = base.split('_').map(x => x.trim()).filter(Boolean)
+  let unknownTail = null
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const v = segs[i].toUpperCase()
+    const flat = ROLES.find(r => r[0] === v)
+    if (flat) return flat[1]
+    // FULL / STING / BUMPER / ALT may carry a trailing variant letter: STINGa, ALTb
+    for (const [key, canon] of VARIANT) {
+      if (v === key) return canon
+      if (v.startsWith(key) && /^[A-Z]$/.test(v.slice(key.length))) return canon + v.slice(key.length).toLowerCase()
+    }
+    if (unknownTail === null && i === segs.length - 1) unknownTail = segs[i]
+  }
+  return unknownTail || 'FULL'
 }
 // ─── Dropbox auto-detection ────────────────────────────────
 // Relative paths inside Dropbox that both Erik and Kyle share
