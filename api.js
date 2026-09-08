@@ -387,6 +387,16 @@ app.post('/api/pg/connect', async (req, res) => {
       connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 0,
     })
+    // MUST attach an error handler BEFORE the pool is used. node-postgres emits
+    // 'error' on the pool when an IDLE client dies (Neon drops them routinely). An
+    // unhandled 'error' event becomes an uncaughtException and kills the process --
+    // the boot pool above has a handler, this reconnect pool did not, so any
+    // reconnect left the server one idle disconnect from dying mid-request. That is
+    // what took it down during the CORRECTIONS run on 2026-09-04.
+    newPool.on('error', err => console.error('[pool] idle client error (handled):', err.message))
+    newPool.on('connect', () => console.log('[pool] client connected'))
+    newPool.on('remove', () => console.log('[pool] client removed'))
+
     // Test the new pool before switching
     const client = await newPool.connect()
     client.release()
@@ -3480,40 +3490,94 @@ app.get('/api/corrections/match', async (req, res) => {
       // Map against ALL of the song's stems, not just the broken ones. A composer
       // re-sends the WHOLE song, so files matching healthy stems are simply nothing
       // to do -- treating them as problems quarantined otherwise-perfect songs.
-      // Key on role AND extension. Every song has both ..._FULL.wav and ..._FULL.mp3,
-      // so matching on role alone found two candidates for one file, refused, and
-      // quarantined the song -- 88 of them, for this one omission.
+      // Match against THE SONG'S OWN ROLES, not a hardcoded list. The catalogue's
+      // real vocabulary is far wider than any list I would maintain -- `30` (the
+      // 30-second cut, 5,699 stems), STINGb, BUMPERb/c, ALTb/c, DRUMS, PERC,
+      // NoSynths, NoStrings, GUITARS, plus case variants (DnB, Full, NODRUMS).
+      // Comparing a composer's token against the roles THIS SKU actually has is
+      // derived rather than invented, and handles all of them at once, including
+      // 'ALT a' -> ALTa (space) and every casing.
+      const _rk = t => String(t).toUpperCase().replace(/[^A-Z0-9]/g, '')
+      // Rulings from Erik, 2026-09-08. Deliberately narrow: aliases for tokens the
+      // catalogue does NOT contain, not a general fuzzy matcher.
+      const ROLE_ALIASES = {
+        LONGSTING: 'STING', SHORTSTING: 'STINGA',      // Zwerin (R13)
+        INSTRUMENTAL: 'NOVOX',
+        STINGER: 'STING', STING1: 'STING', STING2: 'STINGA',
+        N0VOX: 'NOVOX',                                 // zero for O, plus a trailing space
+        NODRUMSL: 'NODRUMS',                            // stray L
+        BUMPERA2: 'BUMPERB',
+      }
       const wantByRole = new Map()
-      for (const st of song.stems) if (st.role) {
-        const k = st.role + '|' + _ext(st.filename)
-        if (!wantByRole.has(k)) wantByRole.set(k, []); wantByRole.get(k).push(st)
+      for (const st of song.stems) {
+        const base = String(st.filename).replace(/\.[^.]+$/, '')
+        const roleTok = base.slice(base.lastIndexOf('_') + 1)
+        const k = _rk(roleTok) + '|' + _ext(st.filename)
+        if (!wantByRole.has(k)) wantByRole.set(k, [])
+        wantByRole.get(k).push({ ...st, role: roleTok })
       }
       const brokenIds = new Set(song.broken.map(st => st.mix_stem_id))
       const pairs = [], problems = [], usedIds = new Set()
-      let skippedHealthy = 0
+      let skippedHealthy = 0, surplus = 0
+      const surplusFiles = [], noRoleFiles = []
       for (const f of files) {
-        const role = _stemRoleStrict(f)
-        if (!role) { problems.push(`${f}: unrecognised stem role`); continue }
-        const opts = (wantByRole.get(role + '|' + _ext(f)) || []).filter(st => !usedIds.has(st.mix_stem_id))
-        if (!opts.length) { problems.push(`${f}: role ${role} (.${_ext(f)}) has no unfilled stem on ${song.sku}`); continue }
-        if (opts.length > 1) { problems.push(`${f}: role ${role} (.${_ext(f)}) matches ${opts.length} stems on ${song.sku}`); continue }
-        usedIds.add(opts[0].mix_stem_id)
-        if (!brokenIds.has(opts[0].mix_stem_id)) { skippedHealthy++; continue }   // already fine in B2
+        const base = String(f).replace(/\.[^.]+$/, '')
+        const segs = base.split('_').map(x => x.trim()).filter(Boolean)
+        // Try every segment; a segment matches only if THIS SONG expects that role.
+        let hit = null
+        for (const seg of segs) {
+          const k0 = _rk(seg)
+          const k = (ROLE_ALIASES[k0] || k0) + '|' + _ext(f)
+          const opts = (wantByRole.get(k) || []).filter(st => !usedIds.has(st.mix_stem_id))
+          if (opts.length === 1) { hit = opts[0]; break }
+          if (opts.length > 1) { problems.push(`${f}: role ${seg} (.${_ext(f)}) matches ${opts.length} stems on ${song.sku}`); hit = 'ambig'; break }
+        }
+        if (hit === 'ambig') continue
+        if (!hit) { noRoleFiles.push(f); continue }
+        usedIds.add(hit.mix_stem_id)
+        if (!brokenIds.has(hit.mix_stem_id)) { skippedHealthy++; continue }
         pairs.push({ file: f, srcPath: path.join(fdir, f), size: (() => { try { return fs.statSync(path.join(fdir, f)).size } catch { return null } })(),
-                     mix_stem_id: opts[0].mix_stem_id, targetFilename: opts[0].filename, b2_key: opts[0].b2_key, role })
+                     mix_stem_id: hit.mix_stem_id, targetFilename: hit.filename, b2_key: hit.b2_key, role: hit.role })
+      }
+      // A file with no matching role is SURPLUS, not a problem. Erik: instrument
+      // stems (Bass, Strings, MANDO, BANJO, NoSaxEfx...) are a composer printing
+      // like a record release rather than TV background; HAUS does not keep them.
+      // The one exception: a single unlabelled file in a folder whose FULL is still
+      // unclaimed is the full mix -- Zwerin sends HAUS_R13_Bosses_F#min_SOHOTENSION.wav
+      // with the tag last and no role at all.
+      for (const f of noRoleFiles) {
+        const fullKey = 'FULL|' + _ext(f)
+        const fullOpts = (wantByRole.get(fullKey) || []).filter(st => !usedIds.has(st.mix_stem_id))
+        if (noRoleFiles.length === 1 && fullOpts.length === 1) {
+          const st = fullOpts[0]
+          usedIds.add(st.mix_stem_id)
+          if (!brokenIds.has(st.mix_stem_id)) { skippedHealthy++; continue }
+          pairs.push({ file: f, srcPath: path.join(fdir, f), size: (() => { try { return fs.statSync(path.join(fdir, f)).size } catch { return null } })(),
+                       mix_stem_id: st.mix_stem_id, targetFilename: st.filename, b2_key: st.b2_key, role: st.role, inferred: 'unlabelled file taken as FULL' })
+        } else { surplus++; surplusFiles.push(f) }
       }
       const unfilledAll = song.broken.filter(st => !usedIds.has(st.mix_stem_id))
       // Composers send wavs; the mp3 is transcoded. An unfilled .mp3 whose .wav
       // sibling of the same role WAS matched is not missing audio -- it is a file to
       // regenerate. It must not quarantine the song, but it IS reported, because the
       // PLAYER PREFERS THE MP3 and the song will not play until it exists.
-      const matchedRoles = new Set(pairs.map(pr => pr.role))
-      const mp3Derivable = unfilledAll.filter(st => _ext(st.filename) === 'mp3' && matchedRoles.has(st.role))
+      // An mp3 is transcodable whenever GOOD WAV AUDIO EXISTS for that role -- either
+      // we just uploaded it, or it was already healthy in B2. The earlier version only
+      // counted wavs matched in THIS run, so a song whose wav was already fine had its
+      // stubbed mp3 counted as missing audio and was quarantined though complete.
+      // That was 52 of the 74 ambiguous folders.
+      const roleKey = fn => { const b = String(fn).replace(/\.[^.]+$/, ''); return _rk(b.slice(b.lastIndexOf('_') + 1)) }
+      const goodWavRoles = new Set([
+        ...pairs.filter(pr => _ext(pr.targetFilename) !== 'mp3').map(pr => roleKey(pr.targetFilename)),
+        ...song.stems.filter(st => _ext(st.filename) !== 'mp3' && !brokenIds.has(st.mix_stem_id)).map(st => roleKey(st.filename))
+      ])
+      const mp3Derivable = unfilledAll.filter(st => _ext(st.filename) === 'mp3' && goodWavRoles.has(roleKey(st.filename)))
       const unfilled = unfilledAll.filter(st => !mp3Derivable.includes(st))
       const entry = { folder: folder.name, sku: song.sku, dbTitle: song.title, folderTitle, titleScore: best.score,
-                      dbStems: song.stems.map(st => ({ f: st.filename, role: st.role, broken: brokenIds.has(st.mix_stem_id) })),
-                      diskFiles: files.map(f => ({ f, role: _stemRoleStrict(f) })),
+                      dbStems: song.stems.map(st => ({ f: st.filename, broken: brokenIds.has(st.mix_stem_id) })),
+                      diskFiles: files,
                       files: files.length, matched: pairs.length, skippedHealthy,
+                      surplus, surplusFiles,
                       unfilledStems: unfilled.length, mp3ToRegenerate: mp3Derivable.length,
                       mp3Pairs: mp3Derivable.map(st => ({ mix_stem_id: st.mix_stem_id, b2_key: st.b2_key, role: st.role })),
                       problems, pairs }
@@ -3595,6 +3659,128 @@ app.get('/api/corrections/match', async (req, res) => {
       unmatchedSample: unmatched.slice(0, 8) })
   } catch (e) {
     console.error('[corrections] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ─── Regenerate stubbed mp3s from the wav already in B2 ─────────────────────
+// The mp3s exist because FileMaker container fields needed something small for
+// taggers to audition. FileMaker is gone, but the ATMOSPHERE player still PREFERS
+// the mp3 (chosen = mp3 || wav), so a stubbed mp3 silently kills a song whose wav
+// is perfect. /api/b2/stream now falls back to the wav, but that streams ~40MB
+// where ~5MB would do -- which Kyle feels over the tunnel.
+//
+// Transcodes wav -> mp3 and uploads to the mp3 row's EXISTING b2_key. No database
+// write, no new rows, re-runnable: a regenerated mp3 is simply no longer broken.
+// Dry run unless ?apply=1. ?limit=N. ?bitrate=320k default.
+app.get('/api/b2/regen-mp3', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const apply   = req.query.apply === '1'
+  const limit   = parseInt(req.query.limit || '0') || 0
+  const bitrate = /^\d{2,3}k$/.test(String(req.query.bitrate || '')) ? req.query.bitrate : '320k'
+  const STUB_LIMIT = 1024
+  const FFMPEG = ['/usr/local/bin/ffmpeg', '/opt/homebrew/bin/ffmpeg', '/usr/bin/ffmpeg'].find(p => { try { return fs.existsSync(p) } catch { return false } })
+  if (!FFMPEG) return res.json({ ok: false, error: 'ffmpeg not found (looked in /usr/local/bin, /opt/homebrew/bin, /usr/bin)' })
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const downloadHost = b2Auth.downloadUrl.replace(/^https?:\/\//, '')
+    const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+    const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const sizeOf = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `regen page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) sizeOf.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName; pages++
+    } while (startFileName && pages < 200)
+
+    const rows = (await _pgRetry(
+      `SELECT mix_stem_id, sku_root, filename, b2_key FROM mix_stems
+        WHERE b2_key IS NOT NULL AND lower(b2_key) LIKE '%.mp3'`, [], 'regen mp3 rows')).rows
+
+    const work = [], noSource = []
+    for (const r of rows) {
+      const sz = sizeOf.get(r.b2_key)
+      if (sz !== undefined && sz >= STUB_LIMIT) continue          // mp3 already fine
+      const wavKey = String(r.b2_key).replace(/\.mp3$/i, '.wav')
+      const wavSize = sizeOf.get(wavKey)
+      if (wavSize === undefined || wavSize < STUB_LIMIT) { noSource.push({ sku: r.sku_root, key: r.b2_key, reason: wavSize === undefined ? 'no wav sibling in B2' : `wav sibling is ${wavSize} bytes` }); continue }
+      work.push({ ...r, wavKey, wavSize, mp3Size: sz === undefined ? null : sz })
+    }
+
+    const counts = { mp3Rows: rows.length, broken: work.length + noSource.length,
+                     regenerable: work.length, noSource: noSource.length, bitrate }
+    if (!apply) {
+      return res.json({ ok: true, dryRun: true, counts, ffmpeg: FFMPEG,
+        sample: work.slice(0, 10).map(w => ({ sku: w.sku_root, mp3: w.b2_key, wavBytes: w.wavSize })),
+        noSourceSample: noSource.slice(0, 10) })
+    }
+
+    const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'haus-mp3-'))
+    const todo = limit ? work.slice(0, limit) : work
+    const done = { made: 0, failed: 0 }
+    const failures = []
+    for (const w of todo) {
+      const wavPath = path.join(tmpDir, 'in.wav'), mp3Path = path.join(tmpDir, 'out.mp3')
+      try {
+        const buf = await new Promise((resolve, reject) => {
+          const p2 = `/file/haus-music/${w.wavKey.split('/').map(encodeURIComponent).join('/')}`
+          const rq = https.request({ hostname: downloadHost, path: p2, method: 'GET',
+            headers: { 'Authorization': b2Auth.authorizationToken } }, rr => {
+            if (rr.statusCode !== 200) { rr.resume(); return reject(new Error(`wav download HTTP ${rr.statusCode}`)) }
+            const cs = []; rr.on('data', d => cs.push(d)); rr.on('end', () => resolve(Buffer.concat(cs))); rr.on('error', reject)
+          })
+          rq.on('error', reject); rq.end()
+        })
+        if (buf.length !== w.wavSize) throw new Error(`wav download ${buf.length}, expected ${w.wavSize}`)
+        fs.writeFileSync(wavPath, buf)
+
+        await new Promise((resolve, reject) => {
+          const cp = require('child_process').execFile(FFMPEG,
+            ['-y', '-loglevel', 'error', '-i', wavPath, '-codec:a', 'libmp3lame', '-b:a', bitrate, mp3Path],
+            { maxBuffer: 1 << 20 }, err => err ? reject(err) : resolve())
+          cp.on('error', reject)
+        })
+        const out = fs.readFileSync(mp3Path)
+        if (out.length < STUB_LIMIT) throw new Error(`ffmpeg produced ${out.length} bytes`)
+
+        const up = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_get_upload_url',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { bucketId } }, 'get upload url')
+        if (up.status !== 200) throw new Error(`upload url HTTP ${up.status}`)
+        const host = up.body.uploadUrl.replace(/^https?:\/\//, '').split('/')[0]
+        const upPath = up.body.uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+        const put = await _b2Retry({ method: 'POST', hostname: host, urlPath: upPath,
+          headers: { 'Authorization': up.body.authorizationToken,
+                     'X-Bz-File-Name': String(w.b2_key).split('/').map(encodeURIComponent).join('/'),
+                     'Content-Type': 'audio/mpeg',
+                     'X-Bz-Content-Sha1': crypto.createHash('sha1').update(out).digest('hex'),
+                     'Content-Length': out.length },
+          body: out, isBuffer: true }, `upload ${w.filename}`)
+        const pb = Buffer.isBuffer(put.body) ? JSON.parse(put.body.toString()) : put.body
+        if (put.status !== 200) throw new Error(pb?.message || `upload HTTP ${put.status}`)
+        if (pb.contentLength !== out.length) throw new Error(`B2 stored ${pb.contentLength}, expected ${out.length}`)
+        done.made++
+        if (done.made % 20 === 0) console.log(`[regen-mp3] ${done.made}/${todo.length}`)
+      } catch (e) { done.failed++; failures.push({ sku: w.sku_root, key: w.b2_key, error: e.message }) }
+      finally { for (const f of [wavPath, mp3Path]) { try { fs.unlinkSync(f) } catch {} } }
+    }
+    try { fs.rmdirSync(tmpDir) } catch {}
+    console.log(`[regen-mp3] done — ${done.made} made, ${done.failed} failed @ ${bitrate}`)
+    res.json({ ok: true, applied: true, counts, done, remaining: work.length - todo.length, failures: failures.slice(0, 20) })
+  } catch (e) {
+    console.error('[regen-mp3] error:', e.message)
     res.json({ ok: false, error: e.message })
   }
 })
