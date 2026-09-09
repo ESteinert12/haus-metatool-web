@@ -17,6 +17,15 @@ const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
 
+// Route modules
+const authRoutes = require('./routes/auth.js')
+const fsRoutes = require('./routes/fs.js')
+const pgRoutes = require('./routes/pg.js')
+const shellRoutes = require('./routes/shell.js')
+const audioRoutes = require('./routes/audio.js')
+const cfgRoutes = require('./routes/cfg.js')
+const lotRoutes = require('./routes/lot.js')
+
 const app    = express()
 const PORT   = process.env.PORT || 9999 
 const upload = multer({ dest: os.tmpdir() })
@@ -61,6 +70,7 @@ const PUBLIC_ROUTES = ['/auth/login', '/pg/connect', '/pg/status', '/pg/query',
   '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
   '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
   '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
+  '/cfg/server-paths',
   '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots']
 app.use('/api', (req, res, next) => {
   if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
@@ -68,11 +78,14 @@ app.use('/api', (req, res, next) => {
   next()
 })
 
-// ─── Helpers ──────────────────────────────────────────────────────────────
-function _hashPassword(pw) {
-  return crypto.createHash('sha256').update('haus-workspace:' + pw).digest('hex')
-}
+// Make pgPool and appDir available to route modules
+app.use((req, res, next) => {
+  req.app.locals.pgPool = pgPool
+  req.app.locals.appDir = __dirname
+  next()
+})
 
+// ─── Helpers ──────────────────────────────────────────────────────────────
 function _b2Request(opts) {
   return new Promise((resolve, reject) => {
     const { method, hostname, urlPath, headers, body, isBuffer } = opts
@@ -235,502 +248,26 @@ async function runServerMigrations(pool) {
 })()
 
 // ─── Auth routes ──────────────────────────────────────────────────────────
-app.post('/api/auth/login', async (req, res) => {
-  const { username, password } = req.body
-  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
-  try {
-    const hash   = _hashPassword(password)
-    const result = await pgPool.query(
-      `SELECT user_id, username, display_name FROM haus_users WHERE LOWER(username)=LOWER($1) AND password_hash=$2`,
-      [username, hash]
-    )
-    if (!result.rows.length) return res.json({ ok: false, error: 'Invalid username or password' })
-    req.session.user = result.rows[0]
-    res.json({ ok: true, user: result.rows[0] })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
-app.post('/api/auth/logout', (req, res) => {
-  req.session.destroy()
-  res.json({ ok: true })
-})
-
-app.get('/api/auth/me', (req, res) => {
-  res.json({ user: req.session?.user || null })
-})
-
-app.post('/api/auth/change-password', async (req, res) => {
-  const { username, oldPassword, newPassword } = req.body
-  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
-  try {
-    const oldHash = _hashPassword(oldPassword)
-    const newHash = _hashPassword(newPassword)
-    const result  = await pgPool.query(
-      `UPDATE haus_users SET password_hash=$1 WHERE LOWER(username)=LOWER($2) AND password_hash=$3 RETURNING user_id`,
-      [newHash, username, oldHash]
-    )
-    if (!result.rowCount) return res.json({ ok: false, error: 'Current password incorrect' })
-    res.json({ ok: true })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
+app.use('/api/auth', authRoutes)
 
 // ─── PostgreSQL routes ─────────────────────────────────────────────────────
-app.post('/api/pg/connect', async (req, res) => {
-  const { connStr } = req.body
-  try {
-    const newPool = new Pool({
-      connectionString: connStr,
-      ssl: { rejectUnauthorized: false },
-      keepAlive: true,
-      connectionTimeoutMillis: 10000,
-      idleTimeoutMillis: 0,
-    })
-    // Test the new pool before switching
-    const client = await newPool.connect()
-    client.release()
-
-    // Switch to new pool WITHOUT ending old one — let connections drain naturally
-    // Ending the pool aggressively causes "Cannot use a pool after calling end" errors
-    const oldPool = pgPool
-    pgPool = newPool
-
-    // Async drain old pool in background (don't block reconnect)
-    if (oldPool) {
-      setTimeout(() => {
-        oldPool.end().catch(e => console.warn('[pg] old pool drain error:', e.message))
-      }, 5000)  // Give 5 seconds for existing queries to finish
-    }
-    // Run schema migrations - create tables if they don't exist
-    await pgPool.query(`
-      CREATE TABLE IF NOT EXISTS playlists (
-        id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-        project_id UUID NOT NULL,
-        name TEXT NOT NULL,
-        client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
-        created_at TIMESTAMPTZ DEFAULT now()
-      )
-    `).catch(() => {})
-    await pgPool.query(`
-      CREATE TABLE IF NOT EXISTS playlist_tracks (
-        playlist_id UUID NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-        sku_root TEXT NOT NULL,
-        position INTEGER DEFAULT 1,
-        PRIMARY KEY (playlist_id, sku_root)
-      )
-    `).catch(() => {})
-    await pgPool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
-    await pgPool.query(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
-    await pgPool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
-    // Persist the connection string for auto-connect on restart
-    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-    let cfg = {}
-    try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch {}
-    cfg.pgConn = connStr
-    fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
-    res.json({ ok: true })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
-app.post('/api/pg/query', async (req, res) => {
-  const { sql, params } = req.body
-  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
-  try {
-    const result = await pgPool.query(sql, params || [])
-    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
-app.get('/api/pg/status', async (req, res) => {
-  if (!pgPool) return res.json({ connected: false })
-  try { await pgPool.query('SELECT 1'); res.json({ connected: true }) }
-  catch { res.json({ connected: false }) }
-})
+app.use('/api/pg', pgRoutes)
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
-app.post('/api/fs/read-dir', (req, res) => {
-  const { dirPath } = req.body
-  try {
-    const items = fs.readdirSync(dirPath, { withFileTypes: true })
-    const result = items
-      .filter(item => !item.name.startsWith('.'))
-      .map(item => {
-        const fullPath = path.join(dirPath, item.name)
-        let size = 0
-        try { if (!item.isDirectory()) size = fs.statSync(fullPath).size } catch {}
-        return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
-      })
-      .sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        return a.name.localeCompare(b.name)
-      })
-    res.json(result)
-  } catch (e) { res.json({ error: e.message }) }
-})
+app.use('/api/fs', fsRoutes)
 
-// Read BPM/key from audio file tags (same music-metadata library used by staging watcher)
-app.post('/api/fs/audio-meta', async (req, res) => {
-  const { filePath } = req.body
-  if (!filePath) return res.json({ ok: false, error: 'No path' })
-  try {
-    let mm = null
-    try { mm = require('music-metadata') } catch { return res.json({ ok: false, error: 'music-metadata not installed' }) }
-    const meta = await mm.parseFile(filePath, { skipCovers: true, duration: false })
-    // common.bpm is populated by music-metadata when it finds a TBPM tag.
-    // Some DAW exporters write TBPM as a native tag only — check native ID3 as fallback.
-    let bpmRaw = meta.common.bpm
-    if (!bpmRaw) {
-      const natives = meta.native || {}
-      for (const [, tags] of Object.entries(natives)) {
-        const found = tags.find(t => t.id === 'TBPM' || t.id === 'BPM')
-        if (found?.value) { bpmRaw = found.value; break }
-      }
-    }
-    res.json({
-      ok:  true,
-      bpm: bpmRaw ? Math.round(parseFloat(bpmRaw)) : null,
-      key: meta.common.key || null
-    })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
-// Check whether _FULL audio files are locally available or cloud-only (Dropbox SmartSync)
-app.post('/api/fs/audio-status', async (req, res) => {
-  const { folderPath } = req.body
-  try {
-    const names = await fs.promises.readdir(folderPath).catch(() => [])
-    const checkFile = async (pattern) => {
-      const name = names.find(n => new RegExp(pattern, 'i').test(n))
-      if (!name) return 'missing'
-      try {
-        const stat = await fs.promises.stat(path.join(folderPath, name))
-        if (stat.size === 0) return 'empty'
-        // blocks===0 with size>0 means cloud-only placeholder (Dropbox SmartSync)
-        if (stat.blocks === 0) return 'cloud'
-        return 'local'
-      } catch { return 'error' }
-    }
-    const [mp3, wav] = await Promise.all([checkFile('_FULL\\.mp3$'), checkFile('_FULL\\.wav$')])
-    res.json({ mp3, wav })
-  } catch (e) { res.json({ mp3: 'error', wav: 'error' }) }
-})
-
-app.post('/api/fs/count-files', (req, res) => {
-  const { dirPath, ext } = req.body
-  try {
-    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
-    const result = execSync(cmd).toString().trim()
-    res.json(parseInt(result, 10))
-  } catch { res.json(0) }
-})
-
-app.post('/api/fs/path-exists', (req, res) => {
-  const { filePath } = req.body
-  res.json(fs.existsSync(filePath))
-})
-
-app.post('/api/fs/read-file', (req, res) => {
-  const { filePath } = req.body
-  try { res.json(fs.readFileSync(filePath, 'utf8')) }
-  catch { res.json(null) }
-})
-
-app.post('/api/fs/write-file', (req, res) => {
-  const { filePath, content } = req.body
-  try {
-    fs.mkdirSync(path.dirname(filePath), { recursive: true })
-    fs.writeFileSync(filePath, content, 'utf8')
-    res.json(true)
-  } catch { res.json(false) }
-})
-
-app.post('/api/fs/mkdir', (req, res) => {
-  const { dirPath } = req.body
-  if (!dirPath) return res.json({ ok: false, error: 'No dirPath provided' })
-  try {
-    fs.mkdirSync(dirPath, { recursive: true })
-    res.json({ ok: true, path: dirPath })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
-app.post('/api/fs/folder-stats', (req, res) => {
-  const { dirPath } = req.body
-  try {
-    const audioExts = ['.wav', '.mp3', '.aiff', '.aif']
-    let audioCount = 0, totalCount = 0, folderCount = 0
-    const walk = (dir) => {
-      const items = fs.readdirSync(dir, { withFileTypes: true })
-      for (const item of items) {
-        if (item.name.startsWith('.')) continue
-        const full = path.join(dir, item.name)
-        if (item.isDirectory()) { folderCount++; walk(full) }
-        else { totalCount++; if (audioExts.includes(path.extname(item.name).toLowerCase())) audioCount++ }
-      }
-    }
-    walk(dirPath)
-    res.json({ audioCount, totalCount, folderCount })
-  } catch { res.json({ audioCount: 0, totalCount: 0, folderCount: 0 }) }
-})
-
-// ─── Create lot with folder ────────────────────────────────────────────────
-app.post('/api/lot/create', async (req, res) => {
-  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
-  const { lotName, limit, projectId, clientName } = req.body
-  if (!lotName) return res.json({ ok: false, error: 'Lot name required' })
-
-  try {
-    // Insert lot into database
-    const result = await pgPool.query(
-      `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client)
-       VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
-      [lotName, limit || null, projectId || null, clientName || null]
-    )
-
-    if (!result.rows.length) {
-      return res.json({ ok: false, error: 'Failed to create lot' })
-    }
-
-    const lotId = result.rows[0].lot_id
-
-    // Create folder in shipping directory
-    let shippingBase = process.env.HAUS_SHIPPING
-    let folderCreated = false
-    let folderPath = null
-    let folderError = null
-
-    if (!shippingBase) {
-      try {
-        const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-        console.log(`[lot/create] Checking config at: ${cfgPath}`)
-        if (fs.existsSync(cfgPath)) {
-          const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-          console.log(`[lot/create] Config loaded, hausjup: ${cfg.hausjup}`)
-          if (cfg.hausjup) shippingBase = cfg.hausjup
-        } else {
-          console.warn(`[lot/create] Config file not found at ${cfgPath}`)
-        }
-      } catch (e) {
-        console.warn('[lot/create] Could not read shipping path from config:', e.message)
-        folderError = e.message
-      }
-    }
-
-    if (shippingBase) {
-      folderPath = path.join(shippingBase, lotName)
-      console.log(`[lot/create] Creating folder at: ${folderPath}`)
-      try {
-        fs.mkdirSync(folderPath, { recursive: true })
-        folderCreated = true
-        console.log(`✅ [lot/create] Created lot folder: ${folderPath}`)
-      } catch (e) {
-        console.error(`❌ [lot/create] Could not create lot folder ${folderPath}:`, e.message)
-        folderError = e.message
-      }
-    } else {
-      console.warn('[lot/create] No shipping base path found')
-      folderError = 'No shipping path configured'
-    }
-
-    res.json({ ok: true, lotId, folderCreated, folderPath, folderError })
-  } catch (e) {
-    res.json({ ok: false, error: e.message })
-  }
-})
-
-// ─── Download lot WAV files for AVID ───────────────────────────────────────
-app.post('/api/lot/download-avid-wavs', async (req, res) => {
-  const { lotId, lotName, safeName } = req.body
-  try {
-    // Get lot details from DB
-    const lotRows = await pgPool.query('SELECT * FROM lots WHERE lot_id = $1', [lotId])
-    const lot = lotRows?.rows?.[0]
-    if (!lot) return res.json({ ok: false, error: 'Lot not found' })
-
-    // Create AVID folder in user's Downloads
-    const avidDir = path.resolve(path.join(os.homedir(), 'Downloads', `AVID_${safeName}`))
-    if (!fs.existsSync(avidDir)) fs.mkdirSync(avidDir, { recursive: true })
-
-    // Find lot folder in shipping directory (read from config)
-    let shippingBase = process.env.HAUS_SHIPPING
-
-    if (!shippingBase) {
-      try {
-        const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-        if (fs.existsSync(cfgPath)) {
-          const cfgData = fs.readFileSync(cfgPath, 'utf8')
-          const cfg = JSON.parse(cfgData)
-          if (cfg.hausjup) shippingBase = cfg.hausjup
-        }
-      } catch (e) {
-        console.warn('Could not read config for shipping path:', e.message)
-      }
-    }
-
-    if (!shippingBase) {
-      return res.json({ ok: false, error: 'Shipping path not configured. Set HAUS_SHIPPING env var or configure in app settings.' })
-    }
-
-    const lotFolder = path.resolve(path.join(shippingBase, lotName))
-    console.log('[AVID] Looking for lot folder:', lotFolder)
-
-    if (!fs.existsSync(lotFolder)) {
-      return res.json({ ok: false, error: `Lot folder not found: ${lotFolder}. Checked shipping path: ${shippingBase}` })
-    }
-
-    // Recursively find all WAV files and copy them
-    let wavCount = 0
-    const copyWavs = (srcDir) => {
-      try {
-        const items = fs.readdirSync(srcDir, { withFileTypes: true })
-        for (const item of items) {
-          if (item.name.startsWith('.')) continue
-          const srcPath = path.join(srcDir, item.name)
-          if (item.isDirectory()) {
-            copyWavs(srcPath)
-          } else if (item.name.toLowerCase().endsWith('.wav')) {
-            const destPath = path.join(avidDir, item.name)
-            fs.copyFileSync(srcPath, destPath)
-            wavCount++
-          }
-        }
-      } catch (e) {
-        console.error('Error copying WAVs:', e.message)
-      }
-    }
-
-    copyWavs(lotFolder)
-    res.json({ ok: true, count: wavCount, folder: avidDir })
-  } catch (e) {
-    console.error('AVID download error:', e)
-    res.json({ ok: false, error: e.message })
-  }
-})
+// ─── Lot routes ────────────────────────────────────────────────────────────
+app.use('/api/lot', lotRoutes)
 
 // ─── Shell routes ──────────────────────────────────────────────────────────
-app.post('/api/shell/exec', (req, res) => {
-  const { cmd, cwd } = req.body
-  exec(cmd, { cwd: cwd || os.homedir(), maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
-    res.json({ err: err?.message || null, stdout: stdout || '', stderr: stderr || '' })
-  })
-})
-
-app.get('/api/shell/home-dir', (req, res) => {
-  res.json(os.homedir())
-})
-
-app.get('/api/shell/app-path', (req, res) => {
-  res.json(__dirname)
-})
-
-app.post('/api/shell/open-external', (req, res) => {
-  const { url } = req.body
-  // On macOS server, open in default browser
-  exec(`open "${url}"`)
-  res.json({ ok: true })
-})
-
-app.post('/api/shell/show-in-finder', (req, res) => {
-  const { filePath } = req.body
-  exec(`open -R "${filePath}"`)
-  res.json({ ok: true })
-})
-
-// Folder picker — returns null in web mode (UI falls back to text input)
-app.get('/api/shell/show-folder-picker', (req, res) => {
-  res.json(null)
-})
+app.use('/api/shell', shellRoutes)
 
 // ─── Server-side canonical paths ───────────────────────────────────────────
-// Stores shared folder paths so all users inherit them without local config.
-const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
-
-app.get('/api/cfg/server-paths', (req, res) => {
-  const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-  let cfg = {}
-  try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch {}
-  const paths = {}
-  for (const k of SERVER_PATH_KEYS) if (cfg[k]) paths[k] = cfg[k]
-  res.json(paths)
-})
-
-app.post('/api/cfg/server-paths', (req, res) => {
-  const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-  let cfg = {}
-  try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch {}
-  for (const k of SERVER_PATH_KEYS) {
-    if (req.body[k] !== undefined) cfg[k] = req.body[k]
-  }
-  fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
-  res.json({ ok: true })
-})
+// ─── Configuration routes ──────────────────────────────────────────────────
+app.use('/api/cfg', cfgRoutes)
 
 // ─── Audio streaming ───────────────────────────────────────────────────────
-// GET /api/audio/stream?path=/absolute/path/to/file.wav
-// Supports range requests so HTML5 <audio> seeking works
-app.get('/api/audio/stream', async (req, res) => {
-  console.log('[audio/stream] HIT', new Date().toISOString())
-  // Accept hex-encoded path (?h=...) or legacy plain path (?path=...)
-  let filePath = req.query.path
-  if (req.query.h) {
-    try { filePath = Buffer.from(req.query.h, 'hex').toString('utf8') } catch {}
-  }
-  if (!filePath) return res.status(400).json({ error: 'No path', receivedQuery: req.query })
-  let stat
-  try { stat = await fs.promises.stat(filePath) } catch { return res.status(404).json({ error: 'File not found' }) }
-
-  const ext   = path.extname(filePath).toLowerCase()
-  const isAif = ext === '.aiff' || ext === '.aif'
-  const mime  = ext === '.mp3' ? 'audio/mpeg' : 'audio/wav'
-  const total = stat.size
-
-  // Tell Cloudflare/nginx not to buffer or cache — stream directly to client
-  res.setHeader('X-Accel-Buffering', 'no')
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate')
-  res.setHeader('Pragma', 'no-cache')
-  res.setHeader('CF-Cache-Status', 'BYPASS')
-
-  // AIF/AIFF: Chromium can't decode natively — pipe through ffmpeg → WAV on the fly
-  if (isAif) {
-    const ffmpegBin = ['/opt/homebrew/bin/ffmpeg','/usr/local/bin/ffmpeg','/usr/bin/ffmpeg'].find(p => { try { return fs.existsSync(p) } catch { return false } }) || 'ffmpeg'
-    console.log(`[audio/stream] AIF→WAV via ${ffmpegBin}: ${filePath}`)
-    res.writeHead(200, { 'Content-Type': 'audio/wav', 'Transfer-Encoding': 'chunked' })
-    const ff = spawn(ffmpegBin, ['-y', '-i', filePath, '-f', 'wav', '-acodec', 'pcm_s16le', 'pipe:1'], { stdio: ['ignore', 'pipe', 'pipe'] })
-    ff.stdout.pipe(res)
-    ff.stderr.on('data', d => console.log('[ffmpeg]', d.toString().trim()))
-    ff.on('error', err => { console.error('[audio/stream] ffmpeg spawn error:', err.message); if (!res.writableEnded) res.end() })
-    ff.on('close', code => { if (code !== 0) console.warn('[audio/stream] ffmpeg exited', code); if (!res.writableEnded) res.end() })
-    req.on('close', () => { try { ff.kill() } catch {} })
-    return
-  }
-
-  const range = req.headers.range
-  try {
-    if (range) {
-      const [startStr, endStr] = range.replace(/bytes=/, '').split('-')
-      const start = parseInt(startStr, 10) || 0
-      const end   = endStr ? parseInt(endStr, 10) : total - 1
-      res.writeHead(206, {
-        'Content-Range':  `bytes ${start}-${end}/${total}`,
-        'Accept-Ranges':  'bytes',
-        'Content-Length': end - start + 1,
-        'Content-Type':   mime
-      })
-      const stream = fs.createReadStream(filePath, { start, end })
-      stream.on('error', err => { console.error('[audio/stream] range error:', err.message); if (!res.writableEnded) res.end() })
-      req.on('close', () => stream.destroy())
-      stream.pipe(res)
-    } else {
-      res.writeHead(200, { 'Content-Length': total, 'Content-Type': mime, 'Accept-Ranges': 'bytes' })
-      const stream = fs.createReadStream(filePath)
-      stream.on('error', err => { console.error('[audio/stream] error:', err.message); if (!res.writableEnded) res.end() })
-      req.on('close', () => stream.destroy())
-      stream.pipe(res)
-    }
-  } catch (e) {
-    console.error('[audio/stream] unexpected error:', e.message)
-    if (!res.headersSent) res.status(500).json({ error: e.message })
-    else res.end()
-  }
-})
+app.use('/api/audio', audioRoutes)
 
 // ─── AppleScript route ─────────────────────────────────────────────────────
 app.post('/api/applescript', (req, res) => {
@@ -1819,6 +1356,12 @@ async function startStagingWatcher(pool) {
   console.log(`👁 Staging watcher started: ${stagingDir}`)
 }
 
+// Make startStagingWatcher available to route modules
+app.use((req, res, next) => {
+  req.app.locals.startStagingWatcher = startStagingWatcher
+  next()
+})
+
 // ─── Staged-files API ──────────────────────────────────────────────────────
 app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
@@ -1847,13 +1390,6 @@ app.delete('/api/staged-files/by-path', async (req, res) => {
     await pgPool.query(`DELETE FROM staged_files WHERE filepath=$1`, [filePath])
     res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
-// Restart watcher when staging path changes
-app.post('/api/cfg/server-paths', async (req, res, next) => {
-  // handled by original route below — we just hook to restart watcher
-  res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
-  next()
 })
 
 // ─── Clients import ────────────────────────────────────────────────────────

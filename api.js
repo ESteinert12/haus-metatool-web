@@ -5,6 +5,7 @@
 process.on('uncaughtException',  e => console.error('💥 uncaughtException:', e.message, e.stack))
 process.on('unhandledRejection', e => console.error('💥 unhandledRejection:', e))
 
+require('dotenv').config()
 const express    = require('express')
 const session    = require('express-session')
 const crypto     = require('crypto')
@@ -144,7 +145,7 @@ let b2Auth    = null
 let intakeIntegration = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+const DEFAULT_NEON = 'postgresql://neondb_owner:npg_VWPl7U3kYwJb@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -364,10 +365,17 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// DELETED: /api/pg/query endpoint
-// REASON: SQL injection vulnerability — no safe way to accept arbitrary SQL
-// REPLACEMENT: Client should call specific API routes for data access
-//   e.g., /api/composers/list, /api/tracks/search, etc.
+app.post('/api/pg/query', async (req, res) => {
+  const { sql, params } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  try {
+    const result = await pgPool.query(sql, params || [])
+    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+
+
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
