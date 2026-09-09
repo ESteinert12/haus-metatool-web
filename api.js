@@ -88,7 +88,12 @@ const PUBLIC_ROUTES = [
   // Shell ops (safe ones only)
   '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
   // B2 (mostly audit/recovery operations)
-  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots'
+  // '/b2/rebuild-stem-keys' and '/b2/authorize' REMOVED 2026-09-09. Both are
+  // writers -- rebuild mutates mix_stems across the whole catalogue, authorize
+  // replaces the process-wide B2 credentials -- and a bulk B2 writer must never
+  // be reachable without a login. /b2/stream stays public: the <audio> element
+  // cannot send session credentials.
+  '/b2/stream', '/b2/status', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots'
 ]
 app.use('/api', (req, res, next) => {
   if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
@@ -720,11 +725,79 @@ app.post('/api/lot/download-avid-wavs', async (req, res) => {
 // ─── Shell routes ──────────────────────────────────────────────────────────
 // ⚠️ SECURITY: /api/shell/exec moved to authenticated-only (removed from PUBLIC_ROUTES)
 // Arbitrary shell execution is dangerous, even for authenticated users
+// ── shell/exec guard ────────────────────────────────────────────────────────
+// Two layers, deliberately different in strength.
+//
+// DENY is enforced now. These are shapes no ATMOSPHERE call site produces and
+// that no intake task needs. This is the layer that would have refused the
+// `rm -rf` typed into this endpoint.
+//
+// ALLOW is log-only until we have seen a clean day of real intake traffic.
+// Every call site in index.html begins with a literal binary and the full set
+// is known (see SHELL_ALLOW), but a refusing allowlist that is wrong by one
+// entry stops intake dead, so it reports first and refuses later. Flip it by
+// setting SHELL_EXEC_ENFORCE_ALLOW=1 in .env.
+//
+// NOT SOLVED by either layer: call sites interpolate folder paths into shell
+// strings without escaping, and the legitimate commands themselves use | && ;
+// and redirects, so metacharacters cannot be blocked. A folder named with a
+// quote and a semicolon can still inject. The real fix is argv arrays at all
+// 51 call sites in index.html.
+const SHELL_ALLOW = new Set([
+  'find', 'test', 'mkdir', 'mv', 'cp', 'rmdir', 'rm',
+  'stat', 'which', 'bash', 'perl', 'python3', 'open', 'echo',
+])
+const SHELL_DENY = [
+  [/(^|[\s;&|(])rm\s+(-\w*\s+)*-\w*[rR]/, 'recursive rm'],
+  [/(^|[\s;&|(])sudo(\s|$)/,              'sudo'],
+  [/(^|[\s;&|(])(curl|wget|nc|ncat)(\s|$)/, 'network fetch'],
+  [/(^|[\s;&|(])(chmod|chown|chflags)(\s|$)/, 'permission change'],
+  [/(^|[\s;&|(])(dd|mkfs|diskutil|fdisk)(\s|$)/, 'disk tool'],
+  [/(^|[\s;&|(])(launchctl|systemctl|kextload)(\s|$)/, 'service control'],
+  [/(^|[\s;&|(])(shutdown|reboot|halt)(\s|$)/, 'power control'],
+  [/>\s*\/dev\/(disk|rdisk)/,             'raw device write'],
+  [/:\s*\(\s*\)\s*\{/,                    'fork bomb'],
+  [/(^|[\s;&|(])(killall|pkill)\s+-9/,    'force kill'],
+]
+function _shellLeadBin (cmd) {
+  // First bare word, ignoring VAR=x prefixes and leading quotes/parens.
+  const m = String(cmd).replace(/^[\s(]*/, '').match(/^"?([^\s"']+)"?/)
+  if (!m) return null
+  let bin = m[1]
+  if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(bin)) return null   // env-prefixed: not allowlisted
+  if (bin.includes('/')) bin = bin.split('/').pop()        // /usr/local/bin/ffmpeg -> ffmpeg
+  return bin
+}
+function shellExecGuard (cmd, who) {
+  if (typeof cmd !== 'string' || !cmd.trim()) {
+    return { ok: false, reason: 'empty command' }
+  }
+  for (const [re, label] of SHELL_DENY) {
+    if (re.test(cmd)) {
+      console.error(`[security] shell/exec REFUSED (${label}) from ${who}: ${cmd}`)
+      return { ok: false, reason: `refused: ${label} is not permitted through this endpoint` }
+    }
+  }
+  const bin = _shellLeadBin(cmd)
+  const allowed = bin && (SHELL_ALLOW.has(bin) || /^ff(mpeg|probe)$/.test(bin))
+  if (!allowed) {
+    if (process.env.SHELL_EXEC_ENFORCE_ALLOW === '1') {
+      console.error(`[security] shell/exec REFUSED (not allowlisted: ${bin}) from ${who}: ${cmd}`)
+      return { ok: false, reason: `refused: "${bin}" is not on the permitted command list` }
+    }
+    console.warn(`[security] shell/exec WOULD-REFUSE (not allowlisted: ${bin}) from ${who}: ${cmd}`)
+  }
+  return { ok: true }
+}
+
 app.post('/api/shell/exec', (req, res) => {
   const { cmd, cwd } = req.body
-  // Now requires authentication; user must be logged in
-  console.warn(`[security] shell/exec called by ${req.session?.user?.username || 'unknown'}: ${cmd.substring(0, 50)}...`)
-  // TODO: Whitelist safe commands, don't allow arbitrary exec
+  const who = req.session?.user?.username || 'unknown'
+  const verdict = shellExecGuard(cmd, who)
+  if (!verdict.ok) {
+    return res.status(403).json({ err: verdict.reason, stdout: '', stderr: '' })
+  }
+  console.warn(`[security] shell/exec by ${who}: ${String(cmd).slice(0, 200)}`)
   exec(cmd, { cwd: cwd || os.homedir(), maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
     res.json({ err: err?.message || null, stdout: stdout || '', stderr: stderr || '' })
   })
@@ -852,11 +925,72 @@ app.get('/api/audio/stream', async (req, res) => {
 // ─── AppleScript route ─────────────────────────────────────────────────────
 // ⚠️ SECURITY: /api/applescript moved to authenticated-only (removed from PUBLIC_ROUTES)
 // Arbitrary AppleScript execution grants control over macOS — Daylite integration, etc.
+// ── AppleScript guard ───────────────────────────────────────────────────────
+// Every caller in index.html is a READ-ONLY Daylite query: loadDayliteToday,
+// loadDayliteSchedule, loadDayliteContacts, and a version check. They read
+// appointments, tasks and people. Not one of them writes anything.
+//
+// So unlike shell/exec, this endpoint can be genuinely constrained: the script
+// must address Daylite and nothing else, and must not contain a verb that
+// escapes AppleScript or mutates data. Enforced from the start -- there is no
+// log-only phase, because the permitted surface here is four known scripts
+// rather than 51 call sites of varying shape.
+//
+// `set` cannot be banned: the real scripts use `set output to ""` throughout.
+// The escape hatches are banned instead, which is what actually matters --
+// `do shell script` is the one that turns this into shell/exec with no guard.
+const APPLESCRIPT_DENY = [
+  [/\bdo\s+shell\s+script\b/i,   'do shell script'],
+  [/\brun\s+script\b/i,          'run script'],
+  [/\bload\s+script\b/i,         'load script'],
+  [/\bopen\s+location\b/i,       'open location'],
+  [/\bmount\s+volume\b/i,        'mount volume'],
+  [/\bsystem\s+events\b/i,       'System Events'],
+  [/\bkeystroke\b|\bkey\s+code\b/i, 'synthetic keystrokes'],
+  [/\bmake\s+new\b/i,            'make new'],
+  [/\bdelete\b/i,                'delete'],
+  [/\bduplicate\b/i,             'duplicate'],
+  [/\b(quit|restart|shut\s+down|log\s+out|sleep)\b/i, 'power/quit verb'],
+  [/\badministrator\s+privileges\b/i, 'privilege escalation'],
+]
+function applescriptGuard (script, who) {
+  if (typeof script !== 'string' || !script.trim()) {
+    return { ok: false, reason: 'empty script' }
+  }
+  const body = script.trim()
+
+  // Must address Daylite, and ONLY Daylite. A second `tell application` is how
+  // you would pivot to Finder or Terminal from inside an otherwise innocent script.
+  const tells = body.match(/tell\s+application\s+"([^"]+)"/gi) || []
+  const nonDaylite = tells.filter(t => !/"Daylite"\s*$/i.test(t))
+  if (!tells.length || nonDaylite.length) {
+    console.error(`[security] applescript REFUSED (targets ${nonDaylite.join(', ') || 'no application'}) from ${who}: ${body.slice(0, 200)}`)
+    return { ok: false, reason: 'refused: this endpoint only addresses Daylite' }
+  }
+  for (const [re, label] of APPLESCRIPT_DENY) {
+    if (re.test(body)) {
+      console.error(`[security] applescript REFUSED (${label}) from ${who}: ${body.slice(0, 200)}`)
+      return { ok: false, reason: `refused: "${label}" is not permitted through this endpoint` }
+    }
+  }
+  return { ok: true }
+}
+
 app.post('/api/applescript', (req, res) => {
   const { script } = req.body
-  // Now requires authentication; user must be logged in
-  console.warn(`[security] applescript called by ${req.session?.user?.username || 'unknown'}: ${script.substring(0, 50)}...`)
-  // TODO: Whitelist Daylite commands only, don't allow arbitrary AppleScript
+  const who = req.session?.user?.username || 'unknown'
+  // Daylite is not in use and may never be (Erik, 2026-09-09). An endpoint that
+  // executes AppleScript is the widest hole in this app, so while nothing needs
+  // it, it is OFF -- not merely guarded. Set DAYLITE_ENABLED=1 in .env to turn it
+  // back on; the guard below then applies. The callers in index.html degrade on
+  // their own (they render a "Daylite not running" row), so this breaks nothing.
+  if (process.env.DAYLITE_ENABLED !== '1') {
+    console.warn(`[security] applescript DISABLED (Daylite not in use), called by ${who}`)
+    return res.status(403).json({ error: 'AppleScript execution is disabled (Daylite is not in use)' })
+  }
+  const verdict = applescriptGuard(script, who)
+  if (!verdict.ok) return res.status(403).json({ error: verdict.reason })
+  console.warn(`[security] applescript by ${who}: ${String(script).trim().slice(0, 120).replace(/\s+/g, ' ')}`)
   const tmpFile = path.join(os.tmpdir(), `haus_as_${Date.now()}.applescript`)
   try {
     fs.writeFileSync(tmpFile, script, 'utf8')
@@ -939,6 +1073,42 @@ app.post('/api/fm/databases', async (req, res) => {
 // Fetch the .wav sibling of an mp3 key from B2. The player picks `mp3 || wav`, so a
 // missing OR stubbed mp3 kills a song whose wav is perfect. Same key, different
 // extension: derived, not guessed. Returns a Buffer, or null.
+// One GET against B2, optionally for a byte range. Returns {status, headers, body}.
+// The body is BUFFERED on purpose: piping B2 straight through gets truncated by
+// the Cloudflare tunnel on long responses, which is why this endpoint buffered in
+// the first place. Forwarding the Range means we now buffer only the bytes the
+// player actually asked for instead of the whole object.
+function _b2Get (urlPath, downloadHost, range) {
+  return new Promise((resolve, reject) => {
+    const headers = { 'Authorization': b2Auth.authorizationToken }
+    if (range) headers['Range'] = range
+    const rq = https.request({ hostname: downloadHost, path: urlPath, method: 'GET', headers }, r => {
+      const status = r.statusCode
+      if (status !== 200 && status !== 206) {
+        let body = ''
+        r.on('data', d => body += d)
+        r.on('end', () => reject(Object.assign(new Error(`B2 returned ${status}`), { status, detail: body.slice(0, 200) })))
+        return
+      }
+      const cs = []
+      r.on('data', c => cs.push(c))
+      r.on('end', () => resolve({ status, headers: r.headers, body: Buffer.concat(cs) }))
+      r.on('error', reject)
+    })
+    rq.on('error', reject)
+    rq.end()
+  })
+}
+
+// Total object size from a B2 response: Content-Range "bytes a-b/TOTAL" on a 206,
+// Content-Length on a 200. Returns null if neither is parseable.
+function _b2TotalSize (h) {
+  const cr = h['content-range']
+  if (cr) { const m = /\/(\d+)\s*$/.exec(cr); if (m) return parseInt(m[1], 10) }
+  if (h['content-length']) return parseInt(h['content-length'], 10)
+  return null
+}
+
 async function _b2WavSibling(key, downloadHost) {
   if (!/\.mp3$/i.test(key)) return null
   const wavKey = key.replace(/\.mp3$/i, '.wav')
@@ -970,39 +1140,53 @@ app.get('/api/b2/stream', async (req, res) => {
   const ext  = path.extname(key).toLowerCase()
   const mime = ext === '.mp3' ? 'audio/mpeg' : ext === '.aiff' || ext === '.aif' ? 'audio/aiff' : 'audio/wav'
 
-  console.log(`[b2/stream] fetching host:${downloadHost} path:${urlPath}`)
+  const clientRange = req.headers.range
+  console.log(`[b2/stream] ${clientRange ? 'range ' + clientRange : 'full'} host:${downloadHost} path:${urlPath}`)
 
   try {
-    const buf = await new Promise((resolve, reject) => {
-      const b2Req = https.request(
-        { hostname: downloadHost, path: urlPath, method: 'GET',
-          headers: { 'Authorization': b2Auth.authorizationToken } },
-        b2Res => {
-          const status = b2Res.statusCode
-          console.log(`[b2/stream] B2 responded ${status}`)
-          if (status !== 200 && status !== 206) {
-            let body = ''
-            b2Res.on('data', d => body += d)
-            b2Res.on('end', () => reject(Object.assign(new Error(`B2 returned ${status}`), { status, detail: body.slice(0, 200) })))
-            return
-          }
-          console.log(`[b2/stream] response headers:`, JSON.stringify(b2Res.headers))
-          const chunks = []
-          b2Res.on('data', chunk => chunks.push(chunk))
-          b2Res.on('end', () => {
-            const full = Buffer.concat(chunks)
-            if (full.length < 1000) console.log(`[b2/stream] small body:`, full.toString('utf8'))
-            resolve(full)
-          })
-          b2Res.on('error', reject)
-        }
-      )
-      b2Req.on('error', reject)
-      b2Req.end()
-    })
+    // Ask B2 for exactly what the player asked for. With no Range we still probe
+    // the first KB rather than pulling the whole object, because all we need up
+    // front is the total size and enough bytes to tell a stub from real audio.
+    const first = await _b2Get(urlPath, downloadHost, clientRange || 'bytes=0-1023')
+    const totalSize = _b2TotalSize(first.headers)
+    console.log(`[b2/stream] B2 ${first.status}, got ${first.body.length} of ${totalSize} bytes`)
 
-    const total = buf.length
-    console.log(`[b2/stream] downloaded ${total} bytes, serving`)
+    // Stub files are under 1000 bytes, so the probe above already holds the whole
+    // thing -- the stub branch below still sees a complete body, as it always did.
+    let buf   = first.body
+    let total = totalSize == null ? first.body.length : totalSize
+
+    // `first.body.length < total` matters: if B2 ever ignores the Range and answers
+    // 200 with the whole object, we already have it and must not fetch it twice.
+    if (total >= 1000 && !clientRange && first.body.length < total) {
+      // Real audio and the player wants the lot: this is the one unavoidable full
+      // download. Seeks after it are served from ranges, and the ETag below lets
+      // the browser skip re-asking entirely.
+      const whole = await _b2Get(urlPath, downloadHost, null)
+      buf = whole.body; total = whole.body.length
+      console.log(`[b2/stream] downloaded ${total} bytes (full), serving`)
+    }
+
+    // The global no-cache middleware (see "Disable caching for all files" near the
+    // top) exists so index.html edits are always picked up. Audio is immutable and
+    // large, so this ONE endpoint opts out. Cache-Control alone would win by spec --
+    // Pragma and Expires are HTTP/1.0 and only apply when Cache-Control is absent --
+    // but three contradictory directives on one response is how caching bugs hide,
+    // so drop the other two rather than rely on precedence.
+    res.removeHeader('Pragma')
+    res.removeHeader('Expires')
+
+    // Let the browser reuse what it already has instead of re-fetching on every
+    // seek. B2 gives us a content hash, so the ETag is derived, not invented.
+    const sha = first.headers['x-bz-content-sha1']
+    if (sha && total >= 1000) {
+      const etag = '"' + String(sha).replace(/^unverified:/, '') + '"'
+      if (req.headers['if-none-match'] === etag) {
+        console.log('[b2/stream] 304 not modified')
+        return res.status(304).end()
+      }
+      res.setHeader('ETag', etag)
+    }
 
     // Detect stub files: B2 contains a local path instead of real audio data.
     if (total < 1000) {
@@ -1093,26 +1277,26 @@ app.get('/api/b2/stream', async (req, res) => {
       }
     }
 
-    const rangeHeader = req.headers.range
-    if (rangeHeader) {
-      const m = rangeHeader.match(/bytes=(\d*)-(\d*)/)
-      const start = m && m[1] ? parseInt(m[1]) : 0
-      const end   = m && m[2] ? Math.min(parseInt(m[2]), total - 1) : total - 1
-      const chunkSize = end - start + 1
+    if (clientRange) {
+      // `buf` is what B2 returned for the player's own Range header, so it is
+      // already the right slice -- no local slicing, and no full object fetched.
+      // Reuse B2's Content-Range verbatim where it gave us one; it is authoritative.
+      const contentRange = first.headers['content-range'] ||
+        `bytes 0-${Math.max(buf.length - 1, 0)}/${total}`
       res.writeHead(206, {
         'Content-Type':   mime,
-        'Content-Range':  `bytes ${start}-${end}/${total}`,
+        'Content-Range':  contentRange,
         'Accept-Ranges':  'bytes',
-        'Content-Length': chunkSize,
-        'Cache-Control':  'no-cache'
+        'Content-Length': buf.length,
+        'Cache-Control':  'private, max-age=3600'
       })
-      res.end(buf.slice(start, end + 1))
+      res.end(buf)
     } else {
       res.writeHead(200, {
         'Content-Type':   mime,
         'Accept-Ranges':  'bytes',
         'Content-Length': total,
-        'Cache-Control':  'no-cache'
+        'Cache-Control':  'private, max-age=3600'
       })
       res.end(buf)
     }
@@ -2673,6 +2857,223 @@ app.get('/api/b2/link', async (req, res) => {
   }
 })
 
+
+// ─── Missing stem rows: create, don't just update ────────────────────────────
+// /api/b2/rebuild-stem-keys and /api/b2/link can only UPDATE a row that already
+// exists. 3,261 titles have NO mix_stems rows at all, so neither can ever help
+// them -- that is why they stayed invisible to every audit (all of which start
+// WHERE b2_key IS NOT NULL). This creates the missing rows from what is actually
+// in the bucket.
+//
+// _detectStemName is PORTED VERBATIM from index.html. If you change one, change
+// both -- a divergence here silently mislabels stems.
+function _detectStemName(filename) {
+  // Returns the stem role, or the raw token when it is not recognised -- NEVER
+  // 'FULL'. The old version returned 'FULL' for anything it did not know, so a
+  // `..._LongSting.wav` or `..._30.wav` was recorded as the full mix. That matters:
+  // several queries pick a song's full mix with upper(stem_name)='FULL', so a
+  // mislabelled bumper can be served AS the full track. Measured damage across the
+  // catalogue's life: ~275 rows (2026-09-08).
+  //
+  // Three changes from the original:
+  //  1. Scan EVERY underscore segment, not only the last. Composers put the role in
+  //     the middle: HAUS_S86b_Everything's Bigger In Texas_A_ALT_TEX HEARTLAND.wav
+  //  2. PRESERVE the variant letter. ALTa/ALTb and BUMPERa are distinct stems; the
+  //     old /^ALT/ collapsed them all to ALT and lost the distinction.
+  //  3. Unknown -> return the token as written. Recording what was actually there
+  //     lets a human see it; inventing 'FULL' hides it.
+  // Segments must match a role EXACTLY, which keeps the earlier fix that stopped
+  // "StingRay" being read as STING.
+  const ROLES = [
+    ['NODNB', 'NoDNB'], ['DNB', 'DNB'], ['NODRUMS', 'NoDrums'], ['DRUMS', 'DRUMS'],
+    ['NOVOX', 'NoVox'], ['NOLEAD', 'NoLead'], ['NOLEADS', 'NoLead'],
+    ['NOSYNTHS', 'NoSynths'], ['NOSTRINGS', 'NoStrings'], ['NOPIANO', 'NoPiano'],
+    ['NOBASS', 'NoBass'], ['PIANO', 'PIANO'], ['GUITARS', 'GUITARS'],
+    ['LOWGTR', 'LowGtr'], ['PERC', 'PERC'], ['SIB', 'SIB'], ['30', '30'],
+  ]
+  const VARIANT = [['STING', 'STING'], ['BUMPER', 'BUMPER'], ['ALT', 'ALT'], ['FULL', 'FULL']]
+  const base = String(filename).replace(/\.[^.]+$/, '')
+  const segs = base.split('_').map(x => x.trim()).filter(Boolean)
+  let unknownTail = null
+  for (let i = segs.length - 1; i >= 0; i--) {
+    const v = segs[i].toUpperCase()
+    const flat = ROLES.find(r => r[0] === v)
+    if (flat) return flat[1]
+    // FULL / STING / BUMPER / ALT may carry a trailing variant letter: STINGa, ALTb
+    for (const [key, canon] of VARIANT) {
+      if (v === key) return canon
+      if (v.startsWith(key) && /^[A-Z]$/.test(v.slice(key.length))) return canon + v.slice(key.length).toLowerCase()
+    }
+    if (unknownTail === null && i === segs.length - 1) unknownTail = segs[i]
+  }
+  return unknownTail || 'FULL'
+}
+
+// Pull the sku_root out of a B2 key. The SKU appears either as the song folder
+// (nimbus/R48_Name_NIMBUS/R48a0014_Title/HAUS_....wav) or, for the older
+// specialty families, as the first token of the filename
+// (cumulus/C27_.../1.SINGLE INSTRUMENT BUMPERS/C27a0152_SIB_CoalTrain_E_FULL.wav).
+// Take the LAST match: it is the most specific. Measured 2026-09-09: this yields
+// a sku_root for 87.3% of the bucket's 255,532 objects (30,406 distinct SKUs).
+const _SKU_IN_PATH = /(?:^|\/)([A-Z][0-9]{2}[a-z][0-9A-Za-z]{3,5})(?=[_ ]|\/|$)/g
+function _skuFromKey (key) {
+  let last = null, m
+  _SKU_IN_PATH.lastIndex = 0
+  while ((m = _SKU_IN_PATH.exec(key)) !== null) last = m[1]
+  return last
+}
+
+
+// GET /api/b2/create-stems
+//   ?dryRun=1        (DEFAULT) report only, writes nothing
+//   ?dryRun=0        insert the rows
+//   ?cohort=NAME     restrict to one work_queue cohort
+//   ?limit=N         cap the number of TITLES processed
+//
+// Same guards as /api/b2/link, plus two the inventory of 2026-09-09 earned:
+//   - never trust the `music/` tree. 62% of it (19,357 objects) is one
+//     1,233-byte HTML error page, and the rest is duplicates with junk
+//     appended past the WAV header. Nothing there is unique but `test.wav`.
+//   - never link an object under 1KB (a stub is a path written as text).
+// If a title yields two files that map to the SAME stem_name, that is
+// ambiguous: it is REPORTED, never guessed at.
+app.get('/api/b2/create-stems', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const cohort = req.query.cohort || null
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  const AUDIO = /\.(wav|mp3|aif|aiff)$/i
+
+  try {
+    // Titles that have NO stem rows at all.
+    const params = []
+    let sql = `SELECT t.sku_root, t.title
+                 FROM titles t
+                WHERE NOT EXISTS (SELECT 1 FROM mix_stems m WHERE m.sku_root = t.sku_root)`
+    if (cohort) {
+      params.push(cohort)
+      sql += ` AND EXISTS (SELECT 1 FROM work_queue w
+                            WHERE w.sku_root = t.sku_root
+                              AND w.cohort = $${params.length}
+                              AND w.resolved_at IS NULL)`
+    }
+    sql += ' ORDER BY t.sku_root'
+    if (limit) sql += ` LIMIT ${limit}`
+    const titles = (await pgPool.query(sql, params)).rows
+    if (!titles.length) return res.json({ ok: true, message: 'no titles without stem rows', cohort })
+    const wanted = new Map(titles.map(t => [t.sku_root, t.title]))
+
+    let bucketId = req.query.bucketId
+    const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    if (!bucketId) {
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // Index the bucket by sku_root, keeping only files that could be a stem.
+    const bySku = new Map()
+    let pages = 0, startFileName = null, scanned = 0, skippedMusic = 0, skippedStub = 0
+    do {
+      const p = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) p.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_file_names?${p}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `create-stems page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        scanned++
+        if (f.fileName.startsWith('music/')) { skippedMusic++; continue }
+        if (!AUDIO.test(f.fileName)) continue
+        if (f.contentLength < STUB_LIMIT) { skippedStub++; continue }
+        const sku = _skuFromKey(f.fileName)
+        if (!sku || !wanted.has(sku)) continue
+        if (!bySku.has(sku)) bySku.set(sku, [])
+        bySku.get(sku).push({ key: f.fileName, size: f.contentLength })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const toInsert = [], ambiguous = [], noAudio = []
+    for (const [sku, title] of wanted) {
+      const files = bySku.get(sku)
+      if (!files || !files.length) { noAudio.push({ sku_root: sku, title }); continue }
+      // Group by stem_name AND EXTENSION. A song legitimately has both
+      // ..._FULL.wav and ..._FULL.mp3 -- mix_stems already stores those as two
+      // rows with the same stem_name. Keying on stem_name alone called 37,338
+      // of those normal pairs "ambiguous" and would have skipped every one.
+      // A genuine ambiguity is two files with the SAME stem AND SAME extension,
+      // i.e. the same stem in two different folders (the _Snapped case).
+      const byStem = new Map()
+      for (const f of files) {
+        const base = f.key.split('/').pop()
+        const ext  = (base.match(/\.([^.]+)$/) || [,''])[1].toLowerCase()
+        const stem = _detectStemName(base)
+        const k    = stem + '\u0000' + ext
+        if (!byStem.has(k)) byStem.set(k, [])
+        byStem.get(k).push({ ...f, stem })
+      }
+      for (const [, fs] of byStem) {
+        const stem = fs[0].stem
+        if (fs.length > 1) {
+          // Same stem, same extension, different folders. Erik's rule (2026-09-09)
+          // is that the EARLIEST lot is the song's home and any later one is a
+          // client delivery copy -- but lot dates are not in hand here, so this
+          // is reported for a human, never guessed.
+          ambiguous.push({ sku_root: sku, title, stem_name: stem,
+                           candidates: fs.map(x => ({ key: x.key, size: x.size })) })
+          continue
+        }
+        toInsert.push({ sku_root: sku, stem_name: stem,
+                        filename: fs[0].key.split('/').pop(), b2_key: fs[0].key, size: fs[0].size })
+      }
+    }
+
+    let inserted = 0
+    if (!dryRun && toInsert.length) {
+      for (let i = 0; i < toInsert.length; i += 500) {
+        const batch = toInsert.slice(i, i + 500)
+        const r = await _pgRetry(
+          `INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key)
+           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+           ON CONFLICT DO NOTHING`,
+          [batch.map(x => x.sku_root), batch.map(x => x.stem_name),
+           batch.map(x => x.filename), batch.map(x => x.b2_key)],
+          `create-stems insert ${i}`)
+        inserted += r.rowCount || 0
+      }
+    }
+
+    const stamp = Date.now()
+    const reportPath = path.join(__dirname, `b2-create-stems-${stamp}.json`)
+    fs.writeFileSync(reportPath, JSON.stringify(
+      { generated: new Date().toISOString(), dryRun, cohort, objectsScanned: scanned,
+        skippedMusicTree: skippedMusic, skippedStubs: skippedStub,
+        toInsert, ambiguous, noAudio }, null, 2))
+
+    res.json({ ok: true, dryRun, cohort,
+      objectsScanned: scanned, skippedMusicTree: skippedMusic, skippedStubs: skippedStub,
+      counts: { titlesConsidered: wanted.size,
+                titlesWithAudio: bySku.size,
+                rowsToCreate: toInsert.length,
+                inserted,
+                ambiguous: ambiguous.length,
+                titlesWithNoAudio: noAudio.length },
+      reportPath,
+      sample: toInsert.slice(0, 15),
+      ambiguousSample: ambiguous.slice(0, 5),
+      noAudioSample: noAudio.slice(0, 10) })
+  } catch (e) {
+    console.error('[create-stems]', e)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 // --- B2 self-heal ------------------------------------------------------------
 // The archive Dropbox is cloud-only, so it cannot be read from disk. But the
 // bucket contains duplicates: the same file uploaded twice under slightly
@@ -3975,7 +4376,7 @@ app.post('/api/b2/rebuild-stem-keys', async (req, res) => {
       const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
       // Get bucket ID from request or use hardcoded (should match your bucket)
       const bucketId = req.body.bucketId || '707a97f6e032b16c9be50d1a'
-      const urlPath = `/b2api/v3/b2_list_file_versions?bucketId=${encodeURIComponent(bucketId)}&maxFileCount=10000${startFileName ? `&startFileName=${encodeURIComponent(startFileName)}` : ''}`
+      const urlPath = `/b2api/v3/b2_list_file_names?bucketId=${encodeURIComponent(bucketId)}&maxFileCount=10000${startFileName ? `&startFileName=${encodeURIComponent(startFileName)}` : ''}`
 
       const result = await _b2Request({
         method: 'GET',
@@ -3986,7 +4387,9 @@ app.post('/api/b2/rebuild-stem-keys', async (req, res) => {
 
       if (result.status !== 200) {
         console.error('[b2-rebuild] B2 list error:', result.status, result.body)
-        if (client) client.release()
+        // .release() is a POOLED-client method; this is a plain pg.Client, which has
+        // .end(). Calling release() here threw a second error while handling the first.
+        if (client) { try { await client.end() } catch {} }
         return res.json({ ok: false, error: `B2 API error: ${result.status}` })
       }
 
@@ -3998,7 +4401,12 @@ app.post('/api/b2/rebuild-stem-keys', async (req, res) => {
       for (const f of files) {
         if (!/\.(wav|mp3|aif|aiff)$/i.test(f.fileName)) continue
         const fileName = f.fileName.split('/').pop()
-        if (!/^HAUS_/i.test(fileName)) continue
+        // WAS: if (!/^HAUS_/i.test(fileName)) continue
+        // That one line is why 1,481 specialty cues never got stem rows. Files named
+        // SKU-first (C27a0152_SIB_CoalTrain_E_FULL.wav) are just as valid as HAUS_*
+        // ones -- the specialty families predate the HAUS_ convention. Accept either.
+        // Measured 2026-09-09: 1,421 audio objects in the bucket are not HAUS_-named.
+        if (!/^HAUS_/i.test(fileName) && !/^[A-Z][0-9]{2}[a-z][0-9A-Za-z]{3,5}_/.test(fileName)) continue
 
         scanned++
         batch.push({ b2Key: f.fileName, fileName })

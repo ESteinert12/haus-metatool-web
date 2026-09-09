@@ -266,3 +266,33 @@
 3. Build client portal (`producer.html` rewrite) — briefs, pitches (approve/pass), licenses (download), messages
 4. Bulk import 32k songs from FileMaker → PostgreSQL
 5. Build composer portal (third portal — artists upload tracks, see assignments)
+
+---
+
+## Session notes index (newest first)
+- `SESSION_2026_09_09.md` — Wed 9 Sep: 492 songs REPAIRED, /api/b2/create-stems
+  built, root cause of the 3,261 found and fixed. **Read this first.**
+- `SESSION_2026_09_08.md` — Tue 8 Sep: shell/exec guard shipped, server
+  restarted (detectStemName live), b2/stream range bug found. **Read this
+  first, it carries the current open list.**
+- `SHELL_EXEC_LOCKDOWN_2026_09_08.md` — the guard: what it blocks, what it
+  deliberately does NOT block, how to flip the allowlist to enforcing.
+- `B2_STREAM_RANGE_BUG_2026_09_08.md` — playback re-downloads whole files
+  from B2 on every request. Diagnosed, fix designed, not applied.
+- `WORK_QUEUE_2026_09_09.md` — the 3,261 unfinished songs: what they are,
+  the two cohorts, and the work_queue table + v_work_queue_open view that now
+  flag them. **Read before touching the 3,261.**
+- `B2_INVENTORY_FINDINGS_2026_09_09.md` — full B2 inventory (255,532 objects),
+  the ^HAUS_ filter that caused the 3,261, and the 187 GB `music/` duplicate
+  tree. **Read before any B2 cleanup.**
+- `HANDOFF_2026_09_04.md` — Kyle's handoff.
+- `CORRECTIONS_RESTORE_2026_09_08.md`, `MP3_IS_THE_PLAYBACK_SOURCE.md`,
+  `AUDIO_BACKLOG_MASTER_PLAN.md`, `b2_stray_root_keys_2026_09_04.md`,
+  `dropbox_api_auth.md`
+
+### Two facts that keep getting relearned the hard way
+1. **Album digit is the LAST character of `sku_root`:**
+   1 Stratus, 2 Cumulus, 3 Cirrus, 4 Nimbus.
+2. **The player prefers the mp3** (`chosen = mp3 || wav || stems[0]`), so a
+   stubbed or missing mp3 kills playback even when the wav beside it in B2
+   is perfectly good.
