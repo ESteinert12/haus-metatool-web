@@ -88,8 +88,16 @@
       fd.append('uploadAuthToken',  uploadAuthToken)
       fd.append('b2FileName',       b2FileName)
       fd.append('mimeType',         mimeType || 'application/octet-stream')
-      // fileOrPath is a File/Blob in web mode
-      fd.append('file', fileOrPath instanceof Blob ? fileOrPath : new Blob([fileOrPath]))
+      // fileOrPath is EITHER a File/Blob (drag-and-drop upload) OR an absolute
+      // path string (intake, which knows where the file already is on disk).
+      // `new Blob([aString])` wraps the PATH TEXT as the payload, so every B2
+      // object uploaded from intake was ~130 bytes of file path instead of audio.
+      // A path is sent as a path; the server reads it from disk.
+      if (typeof fileOrPath === 'string') {
+        fd.append('filePath', fileOrPath)
+      } else {
+        fd.append('file', fileOrPath instanceof Blob ? fileOrPath : new Blob([fileOrPath]))
+      }
       const r = await fetch('/api/b2/upload-file', { method: 'POST', body: fd, credentials: 'include' })
       return r.json()
     }

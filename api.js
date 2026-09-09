@@ -1,9 +1,21 @@
-// server.js — HAUS Workspace web server
-// Run with: node server.js
-// Then open http://localhost:3001 in any browser on the network
+// api.js — HAUS Workspace web server (the entrypoint; see package.json main/start)
+// Run with: node api.js
+// Then open http://localhost:9999 (or the Cloudflare tunnel, app.hausmusicplayer.com)
 
-process.on('uncaughtException',  e => console.error('💥 uncaughtException:', e.message, e.stack))
-process.on('unhandledRejection', e => console.error('💥 unhandledRejection:', e))
+// Exit on an uncaught exception rather than logging and carrying on. A failed
+// listen() (EADDRINUSE, when a second instance starts) used to be logged and then
+// IGNORED: the process kept running, connected to Postgres, and started a SECOND
+// staging watcher on the same Dropbox folder, so every drop was processed twice.
+// A process that cannot serve should die so it is visibly gone.
+process.on('uncaughtException', e => {
+  console.error('uncaughtException:', e.message, e.stack)
+  process.exit(1)
+})
+// Rejections stay non-fatal - one failed query should not kill the server - but
+// they are logged with a stack so they are traceable.
+process.on('unhandledRejection', e => {
+  console.error('unhandledRejection:', e && e.stack ? e.stack : e)
+})
 
 require('dotenv').config()
 const express    = require('express')
@@ -17,7 +29,6 @@ const http       = require('http')
 const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
-const IntakeIntegration = require('./intake-integration.js')
 
 const app    = express()
 const PORT   = process.env.PORT || 9999 
@@ -26,19 +37,18 @@ const upload = multer({ dest: os.tmpdir() })
 // ─── Middleware ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
-// ✅ SECURITY: Load session secret from environment
-const sessionSecret = process.env.SESSION_SECRET
-if (!sessionSecret) {
-  console.error('❌ FATAL: SESSION_SECRET environment variable not set!')
-  console.error('Generate one: export SESSION_SECRET=$(openssl rand -base64 32)')
-  process.exit(1)
+
+// ✅ SECURITY: Load session secret from environment variable
+const sessionSecret = process.env.SESSION_SECRET || 'haus-workspace-secret-2024'
+if (!process.env.SESSION_SECRET) {
+  console.warn('⚠️  WARNING: SESSION_SECRET not set; using fallback. Set SESSION_SECRET env var for production.')
 }
 
 app.use(session({
   secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000 } // 7 days
+  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: true, secure: false } // httpOnly prevents JS access; set secure:true if HTTPS
 }))
 
 // Disable caching for all files
@@ -66,13 +76,20 @@ app.get('/haus-api.js', (req, res) => {
 // Serve static files (index.html, assets, etc.)
 app.use(express.static(__dirname))
 
-// Auth guard — pg/connect, pg/status, and auth/login are public (needed before login)
-const PUBLIC_ROUTES = ['/auth/login', '/pg/connect', '/pg/status', '/pg/query',
+// Auth guard — only these routes are public; everything else requires session authentication
+const PUBLIC_ROUTES = [
+  // Auth (needed before login)
+  '/auth/login', '/pg/connect', '/pg/status',
+  // Config (safe, no credentials)
   '/cfg/server-paths',
+  // File ops (needed for file browser before login) — TODO: implement path validation
   '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
   '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
+  // Shell ops (safe ones only)
   '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
-  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/full-audit', '/b2/batch-upload-shipping', '/b2/recovery-from-dropbox', '/b2/start-recovery', '/b2/list-buckets', '/b2/get-song-lots']
+  // B2 (mostly audit/recovery operations)
+  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots'
+]
 app.use('/api', (req, res, next) => {
   if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
@@ -90,7 +107,7 @@ function _b2Request(opts) {
     const bodyData = isBuffer ? body : (body ? JSON.stringify(body) : null)
     const hdrs = { ...headers }
     if (bodyData) hdrs['Content-Length'] = Buffer.byteLength(bodyData)
-    const req = https.request({ hostname, path: urlPath, method, headers: hdrs, rejectUnauthorized: false }, res => {
+    const req = https.request({ hostname, path: urlPath, method, headers: hdrs, rejectUnauthorized: true }, res => {
       if (isBuffer) {
         const chunks = []
         res.on('data', c => chunks.push(c))
@@ -108,6 +125,41 @@ function _b2Request(opts) {
     if (bodyData) req.write(bodyData)
     req.end()
   })
+}
+
+// ─── Dropbox auth ───────────────────────────────────────────────────────────
+// Dropbox stopped issuing long-lived access tokens in 2021. A token generated in
+// the app console expires in ~4 HOURS, which is almost certainly why earlier
+// recovery runs stopped part-way and looked like a mysterious download failure.
+// Prefer app key + secret + refresh token (a refresh token does not expire) and
+// mint a short-lived access token on demand, cached until a minute before it
+// lapses. A long run therefore re-mints mid-flight instead of dying.
+// Falls back to a static DROPBOX_OLD_TOKEN if that is all that is configured.
+let _dbxTok = { value: null, expires: 0 }
+async function _dropboxToken() {
+  const { DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, DROPBOX_OLD_TOKEN } = process.env
+  if (!DROPBOX_APP_KEY || !DROPBOX_APP_SECRET || !DROPBOX_REFRESH_TOKEN) {
+    if (DROPBOX_OLD_TOKEN) return DROPBOX_OLD_TOKEN   // legacy static token, expires
+    throw new Error('Dropbox not configured — set DROPBOX_APP_KEY, DROPBOX_APP_SECRET and DROPBOX_REFRESH_TOKEN in .env')
+  }
+  if (_dbxTok.value && Date.now() < _dbxTok.expires) return _dbxTok.value
+  const form = new URLSearchParams({ grant_type: 'refresh_token', refresh_token: DROPBOX_REFRESH_TOKEN }).toString()
+  const r = await _b2Request({
+    method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/oauth2/token',
+    headers: {
+      'Authorization': 'Basic ' + Buffer.from(`${DROPBOX_APP_KEY}:${DROPBOX_APP_SECRET}`).toString('base64'),
+      'Content-Type': 'application/x-www-form-urlencoded'
+    },
+    body: Buffer.from(form), isBuffer: true
+  })
+  let parsed
+  try { parsed = JSON.parse(r.body.toString()) } catch { parsed = {} }
+  if (r.status !== 200 || !parsed.access_token) {
+    throw new Error(`Dropbox token refresh failed (HTTP ${r.status}): ${parsed.error_description || parsed.error || r.body.toString().slice(0, 200)}`)
+  }
+  _dbxTok = { value: parsed.access_token, expires: Date.now() + ((parsed.expires_in || 14400) - 60) * 1000 }
+  console.log(`[dropbox] minted access token, valid ~${Math.round((parsed.expires_in || 14400) / 60)} min`)
+  return _dbxTok.value
 }
 
 function fmHttp(opts) {
@@ -142,7 +194,6 @@ function fmHttp(opts) {
 // ─── State ────────────────────────────────────────────────────────────────
 let pgPool    = null
 let b2Auth    = null
-let intakeIntegration = null
 const fmSessions = {}
 
 const DEFAULT_NEON = 'postgresql://neondb_owner:npg_VWPl7U3kYwJb@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
@@ -191,6 +242,26 @@ async function runServerMigrations(pool) {
     )
   `)
   console.log('✅ staged_files ready')
+
+  // ksl had no constraints at all, so the INSERT ... ON CONFLICT (ksl_name) in
+  // addIntakeTagNew failed every time -- new KSL tags appeared in the dropdown
+  // for the session and were never persisted. rmo already had UNIQUE(rmo_name),
+  // which is why that half worked. Applied by hand 2026-09-03 (2840 rows, no
+  // duplicates); guarded here so a fresh database gets it too.
+  try {
+    await pool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM pg_constraint
+          WHERE conrelid = 'ksl'::regclass AND conname = 'ksl_ksl_name_key'
+        ) THEN
+          ALTER TABLE ksl ADD CONSTRAINT ksl_ksl_name_key UNIQUE (ksl_name);
+        END IF;
+      END $$;
+    `)
+    console.log('✅ ksl unique constraint ready')
+  } catch (e) { console.warn('[schema] ksl unique constraint:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -199,72 +270,58 @@ async function runServerMigrations(pool) {
 
 // Auto-connect to Neon on startup — tries saved config first, falls back to default
 ;(async () => {
-  let connStr = DEFAULT_NEON
-  const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-  if (fs.existsSync(cfgPath)) {
-    const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-    if (cfg.pgConn) connStr = cfg.pgConn
-  }
+  try {
+    let connStr = DEFAULT_NEON
+    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+    if (fs.existsSync(cfgPath)) {
+      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+      if (cfg.pgConn) connStr = cfg.pgConn
+    }
 
-  // Retry logic for initial connection (Neon can reset on cold start)
-  for (let attempt = 1; attempt <= 3; attempt++) {
-    try {
-      pgPool = new Pool({
-        connectionString: connStr,
-        ssl: { rejectUnauthorized: false },
-        keepAlive: true,
-        connectionTimeoutMillis: 30000,
-        idleTimeoutMillis: 0,
-        socket: { timeout: 30000 }
-      })
-      pgPool.on('error', (err, client) => {
-        console.error('[pool] error:', err.message)
-      })
-      pgPool.on('connect', () => {
-        console.log('[pool] client connected')
-      })
-      pgPool.on('remove', () => {
-        console.log('[pool] client removed')
-      })
-      await pgPool.query('SELECT 1')
-      console.log('✅ PostgreSQL connected')
-      // Keep-alive: Neon pooler drops idle connections after ~4 min, ping every 3 min
-      // Only start interval on first connection, not on reconnects
-      if (!global._pgKeepAliveInterval) {
-        global._pgKeepAliveInterval = setInterval(() => {
-          if (pgPool) pgPool.query('SELECT 1').catch(e => console.warn('[keep-alive] ping failed:', e.message))
-        }, 180000)
-      }
-      await runServerMigrations(pgPool)
-      startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
-
-      // Initialize intake integration system
+    // Retry logic for initial connection (Neon can reset on cold start)
+    for (let attempt = 1; attempt <= 3; attempt++) {
       try {
-        const cfg = {}
-        const cfgPath2 = path.join(os.homedir(), '.haus-workspace-cfg.json')
-        if (fs.existsSync(cfgPath2)) {
-          Object.assign(cfg, JSON.parse(fs.readFileSync(cfgPath2, 'utf8')))
-        }
-        intakeIntegration = new IntakeIntegration(pgPool, { cfg })
-        intakeIntegration.validateConfig()
-        console.log('✅ Intake integration ready')
+        pgPool = new Pool({
+          connectionString: connStr,
+          ssl: { rejectUnauthorized: false },
+          keepAlive: true,
+          connectionTimeoutMillis: 30000,
+          idleTimeoutMillis: 0,
+          socket: { timeout: 30000 }
+        })
+        pgPool.on('error', (err, client) => {
+          console.error('[pool] error:', err.message)
+        })
+        pgPool.on('connect', () => {
+          console.log('[pool] client connected')
+        })
+        pgPool.on('remove', () => {
+          console.log('[pool] client removed')
+        })
+        await pgPool.query('SELECT 1')
+        console.log('✅ PostgreSQL connected')
+        await runServerMigrations(pgPool)
+        await loadFolderTags()   // must precede the watcher — parseFolderDrop reads FOLDER_TAGS
+        startStagingWatcher(pgPool).catch(e => console.warn('Watcher start failed:', e.message))
+        break  // Success, exit retry loop
       } catch (e) {
-        console.warn('⚠ Intake integration setup failed:', e.message)
-      }
-
-      break  // Success, exit retry loop
-    } catch (e) {
-      console.log(`⚠ PG auto-connect attempt ${attempt}/3 failed:`, e.message)
-      pgPool = null
-      if (attempt < 3) {
-        const delay = 2000 * attempt  // 2s, 4s, 6s
-        console.log(`  Retrying in ${delay}ms…`)
-        await new Promise(resolve => setTimeout(resolve, delay))
+        console.log(`⚠ PG auto-connect attempt ${attempt}/3 failed:`, e.message)
+        if (pgPool) {
+          pgPool.end().catch(() => {})
+          pgPool = null
+        }
+        if (attempt < 3) {
+          const delay = 2000 * attempt  // 2s, 4s, 6s
+          console.log(`  Retrying in ${delay}ms…`)
+          await new Promise(resolve => setTimeout(resolve, delay))
+        }
       }
     }
-  }
-  if (!pgPool) {
-    console.log('⚠ Could not connect to database. Use manual /api/pg/connect to retry.')
+    if (!pgPool) {
+      console.log('⚠ Could not connect to database. Use manual /api/pg/connect to retry.')
+    }
+  } catch (e) {
+    console.error('💥 Startup auto-connect error:', e.message)
   }
 })()
 
@@ -374,9 +431,6 @@ app.post('/api/pg/query', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-
-
-
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
   try { await pgPool.query('SELECT 1'); res.json({ connected: true }) }
@@ -453,40 +507,11 @@ app.post('/api/fs/audio-status', async (req, res) => {
 
 app.post('/api/fs/count-files', (req, res) => {
   const { dirPath, ext } = req.body
-
-  // Input validation
-  if (typeof dirPath !== 'string' || typeof ext !== 'string') {
-    return res.status(400).json({ ok: false, error: 'Invalid input types' })
-  }
-  if (ext.length > 10 || ext.includes('/') || ext.includes('\\')) {
-    return res.status(400).json({ ok: false, error: 'Invalid extension' })
-  }
-
   try {
-    // ✅ Use Node.js fs instead of shell commands
-    let count = 0
-    const walkDir = (dir) => {
-      try {
-        const files = fs.readdirSync(dir)
-        for (const file of files) {
-          const fullPath = require('path').join(dir, file)
-          const stat = fs.statSync(fullPath)
-          if (stat.isDirectory()) {
-            walkDir(fullPath)
-          } else if (!ext || file.endsWith(`.${ext}`)) {
-            count++
-          }
-        }
-      } catch (e) {
-        // Skip directories we can't read
-        console.warn(`[count-files] skipped: ${dir}`, e.message)
-      }
-    }
-    walkDir(dirPath)
-    res.json({ ok: true, count })
-  } catch (e) {
-    res.status(400).json({ ok: false, error: e.message })
-  }
+    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
+    const result = execSync(cmd).toString().trim()
+    res.json(parseInt(result, 10))
+  } catch { res.json(0) }
 })
 
 app.post('/api/fs/path-exists', (req, res) => {
@@ -672,8 +697,13 @@ app.post('/api/lot/download-avid-wavs', async (req, res) => {
 })
 
 // ─── Shell routes ──────────────────────────────────────────────────────────
+// ⚠️ SECURITY: /api/shell/exec moved to authenticated-only (removed from PUBLIC_ROUTES)
+// Arbitrary shell execution is dangerous, even for authenticated users
 app.post('/api/shell/exec', (req, res) => {
   const { cmd, cwd } = req.body
+  // Now requires authentication; user must be logged in
+  console.warn(`[security] shell/exec called by ${req.session?.user?.username || 'unknown'}: ${cmd.substring(0, 50)}...`)
+  // TODO: Whitelist safe commands, don't allow arbitrary exec
   exec(cmd, { cwd: cwd || os.homedir(), maxBuffer: 1024 * 1024 * 20 }, (err, stdout, stderr) => {
     res.json({ err: err?.message || null, stdout: stdout || '', stderr: stderr || '' })
   })
@@ -689,39 +719,15 @@ app.get('/api/shell/app-path', (req, res) => {
 
 app.post('/api/shell/open-external', (req, res) => {
   const { url } = req.body
-
-  // Validate URL format
-  try {
-    new URL(url)
-  } catch (e) {
-    return res.status(400).json({ ok: false, error: 'Invalid URL format' })
-  }
-
-  // ✅ Use execFile instead of exec — no shell interpretation
-  const { execFile } = require('child_process')
-  execFile('open', [url], { stdio: 'pipe' }, (err) => {
-    if (err) res.json({ ok: false, error: err.message })
-    else res.json({ ok: true })
-  })
+  // On macOS server, open in default browser
+  exec(`open "${url}"`)
+  res.json({ ok: true })
 })
 
 app.post('/api/shell/show-in-finder', (req, res) => {
   const { filePath } = req.body
-
-  // Validate path is within home directory
-  const homeDir = require('os').homedir()
-  const resolvedPath = require('path').resolve(filePath)
-
-  if (!resolvedPath.startsWith(homeDir)) {
-    return res.status(403).json({ ok: false, error: 'Path outside home directory' })
-  }
-
-  // ✅ Use execFile instead of exec — no shell interpretation
-  const { execFile } = require('child_process')
-  execFile('open', ['-R', resolvedPath], { stdio: 'pipe' }, (err) => {
-    if (err) res.json({ ok: false, error: err.message })
-    else res.json({ ok: true })
-  })
+  exec(`open -R "${filePath}"`)
+  res.json({ ok: true })
 })
 
 // Folder picker — returns null in web mode (UI falls back to text input)
@@ -734,13 +740,11 @@ app.get('/api/shell/show-folder-picker', (req, res) => {
 const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
 
 app.get('/api/cfg/server-paths', (req, res) => {
-  console.log('[/api/cfg/server-paths] GET request received')
   const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
   let cfg = {}
   try { cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8')) } catch {}
   const paths = {}
   for (const k of SERVER_PATH_KEYS) if (cfg[k]) paths[k] = cfg[k]
-  console.log('[/api/cfg/server-paths] Returning:', Object.keys(paths))
   res.json(paths)
 })
 
@@ -824,10 +828,24 @@ app.get('/api/audio/stream', async (req, res) => {
   }
 })
 
-// DELETED: /api/applescript endpoint
-// REASON: Code injection vulnerability — no safe way to accept user-supplied AppleScript
-// AppleScript has full access to the macOS system and cannot be safely sandboxed
-// If needed in future, implement whitelist of safe operations only
+// ─── AppleScript route ─────────────────────────────────────────────────────
+// ⚠️ SECURITY: /api/applescript moved to authenticated-only (removed from PUBLIC_ROUTES)
+// Arbitrary AppleScript execution grants control over macOS — Daylite integration, etc.
+app.post('/api/applescript', (req, res) => {
+  const { script } = req.body
+  // Now requires authentication; user must be logged in
+  console.warn(`[security] applescript called by ${req.session?.user?.username || 'unknown'}: ${script.substring(0, 50)}...`)
+  // TODO: Whitelist Daylite commands only, don't allow arbitrary AppleScript
+  const tmpFile = path.join(os.tmpdir(), `haus_as_${Date.now()}.applescript`)
+  try {
+    fs.writeFileSync(tmpFile, script, 'utf8')
+    exec(`osascript "${tmpFile}"`, { timeout: 15000 }, (err, stdout, stderr) => {
+      try { fs.unlinkSync(tmpFile) } catch {}
+      if (err) res.json({ error: err.message, stderr: stderr || '' })
+      else     res.json({ result: stdout.trim() })
+    })
+  } catch (e) { res.json({ error: e.message }) }
+})
 
 // ─── FileMaker routes ──────────────────────────────────────────────────────
 app.post('/api/fm/login', async (req, res) => {
@@ -948,18 +966,7 @@ app.get('/api/b2/stream', async (req, res) => {
       const bodyStr = buf.toString('utf8').trim()
       if (bodyStr.startsWith('/')) {
         console.log(`[b2/stream] stub detected — serving local file: ${bodyStr}`)
-
-        // ✅ SECURITY: Validate path is within allowed directories
-        const ALLOWED_BASE = '/Users/HAUS/Library/CloudStorage/Dropbox'
-        const resolvedPath = path.resolve(bodyStr)
-        const resolvedBase = path.resolve(ALLOWED_BASE)
-
-        if (!resolvedPath.startsWith(resolvedBase)) {
-          console.error(`[b2/stream] BLOCKED: Path outside allowed directory: ${bodyStr}`)
-          return res.status(403).json({ error: 'Path outside allowed directory' })
-        }
-
-        let localPath = resolvedPath
+        let localPath = bodyStr
 
         // If exact file doesn't exist, search for alternatives (FULL > ALT > STING > BUMPER)
         if (!fs.existsSync(localPath)) {
@@ -1129,7 +1136,10 @@ app.get('/api/b2/list-buckets', async (req, res) => {
   try {
     const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
     const result  = await _b2Request({
-      method: 'GET', hostname: apiHost, urlPath: '/b2api/v3/b2_list_buckets',
+      // b2_list_buckets REQUIRES accountId in v3. Without it B2 returns an error,
+      // so this endpoint had never once returned a bucket list.
+      method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
       headers: { 'Authorization': b2Auth.authorizationToken }
     })
     if (result.status === 200) return res.json({ ok: true, buckets: result.body.buckets || [] })
@@ -1540,8 +1550,9 @@ app.get('/api/b2/batch-upload-shipping', async (req, res) => {
 app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
 
-  const dropboxToken = process.env.DROPBOX_OLD_TOKEN
-  if (!dropboxToken) return res.json({ ok: false, error: 'DROPBOX_OLD_TOKEN not set' })
+  let dropboxToken
+  try { dropboxToken = await _dropboxToken() }
+  catch (e) { return res.json({ ok: false, error: e.message }) }
 
   console.log('[b2/recovery] Starting WAV file recovery from old Dropbox (composer-by-composer)...')
 
@@ -1645,7 +1656,7 @@ app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
       foundInDropbox: foundCount,
       skusToRecover: Object.values(composerSkus).reduce((sum, set) => sum + set.size, 0),
       message: `Ready to recover ${Object.values(composerSkus).reduce((sum, set) => sum + set.size, 0)} WAV files from ${foundCount} composer folders`,
-      nextStep: 'Call /api/b2/start-recovery to begin downloading and uploading files (runs in background)'
+      nextStep: 'Work list only. Use /api/b2/recover-broken (dry run by default) to move audio.'
     })
 
   } catch (e) {
@@ -1655,187 +1666,86 @@ app.get('/api/b2/recovery-from-dropbox', async (req, res) => {
 })
 
 // START RECOVERY: Download from old Dropbox, upload to B2 (runs in background)
-app.get('/api/b2/start-recovery', async (req, res) => {
-  if (!b2Auth) return res.json({ ok: false, error: 'B2 not connected' })
+// /api/b2/start-recovery was REMOVED 2026-09-04. It uploaded to
+//   `${collection}/${composer}/${filename}` -- missing the SKU/title folder --
+// never updated mix_stems, sent no X-Bz-Content-Sha1, passed the key raw in
+// X-Bz-File-Name (breaks on spaces/apostrophes), and took its work list from a
+// CSV frozen 2026-08-10. Use /api/b2/recover-broken. Git history has the old code.
 
-  const dropboxToken = process.env.DROPBOX_OLD_TOKEN
-  if (!dropboxToken) return res.json({ ok: false, error: 'DROPBOX_OLD_TOKEN not set' })
+// ─── B2 Missing Files Checker API ──────────────────────────────────────────
+app.get('/api/b2/inventory', (req, res) => {
+  try {
+    const fs = require('fs')
+    const path = require('path')
 
-  // Return immediately - recovery runs in background
-  res.json({ ok: true, status: 'recovery_started', message: 'Download/upload started. Check server logs for progress.' })
-
-  // Run recovery in background (no await)
-  ;(async () => {
-    console.log('\n' + '='.repeat(70))
-    console.log('[RECOVERY] WAV File Recovery - Download from Old Dropbox, Upload to B2')
-    console.log('='.repeat(70))
-
-    try {
-      const tmpDir = path.join(os.tmpdir(), 'haus-recovery')
-      if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true })
-
-      const archiveCollections = ['1. ARCHIVE_Stratus', '2. ARCHIVE_Cumulus', '3. ARCHIVE_Cirrus', '4. ARCHIVE_Nimbus']
-      let uploadedCount = 0
-      let errorCount = 0
-
-      for (const collection of archiveCollections) {
-        console.log(`\n[RECOVERY] Processing ${collection}...`)
-
+    // Try multiple possible locations for the inventory file
+    const possiblePaths = [
+      path.join(__dirname, 'b2-all-collections-inventory-2026-08-25T08-27-53.json'),
+      path.join(__dirname, 'b2-all-collections-inventory-2026-08-25T08-27-53.json'),
+      // Fallback to any b2-all-collections-inventory file
+      ...(() => {
         try {
-          // List composer folders
-          const listRes = await _b2Request({
-            method: 'POST',
-            hostname: 'api.dropboxapi.com',
-            urlPath: '/2/files/list_folder',
-            headers: {
-              'Authorization': `Bearer ${dropboxToken}`,
-              'Content-Type': 'application/json'
-            },
-            body: { path: `/${collection}` }
-          })
+          const files = fs.readdirSync(__dirname)
+            .filter(f => f.startsWith('b2-all-collections-inventory') && f.endsWith('.json'))
+            .sort()
+            .reverse()
+            .map(f => path.join(__dirname, f))
+          return files
+        } catch { return [] }
+      })()
+    ]
 
-          if (listRes.status !== 200 || !listRes.body.entries) {
-            console.log(`[RECOVERY] Failed to list ${collection}`)
-            continue
-          }
+    let inventoryFile = null
+    for (const filePath of possiblePaths) {
+      try {
+        if (fs.existsSync(filePath)) {
+          inventoryFile = filePath
+          break
+        }
+      } catch { }
+    }
 
-          const composerFolders = listRes.body.entries.filter(e => e['.tag'] === 'folder')
-          console.log(`[RECOVERY] Found ${composerFolders.length} composer folders`)
+    if (!inventoryFile) {
+      throw new Error(`No inventory file found. Checked: ${possiblePaths.join(', ')}`)
+    }
 
-          // Process each composer
-          for (const composer of composerFolders) {
-            const composerPath = `/${collection}/${composer.name}`
+    console.log(`[B2Inventory] Loading from ${inventoryFile}`)
+    const fileContent = fs.readFileSync(inventoryFile, 'utf8')
+    const data = JSON.parse(fileContent)
 
-            try {
-              // List files in composer folder
-              const filesRes = await _b2Request({
-                method: 'POST',
-                hostname: 'api.dropboxapi.com',
-                urlPath: '/2/files/list_folder',
-                headers: {
-                  'Authorization': `Bearer ${dropboxToken}`,
-                  'Content-Type': 'application/json'
-                },
-                body: { path: composerPath }
-              })
+    // Validate structure
+    if (!data.collections || !Array.isArray(data.collections)) {
+      throw new Error(`Invalid JSON structure: collections is not an array`)
+    }
 
-              if (filesRes.status !== 200 || !filesRes.body.entries) continue
+    // Extract just the filenames for matching
+    const filenames = []
+    for (const collection of data.collections || []) {
+      for (const folder of collection.folders || []) {
+        // Add audio files
+        for (const audio of folder.audioFiles || []) {
+          filenames.push(audio.name)
+        }
 
-              // Find WAV files in subfolders
-              const wavFiles = []
-              for (const entry of filesRes.body.entries) {
-                if (entry['.tag'] === 'folder') {
-                  // List files in song folder
-                  const songFilesRes = await _b2Request({
-                    method: 'POST',
-                    hostname: 'api.dropboxapi.com',
-                    urlPath: '/2/files/list_folder',
-                    headers: {
-                      'Authorization': `Bearer ${dropboxToken}`,
-                      'Content-Type': 'application/json'
-                    },
-                    body: { path: entry.path_display }
-                  })
-
-                  if (songFilesRes.status === 200 && songFilesRes.body.entries) {
-                    for (const file of songFilesRes.body.entries) {
-                      if (file.name && file.name.endsWith('.wav')) {
-                        wavFiles.push(file)
-                      }
-                    }
-                  }
-                }
-              }
-
-              if (wavFiles.length === 0) continue
-
-              console.log(`[RECOVERY]   ${composer.name}: ${wavFiles.length} WAV files`)
-
-              // Download and upload each WAV file
-              for (const wavFile of wavFiles) {
-                try {
-                  // Download from Dropbox
-                  const dlRes = await _b2Request({
-                    method: 'POST',
-                    hostname: 'content.dropboxapi.com',
-                    urlPath: '/2/files/download',
-                    headers: {
-                      'Authorization': `Bearer ${dropboxToken}`,
-                      'Dropbox-API-Arg': JSON.stringify({ path: wavFile.path_display })
-                    }
-                  })
-
-                  if (dlRes.status !== 200) {
-                    errorCount++
-                    continue
-                  }
-
-                  // Save locally
-                  const localPath = path.join(tmpDir, wavFile.name)
-                  fs.writeFileSync(localPath, dlRes.body)
-
-                  // Upload to B2
-                  const uploadUrl = `${collection}/${composer.name}/${wavFile.name}`
-
-                  const urlRes = await _b2Request({
-                    method: 'POST',
-                    hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
-                    urlPath: '/b2api/v3/b2_get_upload_url',
-                    headers: { 'Authorization': b2Auth.authorizationToken },
-                    body: { bucketId: b2Auth.allowed?.bucketId }
-                  })
-
-                  if (urlRes.status === 200) {
-                    const uploadUrlStr = urlRes.body.uploadUrl
-                    const uploadHostname = uploadUrlStr.replace(/^https?:\/\//, '').split('/')[0]
-                    const uploadPath = uploadUrlStr.replace(/^https?:\/\/[^/]+/, '')
-                    const fileData = fs.readFileSync(localPath)
-
-                    const uploadRes = await _b2Request({
-                      method: 'POST',
-                      hostname: uploadHostname,
-                      urlPath: uploadPath,
-                      headers: {
-                        'Authorization': urlRes.body.authorizationToken,
-                        'X-Bz-File-Name': uploadUrl,
-                        'X-Bz-Content-Type': 'application/octet-stream',
-                        'Content-Length': fileData.length
-                      },
-                      body: fileData,
-                      isBuffer: true
-                    })
-
-                    if (uploadRes.status === 200) {
-                      uploadedCount++
-                    } else {
-                      errorCount++
-                    }
-                  }
-
-                  // Clean up
-                  try { fs.unlinkSync(localPath) } catch (e) {}
-                } catch (e) {
-                  errorCount++
-                }
-              }
-            } catch (e) {
-              console.log(`[RECOVERY]   Error processing ${composer.name}: ${e.message}`)
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 100))
-          }
-        } catch (e) {
-          console.log(`[RECOVERY] Error with ${collection}: ${e.message}`)
+        // Add stub files too (for completeness)
+        for (const stub of folder.stubFiles || []) {
+          filenames.push(stub.name)
         }
       }
-
-      console.log('\n' + '='.repeat(70))
-      console.log(`[RECOVERY] COMPLETE: ${uploadedCount} uploaded, ${errorCount} errors`)
-      console.log('='.repeat(70) + '\n')
-    } catch (e) {
-      console.error('[RECOVERY] Fatal error:', e.message)
     }
-  })()
+
+    console.log(`[B2Inventory] Serving ${filenames.length} files from ${path.basename(inventoryFile)}`)
+
+    // Double-check response format before sending
+    if (!Array.isArray(filenames)) {
+      throw new Error(`Invalid filenames array construction`)
+    }
+
+    res.json({ filenames })
+  } catch (error) {
+    console.error('[B2Inventory] Error:', error.message)
+    res.status(500).json({ error: error.message })
+  }
 })
 
 // DATABASE AUDIT: Query mix_stems for all b2_keys and check file sizes in B2
@@ -2127,11 +2037,26 @@ app.post('/api/b2/get-upload-url', async (req, res) => {
 // Upload: browser sends file to server, server pushes to B2
 app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
   if (!b2Auth) return res.json({ ok: false, error: 'Not authorized' })
-  const { uploadUrl, uploadAuthToken, b2FileName, mimeType } = req.body
+  const { uploadUrl, uploadAuthToken, b2FileName, mimeType, filePath } = req.body
   const tempPath = req.file?.path
-  if (!tempPath) return res.json({ ok: false, error: 'No file received' })
+  // Two shapes: a multipart upload (browser drag-and-drop) leaves a temp file,
+  // or an absolute path (intake) which we read in place -- the audio is already
+  // on this machine, so there is no reason to push it through the browser.
+  let sourcePath = tempPath
+  if (!sourcePath && filePath) {
+    if (!path.isAbsolute(filePath)) return res.json({ ok: false, error: 'filePath must be absolute' })
+    if (!fs.existsSync(filePath))   return res.json({ ok: false, error: `file not found: ${filePath}` })
+    sourcePath = filePath
+  }
+  if (!sourcePath) return res.json({ ok: false, error: 'No file received' })
   try {
-    const fileBuffer = fs.readFileSync(tempPath)
+    const fileBuffer = fs.readFileSync(sourcePath)
+    // Refuse implausibly small audio. This is the check that would have caught
+    // the path-as-payload bug on the first upload instead of after the fact.
+    if (/\.(wav|mp3|aif|aiff)$/i.test(b2FileName || '') && fileBuffer.length < 1024) {
+      if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
+      return res.json({ ok: false, error: `refusing to upload ${fileBuffer.length}-byte audio file (${b2FileName}) — source looks empty or is a placeholder` })
+    }
     const sha1       = crypto.createHash('sha1').update(fileBuffer).digest('hex')
     const uploadHost = uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1')
     const uploadPath = uploadUrl.replace(/^https?:\/\/[^/]+/, '')
@@ -2145,7 +2070,7 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
         'X-Bz-Content-Sha1': sha1
       }
     })
-    try { fs.unlinkSync(tempPath) } catch {}
+    if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
     const parsed = JSON.parse(result.body.toString())
     if (result.status === 200) {
       const downloadUrl = `${b2Auth.downloadUrl}/file/${parsed.bucketName}/${parsed.fileName}`
@@ -2153,7 +2078,1209 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
     }
     res.json({ ok: false, error: parsed?.message || `HTTP ${result.status}` })
   } catch (e) {
-    try { fs.unlinkSync(tempPath) } catch {}
+    if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// --- B2 verification -------------------------------------------------------
+// Nothing here has ever checked that what mix_stems claims is in B2 actually is.
+// That is how intake could store ~130 bytes of file path instead of audio for
+// weeks unnoticed: the player streams from the LOCAL disk (audioUrl ->
+// /api/audio/stream), never from B2.
+//   ok / stub (present but <1KB) / missing (row has a key, bucket has nothing)
+app.get('/api/b2/verify', async (req, res) => {
+  if (!b2Auth)  return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  let bucketId = req.query.bucketId
+  if (!bucketId) {
+    // Resolve haus-music by name, same as the other B2 routes do, so callers
+    // do not have to go hunting for an id.
+    try {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Request({
+        method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+      // _b2Request already JSON-parses non-buffer responses; body is an object.
+      const bb = br.body
+      bucketId = (bb.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    } catch (e) { return res.json({ ok: false, error: `could not resolve bucket: ${e.message}` }) }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+  }
+  const since  = req.query.since  || null
+  const prefix = req.query.prefix || ''
+  const STUB_LIMIT = 1024
+  try {
+    // Query Postgres FIRST. Listing 250k+ B2 objects takes minutes, and running
+    // it before the query left the pg connection idle long enough to die with
+    // "Connection terminated unexpectedly" on the full-catalogue sweep.
+    const q = since
+      ? `SELECT m.sku_root, m.filename, m.b2_key, t.title
+           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
+          WHERE m.b2_key IS NOT NULL AND t.created_at >= $1`
+      : `SELECT m.sku_root, m.filename, m.b2_key, t.title
+           FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
+          WHERE m.b2_key IS NOT NULL`
+    const rows = (await pgPool.query(q, since ? [since] : [])).rows
+    // Only remember sizes for keys we actually care about -- no point holding
+    // 250k entries when we are asking about a fraction of them.
+    const wanted = new Set(rows.map(r => r.b2_key))
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const sizes = new Map()
+    let startFileName = null, pages = 0, listed = 0
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (prefix)        params.set('prefix', prefix)
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Request({
+        method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken }
+      })
+      const body = r.body   // already parsed
+      if (r.status !== 200) return res.json({ ok: false, error: body?.message || `list failed HTTP ${r.status}` })
+      for (const f of body.files || []) if (wanted.has(f.fileName)) sizes.set(f.fileName, f.contentLength)
+      listed += (body.files || []).length
+      startFileName = body.nextFileName
+      pages++
+    } while (startFileName && pages < 100)
+
+    const bad = []
+    let ok = 0, stub = 0, missing = 0
+    for (const row of rows) {
+      const size = sizes.get(row.b2_key)
+      if (size === undefined)     { missing++; bad.push({ ...row, problem: 'missing', b2_size: null }) }
+      else if (size < STUB_LIMIT) { stub++;    bad.push({ ...row, problem: 'stub',    b2_size: size }) }
+      else ok++
+    }
+
+    const report = { generated: new Date().toISOString(), bucketId, prefix, since,
+                     b2_objects_listed: listed, rows_checked: rows.length, ok, stub, missing, bad }
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-verify-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
+    } catch (e) { console.warn('[b2-verify] could not write report:', e.message) }
+
+    console.log(`[b2-verify] ${ok} ok, ${stub} stub, ${missing} missing (of ${rows.length} rows, ${listed} objects)`)
+    res.json({ ok: true, b2_objects_listed: listed, rows_checked: rows.length,
+               counts: { ok, stub, missing }, reportPath, sample: bad.slice(0, 200) })
+  } catch (e) {
+    console.error('[b2-verify] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// --- B2 repair ---------------------------------------------------------------
+// Re-uploads stems that are stubs or missing in B2, taking the bytes from the
+// local shipping copy (which is correct and correctly named). Defaults to a dry
+// run so you can see coverage before anything is written.
+//   GET /api/b2/repair?dryRun=1            what could be fixed, and what cannot
+//   GET /api/b2/repair?dryRun=0&limit=100  actually re-upload, capped
+// B2 over a long run drops connections. A single ECONNRESET during the 26-page
+// bucket listing used to abort the whole repair, discarding the work done so far.
+async function _b2Retry(opts, label = 'b2', tries = 4) {
+  let lastErr
+  for (let i = 1; i <= tries; i++) {
+    try { return await _b2Request(opts) }
+    catch (e) {
+      lastErr = e
+      console.warn(`[b2-retry] ${label} attempt ${i}/${tries} failed: ${e.message}`)
+      if (i < tries) await new Promise(r => setTimeout(r, 1000 * i))
+    }
+  }
+  throw lastErr
+}
+
+async function _b2GetUploadUrl(bucketId) {
+  const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  const r = await _b2Retry({
+    method: 'POST', hostname: apiHost, urlPath: '/b2api/v3/b2_get_upload_url',
+    headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+    body: { bucketId }
+  })
+  if (r.status !== 200) throw new Error(r.body?.message || `get_upload_url HTTP ${r.status}`)
+  return r.body
+}
+
+// The archive Dropbox mirrors the B2 bucket exactly, one level down: the bucket's
+// top-level album folder maps to a numbered ARCHIVE_ folder and everything below
+// is identical. So an archive path can be DERIVED from the b2_key rather than
+// guessed by filename -- one exact candidate per row, no ambiguity.
+// '5. DNU' is deliberately absent: Do Not Use.
+const ARCHIVE_ALBUM_DIRS = {
+  stratus: '1. ARCHIVE_Stratus',
+  cumulus: '2. ARCHIVE_Cumulus',
+  cirrus:  '3. ARCHIVE_Cirrus',
+  nimbus:  '4. ARCHIVE_Nimbus',
+}
+function _archivePathForKey(archiveRoot, b2Key) {
+  if (!archiveRoot || !b2Key) return null
+  const parts = String(b2Key).split('/')
+  if (parts.length < 2) return null
+  const dir = ARCHIVE_ALBUM_DIRS[parts[0].toLowerCase()]
+  if (!dir) return null
+  return path.join(archiveRoot, dir, ...parts.slice(1))
+}
+
+function _indexShipping(root) {
+  // filename -> [absolute paths]. Duplicates are kept so we can refuse to guess.
+  const idx = new Map()
+  const walk = dir => {
+    let entries = []
+    try { entries = fs.readdirSync(dir, { withFileTypes: true }) } catch { return }
+    for (const e of entries) {
+      const full = path.join(dir, e.name)
+      if (e.isDirectory()) walk(full)
+      else if (/\.(wav|mp3|aif|aiff)$/i.test(e.name)) {
+        if (!idx.has(e.name)) idx.set(e.name, [])
+        idx.get(e.name).push(full)
+      }
+    }
+  }
+  walk(root)
+  return idx
+}
+
+app.get('/api/b2/repair', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    // There is more than one shipping location: the live one (Downloads, chosen
+    // to avoid cloud-storage stubs) and the legacy Dropbox one still holding
+    // July's deliverables. Indexing only cfg.hausjup reported files as "no local
+    // copy" when they were sitting in the other. Index every root that exists.
+    const roots = []
+    try {
+      const c = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
+      if (c.hausjup) roots.push(c.hausjup)
+    } catch {}
+    roots.push(path.join(os.homedir(), 'Downloads', '1. ATMOS_SHIPPING'))
+    roots.push(path.join(os.homedir(), 'Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping'))
+    for (const extra of String(req.query.extraRoots || '').split(',').map(x => x.trim()).filter(Boolean)) roots.push(extra)
+    const shippingRoots = [...new Set(roots)].filter(r => { try { return fs.existsSync(r) } catch { return false } })
+    if (!shippingRoots.length) {
+      return res.json({ ok: false, error: `no shipping folder found. Tried: ${roots.join(' | ')}` })
+    }
+
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Request({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } })
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const rows = (await pgPool.query(
+      `SELECT m.mix_stem_id, m.sku_root, m.filename, m.b2_key
+         FROM mix_stems m WHERE m.b2_key IS NOT NULL`)).rows
+    const wanted = new Set(rows.map(r => r.b2_key))
+
+    const sizes = new Map()
+    let startFileName = null, pages = 0
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `list page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) if (wanted.has(f.fileName)) sizes.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 100)
+
+    const broken = rows.filter(r => {
+      const s = sizes.get(r.b2_key)
+      return s === undefined || s < STUB_LIMIT
+    })
+
+    const idx = new Map()
+    for (const root of shippingRoots) {
+      for (const [name, paths] of _indexShipping(root)) {
+        if (!idx.has(name)) idx.set(name, [])
+        idx.get(name).push(...paths)
+      }
+    }
+    const archiveRoot = req.query.archiveRoot || null
+    const repairable = [], noLocal = [], ambiguous = []
+    let fromShipping = 0, fromArchive = 0
+    for (const r of broken) {
+      const hits = idx.get(r.filename) || []
+      if (hits.length === 1) { repairable.push({ ...r, localPath: hits[0], source: 'shipping' }); fromShipping++; continue }
+      // Shipping could not place it. Try the archive, whose path is derivable.
+      const archived = _archivePathForKey(archiveRoot, r.b2_key)
+      if (archived) {
+        let exists = false
+        try { exists = fs.existsSync(archived) } catch {}
+        if (exists) { repairable.push({ ...r, localPath: archived, source: 'archive' }); fromArchive++; continue }
+      }
+      if (hits.length === 0) noLocal.push(r)
+      else                   ambiguous.push({ ...r, candidates: hits })
+    }
+
+    if (dryRun) {
+      console.log(`[b2-repair] DRY RUN — ${broken.length} broken, ${repairable.length} repairable, ${noLocal.length} no local copy, ${ambiguous.length} ambiguous`)
+      return res.json({ ok: true, dryRun: true, shippingRoots,
+        archiveRoot: archiveRoot || '(not supplied)',
+        counts: { broken: broken.length, repairable: repairable.length,
+                  fromShipping, fromArchive,
+                  noLocal: noLocal.length, ambiguous: ambiguous.length },
+        noLocalSample: noLocal.slice(0, 50), ambiguousSample: ambiguous.slice(0, 20) })
+    }
+
+    const todo = limit ? repairable.slice(0, limit) : repairable
+    let fixed = 0
+    const failures = []
+    for (const r of todo) {
+      try {
+        const buf = fs.readFileSync(r.localPath)
+        if (buf.length < STUB_LIMIT) { failures.push({ ...r, error: `local file is only ${buf.length} bytes` }); continue }
+        const up = await _b2GetUploadUrl(bucketId)
+        const sha1 = crypto.createHash('sha1').update(buf).digest('hex')
+        const mime = r.filename.endsWith('.mp3') ? 'audio/mpeg' : 'audio/wav'
+        const result = await _b2Retry({
+          method: 'POST',
+          hostname: up.uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1'),
+          urlPath: up.uploadUrl.replace(/^https?:\/\/[^/]+/, ''),
+          isBuffer: true, body: buf,
+          headers: { 'Authorization': up.authorizationToken,
+                     'X-Bz-File-Name': encodeURIComponent(r.b2_key).replace(/%2F/g, '/'),
+                     'Content-Type': mime, 'X-Bz-Content-Sha1': sha1 }
+        }, r.filename)
+        const parsed = JSON.parse(result.body.toString())
+        if (result.status !== 200) { failures.push({ ...r, error: parsed?.message || `HTTP ${result.status}` }); continue }
+        if (parsed.contentLength !== buf.length) {
+          failures.push({ ...r, error: `B2 stored ${parsed.contentLength}, expected ${buf.length}` }); continue
+        }
+        fixed++
+        if (fixed % 25 === 0) console.log(`[b2-repair] ${fixed}/${todo.length}`)
+      } catch (e) { failures.push({ ...r, error: e.message }) }
+    }
+    console.log(`[b2-repair] done — ${fixed} re-uploaded, ${failures.length} failed`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, fixed,
+               failed: failures.length, remaining: repairable.length - todo.length,
+               noLocal: noLocal.length, failures: failures.slice(0, 50) })
+  } catch (e) {
+    console.error('[b2-repair] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// --- B2 bucket scan ----------------------------------------------------------
+// /api/b2/verify is DATABASE-driven: it walks mix_stems rows that carry a
+// b2_key and asks whether the object is good. A stub sitting in B2 that NO row
+// points at is invisible to it. The 2026-08-12 audit counted 30,703 stubs
+// across four collections while the DB-driven sweep found 2,016 -- that gap is
+// the blind spot, not good news.
+//
+// This scans the BUCKET itself: every object, sized, grouped by collection,
+// then cross-referenced against mix_stems to separate "known to the catalogue"
+// from orphans.
+//   GET /api/b2/scan
+app.get('/api/b2/scan', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  const STUB_LIMIT = parseInt(req.query.stubLimit || '1024')
+  try {
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const byCollection = new Map()   // collection -> { total, stub, bytes }
+    const stubKeys = []
+    let total = 0, stubs = 0, pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `scan page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        const coll = (f.fileName.split('/')[0] || '(root)').toLowerCase()
+        if (!byCollection.has(coll)) byCollection.set(coll, { total: 0, stub: 0, bytes: 0 })
+        const c = byCollection.get(coll)
+        c.total++; c.bytes += f.contentLength; total++
+        if (f.contentLength < STUB_LIMIT) { c.stub++; stubs++; stubKeys.push(f.fileName) }
+      }
+      startFileName = r.body.nextFileName
+      pages++
+      if (pages % 5 === 0) console.log(`[b2-scan] ${total} objects, ${stubs} stubs so far…`)
+    } while (startFileName && pages < 200)
+
+    // Which stubs does the catalogue actually know about?
+    let known = 0, orphan = 0
+    if (pgPool && stubKeys.length) {
+      try {
+        const rows = (await pgPool.query(
+          `SELECT b2_key FROM mix_stems WHERE b2_key = ANY($1::text[])`, [stubKeys])).rows
+        known = rows.length
+        orphan = stubKeys.length - known
+      } catch (e) { console.warn('[b2-scan] cross-reference failed:', e.message) }
+    }
+
+    const collections = [...byCollection.entries()]
+      .map(([name, c]) => ({ collection: name, objects: c.total, stubs: c.stub,
+                             gb: +(c.bytes / 1e9).toFixed(1) }))
+      .sort((a, b) => b.stubs - a.stubs)
+
+    const report = { generated: new Date().toISOString(), stubLimit: STUB_LIMIT,
+                     totalObjects: total, totalStubs: stubs,
+                     stubsKnownToCatalogue: known, stubsOrphaned: orphan,
+                     collections, stubKeys }
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-scan-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify(report, null, 2))
+    } catch (e) { console.warn('[b2-scan] could not write report:', e.message) }
+
+    console.log(`[b2-scan] ${total} objects, ${stubs} stubs (${known} in catalogue, ${orphan} orphaned)`)
+    res.json({ ok: true, totalObjects: total, totalStubs: stubs,
+               stubsKnownToCatalogue: known, stubsOrphaned: orphan,
+               collections, reportPath, stubSample: stubKeys.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-scan] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// --- B2 relinking ------------------------------------------------------------
+// 41,543 stems carry no b2_key, and the assumption has been that their audio
+// must be re-uploaded from the old Dropbox. But the bucket holds ~255,000
+// objects while mix_stems references only ~164,500 keys -- roughly 90,000
+// objects nothing points at. If the Stratus/Cumulus/Cirrus audio was uploaded
+// during the original migration and simply never linked back, this is a
+// matching problem, not a bandwidth problem.
+//
+// Matches an unlinked stem to an existing object ONLY when all three hold:
+//   - exactly one object in the bucket has that filename
+//   - its path contains the stem's sku_root (so same-named files across SKUs
+//     cannot cross-link)
+//   - it is >= 1KB (never link a stub)
+// Anything less certain is reported, not guessed.
+//   GET /api/b2/link?dryRun=1        coverage report, writes nothing
+//   GET /api/b2/link?dryRun=0        sets b2_key on confident matches
+app.get('/api/b2/link', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    const rows = (await pgPool.query(
+      `SELECT m.mix_stem_id, m.sku_root, m.filename
+         FROM mix_stems m WHERE m.b2_key IS NULL`)).rows
+    if (!rows.length) return res.json({ ok: true, message: 'no unlinked stems' })
+
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const wantedNames = new Set(rows.map(r => r.filename))
+    const byName = new Map()   // filename -> [{key, size}]
+    let pages = 0, startFileName = null, scanned = 0
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `link page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        scanned++
+        const base = f.fileName.split('/').pop()
+        if (!wantedNames.has(base)) continue
+        if (!byName.has(base)) byName.set(base, [])
+        byName.get(base).push({ key: f.fileName, size: f.contentLength })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const linkable = [], notFound = [], ambiguous = [], stubOnly = []
+    let tieBroken = 0
+    for (const r of rows) {
+      const cands = byName.get(r.filename) || []
+      if (!cands.length) { notFound.push(r); continue }
+      // the object's path must name this SKU, or it belongs to a different track
+      const sameSku = cands.filter(c => c.key.includes('/' + r.sku_root))
+      if (!sameSku.length)    { notFound.push(r); continue }
+      const real = sameSku.filter(c => c.size >= STUB_LIMIT)
+      if (!real.length)       { stubOnly.push({ ...r, candidates: sameSku }); continue }
+      if (real.length > 1) {
+        // Duplicates in the bucket, from two upload passes under slightly
+        // different folder spellings -- a composer typo ("Ethan Meixsell" vs
+        // "Ethan Miexsell"), a longer form of a name, or a "_Snapped" suffix.
+        // When every candidate is the SAME BYTE SIZE they are the same audio and
+        // the choice is arbitrary: take the shortest key, then lexicographically,
+        // so the result is deterministic and re-runnable. Candidates that differ
+        // in size might be different takes -- never guess at those.
+        const sizes = new Set(real.map(c => c.size))
+        if (sizes.size === 1) {
+          const pick = real.slice().sort((a, b) => a.key.length - b.key.length || a.key.localeCompare(b.key))[0]
+          linkable.push({ ...r, b2_key: pick.key, size: pick.size, tieBreak: true })
+          tieBroken++
+          continue
+        }
+        ambiguous.push({ ...r, candidates: real }); continue
+      }
+      linkable.push({ ...r, b2_key: real[0].key, size: real[0].size })
+    }
+
+    const counts = { unlinked: rows.length, linkable: linkable.length,
+                     ofWhichTieBroken: tieBroken,
+                     notFound: notFound.length, ambiguous: ambiguous.length,
+                     stubOnly: stubOnly.length }
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-link-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        objectsScanned: scanned, counts, linkable, notFound, ambiguous, stubOnly }, null, 2))
+    } catch (e) { console.warn('[b2-link] could not write report:', e.message) }
+
+    if (dryRun) {
+      console.log(`[b2-link] DRY RUN — ${counts.linkable}/${counts.unlinked} linkable, ${counts.notFound} not in bucket, ${counts.ambiguous} ambiguous, ${counts.stubOnly} stub-only`)
+      return res.json({ ok: true, dryRun: true, objectsScanned: scanned, counts, reportPath,
+                        linkableSample: linkable.slice(0, 20), notFoundSample: notFound.slice(0, 20) })
+    }
+
+    const todo = limit ? linkable.slice(0, limit) : linkable
+    // One UPDATE per row meant 41,000 round trips, and Neon dropped the
+    // connection repeatedly under that load. Batched, it is ~83 statements.
+    // Rows in a failed batch keep b2_key NULL, so re-running picks them up --
+    // the guard makes this safely repeatable.
+    const CHUNK = 500
+    let updated = 0, batchFailures = 0
+    for (let i = 0; i < todo.length; i += CHUNK) {
+      const slice = todo.slice(i, i + CHUNK)
+      const ids   = slice.map(l => l.mix_stem_id)
+      const keys  = slice.map(l => l.b2_key)
+      let done = false
+      for (let attempt = 1; attempt <= 3 && !done; attempt++) {
+        try {
+          const r = await pgPool.query(
+            `UPDATE mix_stems m SET b2_key = v.key
+               FROM (SELECT unnest($1::int[]) AS id, unnest($2::text[]) AS key) v
+              WHERE m.mix_stem_id = v.id AND m.b2_key IS NULL`, [ids, keys])
+          updated += r.rowCount
+          done = true
+        } catch (e) {
+          console.warn(`[b2-link] batch ${i / CHUNK + 1} attempt ${attempt}/3 failed: ${e.message}`)
+          if (attempt < 3) await new Promise(r => setTimeout(r, 1000 * attempt))
+        }
+      }
+      if (!done) batchFailures += slice.length
+      if ((i / CHUNK) % 10 === 0) console.log(`[b2-link] ${updated}/${todo.length}`)
+    }
+    if (batchFailures) console.warn(`[b2-link] ${batchFailures} row(s) skipped after retries — re-run to pick them up`)
+    console.log(`[b2-link] done — ${updated} linked, ${linkable.length - todo.length} remaining`)
+    res.json({ ok: true, dryRun: false, counts, updated, skipped: batchFailures,
+               remaining: linkable.length - todo.length, reportPath })
+  } catch (e) {
+    console.error('[b2-link] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// --- B2 self-heal ------------------------------------------------------------
+// The archive Dropbox is cloud-only, so it cannot be read from disk. But the
+// bucket contains duplicates: the same file uploaded twice under slightly
+// different folder spellings (a composer typo, a longer form of a name, a
+// "_Snapped" suffix). The link dry run found 6,877 such pairs. So where a stub
+// has a healthy twin elsewhere in the bucket, B2 can repair itself -- a
+// server-side copy, no download, no upload, no bandwidth through the Mac.
+//
+// Same guards as the linker: the twin must carry the same sku_root in its path,
+// be at least 1KB, and be the only candidate. Never guesses.
+//   GET /api/b2/heal?dryRun=1   what could be healed from within the bucket
+//   GET /api/b2/heal?dryRun=0   perform the server-side copies
+app.get('/api/b2/heal', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    const rows = (await pgPool.query(
+      `SELECT mix_stem_id, sku_root, filename, b2_key
+         FROM mix_stems WHERE b2_key IS NOT NULL`)).rows
+
+    const byKey = new Map(), byName = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET',
+        hostname: b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, ''),
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `heal page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        byKey.set(f.fileName, { size: f.contentLength, id: f.fileId })
+        const base = f.fileName.split('/').pop()
+        if (!byName.has(base)) byName.set(base, [])
+        byName.get(base).push({ key: f.fileName, size: f.contentLength, id: f.fileId })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const healable = [], noTwin = []
+    for (const r of rows) {
+      const cur = byKey.get(r.b2_key)
+      if (cur && cur.size >= STUB_LIMIT) continue          // already fine
+      const twins = (byName.get(r.filename) || []).filter(c =>
+        c.key !== r.b2_key && c.size >= STUB_LIMIT && c.key.includes('/' + r.sku_root))
+      if (twins.length === 1) healable.push({ ...r, from: twins[0].key, fromId: twins[0].id, size: twins[0].size })
+      else if (twins.length > 1) {
+        const sizes = new Set(twins.map(t => t.size))
+        if (sizes.size === 1) {
+          const pick = twins.slice().sort((a, b) => a.key.length - b.key.length || a.key.localeCompare(b.key))[0]
+          healable.push({ ...r, from: pick.key, fromId: pick.id, size: pick.size, tieBreak: true })
+        } else noTwin.push({ ...r, problem: 'multiple twins of differing size', candidates: twins })
+      }
+      else noTwin.push({ ...r, problem: cur ? 'stub, no healthy twin' : 'missing, no twin' })
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-heal-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        counts: { broken: healable.length + noTwin.length, healable: healable.length, noTwin: noTwin.length },
+        healable, noTwin }, null, 2))
+    } catch (e) { console.warn('[b2-heal] could not write report:', e.message) }
+
+    if (dryRun) {
+      console.log(`[b2-heal] DRY RUN — ${healable.length} healable from within the bucket, ${noTwin.length} without a twin`)
+      return res.json({ ok: true, dryRun: true,
+        counts: { broken: healable.length + noTwin.length, healable: healable.length, noTwin: noTwin.length },
+        reportPath, healableSample: healable.slice(0, 20), noTwinSample: noTwin.slice(0, 20) })
+    }
+
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const todo = limit ? healable.slice(0, limit) : healable
+    let copied = 0
+    const failures = []
+    for (const h of todo) {
+      try {
+        const r = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_copy_file',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { sourceFileId: h.fromId, fileName: h.b2_key, destinationBucketId: bucketId }
+        }, h.filename)
+        if (r.status !== 200) { failures.push({ ...h, error: r.body?.message || `HTTP ${r.status}` }); continue }
+        if (r.body.contentLength !== h.size) {
+          failures.push({ ...h, error: `copy landed ${r.body.contentLength}, expected ${h.size}` }); continue
+        }
+        copied++
+        if (copied % 100 === 0) console.log(`[b2-heal] ${copied}/${todo.length}`)
+      } catch (e) { failures.push({ ...h, error: e.message }) }
+    }
+    console.log(`[b2-heal] done — ${copied} copied within B2, ${failures.length} failed`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, copied, failed: failures.length,
+               remaining: healable.length - todo.length, noTwin: noTwin.length,
+               reportPath, failures: failures.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-heal] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ─── Relocate stray bucket-root objects ──────────────────────────────────────
+// b2BackfillMigrate() (index.html) used the bare 3-char composer prefix as the
+// whole folder, so 92 rows written 24-27 Aug landed at the BUCKET ROOT:
+//   R48/R48a5744_Caught In Your Spell/HAUS_....wav
+// rather than
+//   nimbus/R48_Michael Toland_NIMBUS/R48a5744_.../HAUS_....wav
+// The source bug is fixed; this moves the objects already written that way.
+// Server-side b2_copy_file only -- nothing is downloaded or re-uploaded, and the
+// stray originals are LEFT IN PLACE (deleting them is a separate decision).
+// Dry run unless ?dryRun=0.
+const ALBUM_BY_DIGIT = { '1': 'stratus', '2': 'cumulus', '3': 'cirrus', '4': 'nimbus' }
+const COLLECTION_PREFIXES = ['nimbus/', 'stratus/', 'cirrus/', 'cumulus/', 'music/']
+
+app.get('/api/b2/relocate-strays', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let bucketId = req.query.bucketId
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    if (!bucketId) {
+      const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // 1. Rows whose key is not under a known collection prefix. Query FIRST, before
+    //    the long bucket listing, so the PG connection is not left idle (that is what
+    //    killed the first full sweep).
+    const notLike = COLLECTION_PREFIXES.map((_, i) => `b2_key NOT LIKE $${i + 1}`).join(' AND ')
+    const strays = (await pgPool.query(
+      `SELECT mix_stem_id, sku_root, filename, b2_key
+         FROM mix_stems
+        WHERE b2_key IS NOT NULL AND ${notLike}
+        ORDER BY b2_key`,
+      COLLECTION_PREFIXES.map(p => p + '%'))).rows
+
+    if (!strays.length) return res.json({ ok: true, dryRun, counts: { strays: 0 }, note: 'no stray keys found' })
+
+    // 2. Composer names, one query.
+    const prefixes = [...new Set(strays.map(r => r.sku_root.slice(0, 3).toUpperCase()))]
+    const cRows = (await pgPool.query(
+      `SELECT upper(composer_id) AS cid, full_name FROM composers WHERE upper(composer_id) = ANY($1)`,
+      [prefixes])).rows
+    const nameOf = new Map(cRows.map(r => [r.cid, r.full_name]))
+
+    // 3. Bucket inventory.
+    const byKey = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `relocate page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) byKey.set(f.fileName, { size: f.contentLength, id: f.fileId })
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    // 4. Plan. Anything unresolvable is refused, never guessed.
+    const plan = [], refused = []
+    for (const r of strays) {
+      const prefix = r.sku_root.slice(0, 3).toUpperCase()
+      const digit  = r.sku_root.slice(-1)
+      const album  = ALBUM_BY_DIGIT[digit]
+      if (!album) { refused.push({ ...r, reason: `unknown album digit '${digit}'` }); continue }
+      const fullName = nameOf.get(prefix)
+      if (!fullName) { refused.push({ ...r, reason: `no composers row for ${prefix}` }); continue }
+
+      const rest = String(r.b2_key).split('/').slice(1).join('/')
+      if (!rest) { refused.push({ ...r, reason: 'key has no path below the root segment' }); continue }
+      const newKey = `${album}/${prefix}_${fullName}_${album.toUpperCase()}/${rest}`
+      if (newKey === r.b2_key) { refused.push({ ...r, reason: 'already correct' }); continue }
+
+      const src = byKey.get(r.b2_key)
+      if (!src) { refused.push({ ...r, reason: 'stray object not present in bucket' }); continue }
+      if (src.size < STUB_LIMIT) { refused.push({ ...r, reason: `source is a ${src.size}-byte stub` }); continue }
+
+      const dst = byKey.get(newKey)
+      if (dst && dst.size === src.size) { plan.push({ ...r, newKey, size: src.size, action: 'relink' }); continue }
+      if (dst && dst.size !== src.size) {
+        refused.push({ ...r, newKey, reason: `destination exists at ${dst.size} bytes, source is ${src.size}` }); continue
+      }
+      plan.push({ ...r, newKey, srcId: src.id, size: src.size, action: 'copy' })
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-relocate-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        counts: { strays: strays.length, plan: plan.length, refused: refused.length },
+        plan, refused }, null, 2))
+    } catch (e) { console.warn('[b2-relocate] could not write report:', e.message) }
+
+    const counts = {
+      strays: strays.length,
+      copy:   plan.filter(p => p.action === 'copy').length,
+      relink: plan.filter(p => p.action === 'relink').length,
+      refused: refused.length,
+    }
+    if (dryRun) {
+      console.log(`[b2-relocate] DRY RUN - ${counts.copy} to copy, ${counts.relink} relink-only, ${counts.refused} refused`)
+      return res.json({ ok: true, dryRun: true, counts, reportPath,
+        planSample: plan.slice(0, 20), refusedSample: refused.slice(0, 20) })
+    }
+
+    // 5. Execute. Copy, verify the byte count, only then update the row.
+    const todo = limit ? plan.slice(0, limit) : plan
+    let copied = 0, relinked = 0
+    const failures = []
+    // Do every B2 copy FIRST and bank the verified successes. The DB update used to
+    // sit inside this loop, which meant the Neon connection idled through the whole
+    // bucket listing and then through every copy -- it dropped on the first UPDATE
+    // ("Connection terminated unexpectedly") and nothing was recorded. Copies are
+    // idempotent (a re-run sees them as 'relink'), so this ordering is safe.
+    const done = []
+    for (const p of todo) {
+      try {
+        if (p.action === 'copy') {
+          const r = await _b2Retry({ method: 'POST', hostname: apiHost,
+            urlPath: '/b2api/v3/b2_copy_file',
+            headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+            body: { sourceFileId: p.srcId, fileName: p.newKey, destinationBucketId: bucketId }
+          }, p.filename)
+          if (r.status !== 200) { failures.push({ ...p, error: r.body?.message || `HTTP ${r.status}` }); continue }
+          if (r.body.contentLength !== p.size) {
+            failures.push({ ...p, error: `copy landed ${r.body.contentLength}, expected ${p.size}` }); continue
+          }
+          copied++
+        } else relinked++
+        done.push(p)
+        if (done.length % 25 === 0) console.log(`[b2-relocate] ${done.length}/${todo.length} copied`)
+      } catch (e) { failures.push({ ...p, error: e.message }) }
+    }
+
+    // Record the verified moves in batches of 200 via unnest(). Retried once, because
+    // the pool's connection may well have gone stale during the copies -- the retry
+    // gets a fresh one.
+    let updated = 0
+    for (let i = 0; i < done.length; i += 200) {
+      const chunk = done.slice(i, i + 200)
+      const ids   = chunk.map(c => c.mix_stem_id)
+      const keys  = chunk.map(c => c.newKey)
+      const sql   = `UPDATE mix_stems m SET b2_key = u.k
+                       FROM (SELECT unnest($1::int[]) AS id, unnest($2::text[]) AS k) u
+                      WHERE m.mix_stem_id = u.id`
+      let ok = false
+      for (let attempt = 0; attempt < 2 && !ok; attempt++) {
+        try { const r = await pgPool.query(sql, [ids, keys]); updated += r.rowCount; ok = true }
+        catch (e) {
+          if (attempt === 0) { console.warn('[b2-relocate] update chunk failed, retrying:', e.message); await new Promise(r => setTimeout(r, 1000)) }
+          else chunk.forEach(c => failures.push({ ...c, error: 'copied to B2 but DB update failed: ' + e.message }))
+        }
+      }
+    }
+    if (updated !== done.length) {
+      console.warn(`[b2-relocate] WARNING: ${done.length} objects in place but only ${updated} rows updated -- re-run to reconcile`)
+    }
+    console.log(`[b2-relocate] done - ${copied} copied, ${relinked} relinked, ${updated} rows updated, ${failures.length} failed. Stray originals left in place.`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, copied, relinked,
+               updated, failed: failures.length, remaining: plan.length - todo.length,
+               refused: refused.length, reportPath, failures: failures.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-relocate] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// A pooled connection can go stale while a long B2 listing runs, surfacing as
+// "Connection terminated unexpectedly" on the next query. Retry once: the pool
+// hands back a fresh client on the second attempt.
+async function _pgRetry(sql, params = [], label = 'query') {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try { return await pgPool.query(sql, params) }
+    catch (e) {
+      if (attempt === 1) throw e
+      console.warn(`[pg] ${label} failed (${e.message}) — retrying with a fresh connection`)
+      await new Promise(r => setTimeout(r, 1000))
+    }
+  }
+}
+
+// ─── Refresh the stub audit from LIVE state ─────────────────────────────────
+// /api/b2/recovery-from-dropbox and /api/b2/start-recovery read their work list
+// from B2_FULL_STUB_AUDIT.csv -- a STATIC snapshot taken 2026-08-10, before the
+// recovery. It still lists 30,703 stubs / 15,009 SKUs, none of which reflects the
+// 41,327 relinked, 486 healed and 573 re-uploaded on 2026-09-03. Running the
+// recovery against it would re-fetch thousands of files that are already correct.
+//
+// This regenerates that CSV from what B2 and Postgres hold right now, in the
+// identical 6-column format, so the recovery code needs no changes.
+// Broken = the object is ABSENT from the bucket, or under 1KB (a stub).
+// The old CSV is renamed aside, never overwritten in place.
+app.get('/api/b2/stub-audit-refresh', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const write = req.query.write === '1'
+  const STUB_LIMIT = 1024
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+    const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // Bucket first; Postgres afterwards, close to the point of use.
+    const sizeOf = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `audit page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) sizeOf.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const rows = (await _pgRetry(
+      `SELECT ms.sku_root, ms.filename, ms.b2_key, t.title
+         FROM mix_stems ms
+         LEFT JOIN titles t ON t.sku_root = ms.sku_root
+        WHERE ms.b2_key IS NOT NULL`, [], 'stub audit rows')).rows
+
+    const broken = []
+    let missing = 0, stub = 0
+    for (const r of rows) {
+      const size = sizeOf.get(r.b2_key)
+      if (size === undefined) { broken.push({ ...r, size: 0, why: 'missing' }); missing++ }
+      else if (size < STUB_LIMIT) { broken.push({ ...r, size, why: 'stub' }); stub++ }
+    }
+
+    const q = v => `"${String(v == null ? '' : v).replace(/"/g, '""')}"`
+    const lines = ['Composer ID,Song Title,SKU,Collection,File Size (bytes),B2 Path']
+    for (const b of broken) {
+      const composerId = String(b.sku_root || '').match(/^[A-Za-z]\d{2}[a-z]?/i)?.[0] || ''
+      const collection = String(b.b2_key).split('/')[0].toUpperCase()
+      lines.push([q(composerId), q(b.title), q(b.sku_root), q(collection), b.size, q(b.b2_key)].join(','))
+    }
+    const csv = lines.join('\n') + '\n'
+
+    const csvPath = path.join(os.homedir(), 'Documents/Claude/Projects/ATMOSPHERE/B2_FULL_STUB_AUDIT.csv')
+    const skus = new Set(broken.map(b => b.sku_root))
+    const counts = { checked: rows.length, broken: broken.length, missing, stub,
+                     distinctSkus: skus.size, csvLines: lines.length - 1 }
+
+    if (!write) {
+      return res.json({ ok: true, dryRun: true, counts, csvPath,
+        note: 'nothing written - call again with ?write=1 to replace the CSV (old one renamed aside)',
+        sample: broken.slice(0, 10).map(b => ({ sku: b.sku_root, why: b.why, key: b.b2_key })) })
+    }
+
+    let backup = null
+    if (fs.existsSync(csvPath)) {
+      backup = csvPath.replace(/\.csv$/, `.stale-${Date.now()}.csv`)
+      fs.renameSync(csvPath, backup)
+    }
+    fs.writeFileSync(csvPath, csv)
+    console.log(`[stub-audit] wrote ${broken.length} broken rows (${skus.size} SKUs); old CSV -> ${backup}`)
+    res.json({ ok: true, dryRun: false, counts, csvPath, backup })
+  } catch (e) {
+    console.error('[stub-audit] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ─── Recover broken B2 objects from the Dropbox archive ─────────────────────
+// Replaces /api/b2/start-recovery, removed 2026-09-04. That endpoint was broken:
+// it uploaded to `${collection}/${composer}/${filename}` -- missing the SKU/title
+// folder -- never updated mix_stems, sent no X-Bz-Content-Sha1 (B2 requires it),
+// and passed the key raw in X-Bz-File-Name, which breaks on the spaces and
+// apostrophes these keys are full of. It also read a work list from a CSV frozen
+// on 2026-08-10.
+//
+// This works from live state and from ONE fact: the Dropbox archive mirrors the
+// B2 layout, so `nimbus/R48_X_NIMBUS/SKU_Title/f.wav` lives at
+// `/4. ARCHIVE_Nimbus/R48_X_NIMBUS/SKU_Title/f.wav`. Exactly one candidate per
+// row -- nothing is constructed or guessed.
+//
+// Because the file is uploaded to the b2_key the row ALREADY has, there is no
+// database write at all, and a re-run naturally skips whatever is now healthy.
+// Dry run unless ?dryRun=0.  ?limit=N to do a small batch first.
+app.get('/api/b2/recover-broken', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const STUB_LIMIT = 1024
+  try {
+    let dbxToken
+    try { dbxToken = await _dropboxToken() }
+    catch (e) { return res.json({ ok: false, error: e.message }) }
+
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+    const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // Bucket listing first, Postgres immediately before use.
+    const sizeOf = new Map()
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `recover page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) sizeOf.set(f.fileName, f.contentLength)
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    const rows = (await _pgRetry(
+      `SELECT mix_stem_id, sku_root, filename, b2_key
+         FROM mix_stems WHERE b2_key IS NOT NULL`, [], 'recover-broken rows')).rows
+
+    const work = [], unmappable = []
+    for (const r of rows) {
+      const size = sizeOf.get(r.b2_key)
+      if (size !== undefined && size >= STUB_LIMIT) continue        // healthy
+      const parts = String(r.b2_key).split('/')
+      const dir = ARCHIVE_ALBUM_DIRS[parts[0].toLowerCase()]
+      if (!dir || parts.length < 3) { unmappable.push({ ...r, reason: `no archive mapping for "${parts[0]}"` }); continue }
+      work.push({ ...r, currentSize: size === undefined ? null : size,
+                  dbxPath: '/' + dir + '/' + parts.slice(1).join('/') })
+    }
+
+    const todo = limit ? work.slice(0, limit) : work
+    const results = { present: 0, absentInDropbox: 0, tooSmallInDropbox: 0,
+                      uploaded: 0, failed: 0 }
+    const absent = [], failures = [], ready = []
+
+    for (const w of todo) {
+      // Metadata first: never download to discover a file is not there.
+      const meta = await _b2Retry({
+        method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/get_metadata',
+        headers: { 'Authorization': `Bearer ${await _dropboxToken()}`, 'Content-Type': 'application/json' },
+        body: { path: w.dbxPath }
+      }, `meta ${w.filename}`).catch(e => ({ status: 0, body: { error_summary: e.message } }))
+
+      if (meta.status !== 200) {
+        results.absentInDropbox++
+        absent.push({ sku: w.sku_root, key: w.b2_key, dbxPath: w.dbxPath,
+                      error: meta.body?.error_summary || `HTTP ${meta.status}` })
+        continue
+      }
+      const dbxSize = meta.body.size
+      if (!(dbxSize >= STUB_LIMIT)) {
+        results.tooSmallInDropbox++
+        absent.push({ sku: w.sku_root, key: w.b2_key, dbxPath: w.dbxPath, error: `archive copy is ${dbxSize} bytes` })
+        continue
+      }
+      results.present++
+      if (dryRun) { if (ready.length < 20) ready.push({ sku: w.sku_root, key: w.b2_key, dbxSize }); continue }
+
+      try {
+        const dl = await _b2Retry({
+          method: 'POST', hostname: 'content.dropboxapi.com', urlPath: '/2/files/download',
+          headers: { 'Authorization': `Bearer ${await _dropboxToken()}`,
+                     'Dropbox-API-Arg': JSON.stringify({ path: w.dbxPath }) },
+          isBuffer: true
+        }, `download ${w.filename}`)
+        if (dl.status !== 200 || !Buffer.isBuffer(dl.body) || dl.body.length !== dbxSize) {
+          results.failed++
+          failures.push({ sku: w.sku_root, key: w.b2_key,
+                          error: `download gave ${Buffer.isBuffer(dl.body) ? dl.body.length : 'non-buffer'}, expected ${dbxSize}` })
+          continue
+        }
+
+        const up = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_get_upload_url',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { bucketId } }, 'get upload url')
+        if (up.status !== 200) { results.failed++; failures.push({ sku: w.sku_root, key: w.b2_key, error: `upload url HTTP ${up.status}` }); continue }
+
+        const host = up.body.uploadUrl.replace(/^https?:\/\//, '').split('/')[0]
+        const upPath = up.body.uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+        const sha1 = crypto.createHash('sha1').update(dl.body).digest('hex')
+        // Percent-encode each segment: these keys contain spaces and apostrophes.
+        const encodedName = String(w.b2_key).split('/').map(encodeURIComponent).join('/')
+
+        const put = await _b2Retry({
+          method: 'POST', hostname: host, urlPath: upPath,
+          headers: {
+            'Authorization': up.body.authorizationToken,
+            'X-Bz-File-Name': encodedName,
+            'Content-Type': 'b2/x-auto',
+            'X-Bz-Content-Sha1': sha1,
+            'Content-Length': dl.body.length
+          },
+          body: dl.body, isBuffer: true
+        }, `upload ${w.filename}`)
+
+        const putBody = Buffer.isBuffer(put.body) ? JSON.parse(put.body.toString()) : put.body
+        if (put.status !== 200) { results.failed++; failures.push({ sku: w.sku_root, key: w.b2_key, error: putBody?.message || `upload HTTP ${put.status}` }); continue }
+        if (putBody.contentLength !== dbxSize) {
+          results.failed++
+          failures.push({ sku: w.sku_root, key: w.b2_key, error: `B2 stored ${putBody.contentLength}, expected ${dbxSize}` })
+          continue
+        }
+        results.uploaded++
+        if (results.uploaded % 25 === 0) console.log(`[recover] ${results.uploaded}/${todo.length} uploaded`)
+      } catch (e) {
+        results.failed++
+        failures.push({ sku: w.sku_root, key: w.b2_key, error: e.message })
+      }
+    }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-recover-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        dryRun, counts: { broken: work.length, attempted: todo.length, ...results,
+                          unmappable: unmappable.length },
+        absent, failures, unmappable }, null, 2))
+    } catch (e) { console.warn('[recover] could not write report:', e.message) }
+
+    console.log(`[recover] ${dryRun ? 'DRY RUN' : 'DONE'} — broken ${work.length}, in archive ${results.present}, absent ${results.absentInDropbox}, uploaded ${results.uploaded}, failed ${results.failed}`)
+    res.json({ ok: true, dryRun,
+      counts: { broken: work.length, attempted: todo.length, ...results, unmappable: unmappable.length },
+      remaining: work.length - todo.length, reportPath,
+      readySample: ready, absentSample: absent.slice(0, 10), failures: failures.slice(0, 10) })
+  } catch (e) {
+    console.error('[recover] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// Plain Dropbox directory listing, for working out the archive's real shape
+// rather than assuming it mirrors B2. ?path=/4. ARCHIVE_Nimbus  (empty = root)
+app.get('/api/dropbox/ls', async (req, res) => {
+  try {
+    const p = req.query.path === undefined ? '' : String(req.query.path)
+    const r = await _b2Retry({
+      method: 'POST', hostname: 'api.dropboxapi.com', urlPath: '/2/files/list_folder',
+      headers: { 'Authorization': `Bearer ${await _dropboxToken()}`, 'Content-Type': 'application/json' },
+      body: { path: p, limit: 200 }
+    }, `ls ${p || '/'}`)
+    if (r.status !== 200) return res.json({ ok: false, path: p, error: r.body?.error_summary || `HTTP ${r.status}` })
+    res.json({ ok: true, path: p, hasMore: r.body.has_more,
+      entries: (r.body.entries || []).map(e => ({ type: e['.tag'], name: e.name, size: e.size })) })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ─── Hide stray bucket-root objects ─────────────────────────────────────────
+// After /api/b2/relocate-strays moved the 92 objects into their proper collection
+// folders, the originals still sit at the bucket root (R48/, R67/, R82/, S20/,
+// S73/). This hides them: b2_hide_file writes a hide marker so they vanish from
+// listings and from the app, while the bytes stay recoverable. NOT a delete --
+// b2_delete_file_version is permanent and is deliberately not implemented here.
+//
+// The guard that matters: a candidate is SKIPPED if any mix_stems row still
+// references that key. "Nothing references it" has been wrong twice this week,
+// so it is checked against the database rather than assumed.
+// Dry run unless ?dryRun=0.
+app.get('/api/b2/hide-strays', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  try {
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+    let bucketId = req.query.bucketId
+    if (!bucketId) {
+      const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    }
+    if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+    // Deliberately NOT querying Postgres first. The referenced-key set is consumed
+    // while filtering, which happens AFTER a multi-minute bucket listing -- holding
+    // a result across that is what killed the connection. List first, then ask
+    // Postgres immediately before the answer is used.
+    const found = []
+    let pages = 0, startFileName = null
+    do {
+      const params = new URLSearchParams({ bucketId, maxFileCount: '10000' })
+      if (startFileName) params.set('startFileName', startFileName)
+      const r = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${params}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, `hide page ${pages + 1}`)
+      if (r.status !== 200) return res.json({ ok: false, error: r.body?.message || `list HTTP ${r.status}` })
+      for (const f of r.body.files || []) {
+        const top = String(f.fileName).split('/')[0] + '/'
+        if (COLLECTION_PREFIXES.includes(top)) continue          // in a real collection
+        if (!String(f.fileName).includes('/')) continue           // loose file at the root, leave it
+        found.push({ key: f.fileName, size: f.contentLength })
+      }
+      startFileName = r.body.nextFileName
+      pages++
+    } while (startFileName && pages < 200)
+
+    // Now — and only now — check what the catalogue still points at.
+    const referenced = new Set((await _pgRetry(
+      `SELECT DISTINCT b2_key FROM mix_stems WHERE b2_key IS NOT NULL`, [], 'hide-strays referenced keys'
+    )).rows.map(r => r.b2_key))
+    const candidates = [], stillReferenced = []
+    for (const f of found) {
+      if (referenced.has(f.key)) stillReferenced.push(f.key)
+      else candidates.push(f)
+    }
+
+    const byRoot = {}
+    let bytes = 0
+    for (const c of candidates) {
+      const root = c.key.split('/')[0]
+      byRoot[root] = (byRoot[root] || 0) + 1
+      bytes += c.size || 0
+    }
+    const counts = { candidates: candidates.length, stillReferenced: stillReferenced.length,
+                     byRoot, bytesHidden: bytes }
+
+    let reportPath = null
+    try {
+      reportPath = path.join(__dirname, `b2-hide-${Date.now()}.json`)
+      fs.writeFileSync(reportPath, JSON.stringify({ generated: new Date().toISOString(),
+        counts, candidates, stillReferenced }, null, 2))
+    } catch (e) { console.warn('[b2-hide] could not write report:', e.message) }
+
+    if (dryRun) {
+      console.log(`[b2-hide] DRY RUN — ${candidates.length} to hide, ${stillReferenced.length} skipped (still referenced)`)
+      return res.json({ ok: true, dryRun: true, counts, reportPath,
+        sample: candidates.slice(0, 20).map(c => c.key), stillReferenced: stillReferenced.slice(0, 20) })
+    }
+
+    // Refuse to run blind: if anything is still referenced, stop and report it.
+    if (stillReferenced.length) {
+      return res.json({ ok: false, error: `${stillReferenced.length} candidate keys are still referenced by mix_stems — refusing to hide anything`,
+                        stillReferenced: stillReferenced.slice(0, 20), reportPath })
+    }
+
+    const todo = limit ? candidates.slice(0, limit) : candidates
+    let hidden = 0
+    const failures = []
+    for (const c of todo) {
+      try {
+        const r = await _b2Retry({ method: 'POST', hostname: apiHost,
+          urlPath: '/b2api/v3/b2_hide_file',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+          body: { bucketId, fileName: c.key } }, c.key)
+        if (r.status !== 200) { failures.push({ ...c, error: r.body?.message || `HTTP ${r.status}` }); continue }
+        hidden++
+      } catch (e) { failures.push({ ...c, error: e.message }) }
+    }
+    console.log(`[b2-hide] done — ${hidden} hidden, ${failures.length} failed. Bytes are recoverable; nothing was deleted.`)
+    res.json({ ok: true, dryRun: false, attempted: todo.length, hidden, failed: failures.length,
+               remaining: candidates.length - todo.length, reportPath, failures: failures.slice(0, 30) })
+  } catch (e) {
+    console.error('[b2-hide] error:', e.message)
     res.json({ ok: false, error: e.message })
   }
 })
@@ -2458,7 +3585,24 @@ const IS_DROP_FOLDER = /^[A-Z]\d{2}[a-zA-Z]/i
 const AUDIO_EXT      = /\.(wav|mp3|aiff?|flac|m4a)$/i
 
 // Musical key regex — matches Ab, Bbm, C#, Dmaj, etc. (same as client-side KEY_RE)
-const KEY_RE_SERVER = /^([A-Ga-g](?:sharp|flat|##?|bb?)?m?)$/i
+// Accepts C, Cm, Csharp, Cb and the spelled forms Cmaj / Eminor / Fmin, which the
+// previous pattern missed — those segments fell through and polluted the title.
+const KEY_RE_SERVER = /^([A-Ga-g](?:sharp|flat|##?|bb?)?(?:m|min|minor|maj|major)?)$/i
+
+// Known genre/collection tags, loaded from the folder_tags table. Folder names put
+// tags on either side of the key (R48a_AGAVE FEVER_TEX_DESERT_D as well as
+// R48a_TITLE_D_HEARTLAND), so position alone cannot separate tag from title.
+let FOLDER_TAGS = new Set()
+async function loadFolderTags() {
+  if (!pgPool) return
+  try {
+    const r = await pgPool.query('SELECT tag FROM folder_tags')
+    FOLDER_TAGS = new Set(r.rows.map(x => String(x.tag).trim().toUpperCase()))
+    console.log(`[tags] loaded ${FOLDER_TAGS.size} folder tags`)
+  } catch (e) {
+    console.warn('[tags] could not load folder_tags:', e.message)
+  }
+}
 
 function parseFolderDrop(folderName) {
   // Folder name format: {ComposerID}_{TitleWords}_{Key}[_tag...]
@@ -2469,20 +3613,21 @@ function parseFolderDrop(folderName) {
   const composerID = parts[0]
   const rest       = parts.slice(1)           // everything after composerID
 
-  let keyIdx = -1
-  for (let i = rest.length - 1; i >= 0; i--) {
-    if (KEY_RE_SERVER.test(rest[i])) { keyIdx = i; break }
-  }
-
-  let key, titleParts
-  if (keyIdx >= 0) {
-    key        = rest[keyIdx]
-    titleParts = rest.slice(0, keyIdx)
-    // rest.slice(keyIdx + 1) = trailing genre tags — ignored (not part of title or key)
-  } else {
-    // No musical key found — fall back to old behaviour: last segment = key
-    key        = rest[rest.length - 1] || null
-    titleParts = rest.slice(0, rest.length - 1)
+  // Classify every segment independently instead of by position. Taking
+  // rest.slice(0, keyIdx) as the title absorbed any tag that appeared BEFORE the
+  // key, e.g. R48a_AMERICAN MADE_HEARTLAND_Bb -> "AMERICAN MADE HEARTLAND".
+  // A segment is the key if it matches KEY_RE_SERVER, a tag if it is in
+  // folder_tags, otherwise part of the title. Unknown segments fall through to
+  // the title deliberately: a visible extra word is recoverable, a silently
+  // truncated title is not.
+  let key = null
+  const titleParts = [], tagParts = []
+  for (const raw of rest) {
+    const seg = String(raw).trim()
+    if (!seg) continue
+    if (!key && KEY_RE_SERVER.test(seg)) { key = seg; continue }
+    if (FOLDER_TAGS.has(seg.toUpperCase())) { tagParts.push(seg); continue }
+    titleParts.push(seg)
   }
 
   return {
@@ -2580,7 +3725,7 @@ async function startStagingWatcher(pool) {
     persistent:      true,
     ignoreInitial:   true,   // don't re-process existing folders on startup
     depth:           2,
-    ignored:         /(^|[\/\\])(\.|Icon\r|\.dropbox)/,
+    ignored:         /(^|[\/\\])(\.|Icon\r|\.dropbox|_deleted)/,
     awaitWriteFinish: { stabilityThreshold: 3000, pollInterval: 500 },
   })
 
@@ -2591,7 +3736,26 @@ async function startStagingWatcher(pool) {
     // Determine if inside a lot subfolder
     const parent = path.dirname(dirPath)
     const lotFolder = parent !== stagingDir ? path.basename(parent) : null
-    await processDrop(pool, mm, dirPath, lotFolder)
+    // Read the live pool, never the one captured when the watcher started.
+    // reconnectPg() swaps pgPool and ends the old one 5s later, so a captured
+    // reference goes dead on the first reconnect and every drop after that
+    // fails with "Cannot use a pool after calling end on the pool" -- silently,
+    // in the addDir case, which meant new drops stopped being staged at all.
+    if (!pgPool) { console.warn('[staging] no pg pool, skipping drop:', folderName); return }
+    await processDrop(pgPool, mm, dirPath, lotFolder)
+  })
+
+  // Removal is the other half. Without this the table only ever grows and the
+  // intake sidebar accumulates every folder that has ever passed through.
+  _watcher.on('unlinkDir', async dirPath => {
+    if (dirPath === stagingDir) return
+    if (!IS_DROP_FOLDER.test(path.basename(dirPath))) return
+    if (!pgPool) return
+    try {
+      const r = await pgPool.query(
+        `UPDATE staged_files SET status='gone' WHERE filepath=$1 AND status='pending'`, [dirPath])
+      if (r.rowCount) console.log(`[staging] ${path.basename(dirPath)} left staging - row retired`)
+    } catch (e) { console.warn('[staging] unlinkDir update failed:', e.message) }
   })
 
   console.log(`👁 Staging watcher started: ${stagingDir}`)
@@ -2601,19 +3765,40 @@ async function startStagingWatcher(pool) {
 app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    // Return all files (pending, imported, etc.) so import-metadata can find them
     const r = await pgPool.query(
-      `SELECT * FROM staged_files ORDER BY arrived_at ASC`
+      `SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`
     )
-    res.json({ ok: true, files: r.rows })
+    // Reconcile against disk. The watcher is add-only (chokidar addDir), so a
+    // folder that left staging -- archived after intake, or moved by hand --
+    // leaves its row 'pending' forever and the intake sidebar keeps showing it.
+    // Anything whose filepath no longer exists is a ghost: retire it here so
+    // the list is always what is actually sitting in staging right now.
+    const live = [], ghosts = []
+    for (const row of r.rows) {
+      let exists = false
+      try { exists = !!row.filepath && fs.existsSync(row.filepath) } catch { exists = false }
+      if (exists) live.push(row); else ghosts.push(row.id)
+    }
+    if (ghosts.length) {
+      try {
+        await pgPool.query(
+          `UPDATE staged_files SET status='gone' WHERE id = ANY($1::int[])`, [ghosts])
+        console.log(`[staging] retired ${ghosts.length} stale staged_files row(s) (folder no longer on disk)`)
+      } catch (e) { console.warn('[staging] could not retire stale rows:', e.message) }
+    }
+    res.json({ ok: true, files: live, retired: ghosts.length })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
 app.delete('/api/staged-files/:id', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    await pgPool.query(`DELETE FROM staged_files WHERE id=$1`, [req.params.id])
-    res.json({ ok: true })
+    // Soft delete: mark imported rather than removing the row, so staging history
+    // survives and a failed cleanup is diagnosable. The listing endpoint filters
+    // status='pending', so the effect for the UI is identical.
+    const r = await pgPool.query(
+      `UPDATE staged_files SET status='imported' WHERE id=$1`, [req.params.id])
+    res.json({ ok: true, updated: r.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
@@ -2623,8 +3808,10 @@ app.delete('/api/staged-files/by-path', async (req, res) => {
   const { path: filePath } = req.query
   if (!filePath) return res.json({ ok: false, error: 'path required' })
   try {
-    await pgPool.query(`DELETE FROM staged_files WHERE filepath=$1`, [filePath])
-    res.json({ ok: true })
+    // Soft delete — see the :id handler above.
+    const r = await pgPool.query(
+      `UPDATE staged_files SET status='imported' WHERE filepath=$1`, [filePath])
+    res.json({ ok: true, updated: r.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
@@ -2903,7 +4090,11 @@ app.delete('/api/intake/draft/:key', (req, res) => {
 })
 
 // ─── Start ─────────────────────────────────────────────────────────────────
-app.listen(PORT, '0.0.0.0', () => {
+// Bind to loopback by default. cloudflared runs on this machine and reaches
+// the server at http://localhost:9999 (see ~/.cloudflared/config.yml), so the
+// tunnel is unaffected. Set HOST=0.0.0.0 to expose the port on the network.
+const HOST = process.env.HOST || '127.0.0.1'
+app.listen(PORT, HOST, () => {
   const ifaces = os.networkInterfaces()
   let localIP  = 'localhost'
   for (const iface of Object.values(ifaces)) {
@@ -2914,6 +4105,39 @@ app.listen(PORT, '0.0.0.0', () => {
   }
   console.log(`\n🎵 HAUS Workspace running`)
   console.log(`   Local:   http://localhost:${PORT}`)
-  console.log(`   Network: http://${localIP}:${PORT}`)
-  console.log(`\n   Share the Network URL with Kyle\n`)
+  console.log(`   Tunnel:  https://app.hausmusicplayer.com`)
+  if (HOST !== '127.0.0.1') console.log(`   Network: http://${localIP}:${PORT}  (exposed — HOST=${HOST})`)
+  console.log(`\n   Share the Tunnel URL with Kyle\n`)
+
+  // ─── Auto-authorize B2 on startup ───────────────────────────────────────
+  if (process.env.B2_APP_KEY_ID && process.env.B2_APP_KEY) {
+    (async () => {
+      try {
+        console.log('[startup] Authorizing B2...')
+        const creds = Buffer.from(`${process.env.B2_APP_KEY_ID}:${process.env.B2_APP_KEY}`).toString('base64')
+        const result = await _b2Request({
+          method: 'GET', hostname: 'api.backblazeb2.com',
+          urlPath: '/b2api/v3/b2_authorize_account',
+          headers: { 'Authorization': `Basic ${creds}` }
+        })
+        if (result.status === 200) {
+          const b = result.body
+          b2Auth = {
+            accountId:           b.accountId,
+            authorizationToken:  b.authorizationToken,
+            apiUrl:              b.apiInfo?.storageApi?.apiUrl      || b.apiUrl,
+            downloadUrl:         b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
+          }
+          console.log('[startup] ✓ B2 authorized successfully')
+          console.log(`[startup]   Download URL: ${b2Auth.downloadUrl}`)
+        } else {
+          console.error('[startup] ✗ B2 authorization failed:', result.body?.message || `HTTP ${result.status}`)
+        }
+      } catch (e) {
+        console.error('[startup] ✗ B2 authorization error:', e.message)
+      }
+    })()
+  } else {
+    console.warn('[startup] ⚠ B2 credentials not found in environment (B2_APP_KEY_ID, B2_APP_KEY)')
+  }
 })
