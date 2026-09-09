@@ -2147,6 +2147,34 @@ function pgFail(message) {
 // True when the query failed, as opposed to returning no rows.
 function pgFailed(rows) { return !!(rows && rows.error) }
 
+// Render a failed query AS a failure, instead of as "nothing found".
+//
+// pgQ() resolves to [] on every failure path — not connected, not logged in,
+// server error, retries exhausted — carrying a .error marker. So `!rows.length`
+// on its own cannot tell "nothing matched" from "the query never ran", and a
+// surface that only checks length tells the user there is no data when in fact
+// it has no idea. There are 363 pgQ call sites and, before this, 8 pgFailed
+// checks.
+//
+// Returns true when it handled the failure, so the caller reads:
+//     if (pgFailBox(el, rows, 'tasks')) return
+// `retry` is a JS expression string, matching the uiError convention.
+function pgFailBox(target, rows, what, retry) {
+  if (!pgFailed(rows)) return false
+  const el = typeof target === 'string' ? document.getElementById(target) : target
+  if (!el) return true
+  const detail = rows.error === 'not connected' ? 'Not connected to the database.'
+               : rows.error === 'not logged in' ? 'Your session has expired — sign in again.'
+               : 'The query failed.'
+  el.innerHTML = `<div style="padding:18px;text-align:center;font-size:12px;color:var(--red-text)">
+      <i class="ti ti-alert-triangle" style="font-size:18px;display:block;margin-bottom:6px"></i>
+      <div style="font-weight:600;margin-bottom:3px">Couldn't load ${esc(what || 'this')}</div>
+      <div style="color:var(--text3)">${esc(detail)}</div>
+      ${retry ? `<button class="btn" style="margin-top:9px" onclick="${esc(retry)}">Retry</button>` : ''}
+    </div>`
+  return true
+}
+
 // pgConnected means the SERVER reached Postgres — it says nothing about whether
 // this browser has a session. /api/pg/connect is public, so the app happily
 // connects while logged out and then fires authenticated queries that all 401.
@@ -3784,6 +3812,7 @@ let currentClientId = null
 async function loadClientsSection() {
   try {
     _allClients = await pgQ('SELECT * FROM clients ORDER BY name')
+    if (pgFailBox('clients-sidebar-list', _allClients, 'clients', 'loadClientsSection()')) return
     renderClientsSection()
     // Clear the detail pane until a client is selected
     const detail = document.getElementById('clients-detail')
@@ -5177,6 +5206,7 @@ async function loadDealPublishers(dealId) {
   const wrap = document.getElementById(`deal-pubs-${dealId}`)
   if (!wrap) return
   const pubs = await pgQ(`SELECT * FROM deal_publishers WHERE deal_id=$1 ORDER BY id`, [dealId])
+  if (pgFailBox(wrap, pubs, 'publishers', `loadDealPublishers(${dealId})`)) return
   if (!pubs || !pubs.length) { setHTML(wrap, '<div style="font-size:12px;color:var(--text3);padding:4px 0">No publishers added yet.</div>'); return }
   // Group by PRO for clean display
   const byPro = {}
@@ -5308,9 +5338,10 @@ async function _loadIPTeams(composerFilter, wrap) {
     LEFT JOIN composers c ON c.composer_id = t.composer_prefix
     ORDER BY c.last_name, c.first_name, t.team_id
   `)
-  if (!teamsRes) {
-    wrap.innerHTML = '<span style="color:#e05;font-size:13px">DB error or not connected — check console.</span>'; return
-  }
+  // Was `if (!teamsRes)`: dead code. pgQ() never resolves falsy — it returns []
+  // with a .error marker on failure — so this branch never ran and a failed
+  // query fell through to "No teams found".
+  if (pgFailBox(wrap, teamsRes, 'teams', '_loadIPTeams()')) return
   if (!teamsRes.length) {
     wrap.innerHTML = '<span style="color:var(--text3);font-size:13px">No teams found. Add teams via the Composers tab first.</span>'; return
   }
@@ -12991,6 +13022,7 @@ async function loadTodayPlaylists() {
     JOIN projects pr ON pr.id = p.project_id
     ORDER BY pr.name, p.name
   `)
+  if (pgFailBox(panel, rows, 'playlists', 'loadTodayPlaylists()')) return
   if (!rows || !rows.length) {
     panel.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text3)">No playlists yet</div>'
     return
@@ -13190,7 +13222,9 @@ async function showAddLotToProjectModal(projectId) {
         <input id="lot-search-input" placeholder="Search lots…" style="width:100%;height:30px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;box-sizing:border-box">
       </div>
       <div id="lot-pick-list" style="overflow-y:auto;flex:1;padding:6px 0">
-        ${(unassigned||[]).length === 0
+        ${pgFailed(unassigned)
+          ? '<div style="padding:20px;text-align:center;font-size:12px;color:var(--red-text)">Couldn\'t load lots — the query failed.</div>'
+          : (unassigned||[]).length === 0
           ? '<div style="padding:20px;text-align:center;font-size:12px;color:var(--text3)">No unassigned lots found</div>'
           : (unassigned||[]).map(l => `
             <div class="lot-pick-row" data-lotid="${l.lot_id}" data-name="${(l.lot_name||'').toLowerCase()}"
@@ -13476,6 +13510,7 @@ async function selectPlaylistTrack(idx) {
 
 async function removeFromPlaylist(skuRoot) {
   if (!currentPlaylistId) return
+  if (!(await hausConfirm(`Remove ${skuRoot} from this playlist?`, { okLabel: 'Remove' }))) return
   await pgQ('DELETE FROM playlist_tracks WHERE playlist_id=$1 AND sku_root=$2', [currentPlaylistId, skuRoot])
 
   // If we're in collection view building, refresh sidebar; otherwise navigate
@@ -13978,18 +14013,55 @@ function hausPrompt(message, cb, opts = {}) {
   input.addEventListener('keydown', e => { if(e.key==='Enter') submit(); if(e.key==='Escape') modal.remove() })
 }
 
-function hausConfirm(message, cb) {
-  const modal = document.createElement('div')
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center'
-  modal.innerHTML = `<div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;padding:20px;width:300px">
-    <div style="font-size:13px;margin-bottom:16px">${message}</div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn" onclick="this.closest('[style*=fixed]').remove()">Cancel</button>
-      <button class="btn" style="background:var(--red,#e5484d);color:#fff" id="haus-confirm-ok">Delete</button>
-    </div>
-  </div>`
-  document.body.appendChild(modal)
-  modal.querySelector('#haus-confirm-ok').addEventListener('click', () => { modal.remove(); cb() })
+// Confirmation dialog. Returns a Promise<boolean>, and still accepts the
+// callback form the three original call sites use.
+//
+// Changes from the original: the message was interpolated into innerHTML
+// unescaped (it now goes in via textContent — these strings carry playlist and
+// project names); the OK button was hardcoded to "Delete" for every prompt; and
+// there was no way to dismiss with the keyboard or by clicking the backdrop.
+//
+//   if (!(await hausConfirm('Delete this?', { okLabel: 'Delete' }))) return
+//   hausConfirm('Delete this?', () => { ... })            // legacy form
+function hausConfirm(message, optsOrCb, maybeCb) {
+  const cb   = typeof optsOrCb === 'function' ? optsOrCb : maybeCb
+  const opts = typeof optsOrCb === 'function' ? {} : (optsOrCb || {})
+  const okLabel = opts.okLabel || 'Delete'
+  const danger  = opts.danger !== false
+
+  return new Promise(resolve => {
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center'
+    modal.innerHTML = `<div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;padding:20px;width:320px">
+      <div class="hc-msg" style="font-size:13px;margin-bottom:16px;line-height:1.5;white-space:pre-wrap"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" id="haus-confirm-cancel">Cancel</button>
+        <button class="btn" id="haus-confirm-ok"${danger ? ' style="background:var(--red,#e5484d);color:#fff"' : ''}></button>
+      </div>
+    </div>`
+    modal.querySelector('.hc-msg').textContent = String(message == null ? '' : message)
+    modal.querySelector('#haus-confirm-ok').textContent = okLabel
+
+    let settled = false
+    const done = (ok) => {
+      if (settled) return
+      settled = true
+      document.removeEventListener('keydown', onKey, true)
+      modal.remove()
+      if (ok && cb) cb()
+      resolve(ok)
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); done(false) }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true) }
+    }
+    modal.querySelector('#haus-confirm-ok').addEventListener('click', () => done(true))
+    modal.querySelector('#haus-confirm-cancel').addEventListener('click', () => done(false))
+    modal.addEventListener('click', e => { if (e.target === modal) done(false) })
+    document.addEventListener('keydown', onKey, true)
+    document.body.appendChild(modal)
+    modal.querySelector('#haus-confirm-ok').focus()
+  })
 }
 
 // ─── Playlist Export ───────────────────────────────────────────────────────
@@ -14442,6 +14514,7 @@ async function loadTodos() {
     `)
 
     const container = document.getElementById('todos-container')
+    if (pgFailBox(container, todos, 'tasks', 'loadTodos()')) return
     if (!todos || todos.length === 0) {
       container.innerHTML = '<div style="font-size:12px;color:var(--text3);text-align:center;padding:20px 10px">No tasks</div>'
       return
@@ -14479,6 +14552,7 @@ async function toggleTodo(id, done) {
 }
 
 async function deleteTodo(id) {
+  if (!(await hausConfirm('Delete this task?'))) return
   await pgQ('DELETE FROM todos WHERE id=$1', [id])
   await loadTodos()
 }
