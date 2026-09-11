@@ -212,7 +212,12 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+// SECURITY 2026-09-09: this line held a live Neon password in source, and it is
+// committed to the GitHub repo -- so BOTH the current and the previous password
+// are in that history permanently. Rotate them, then keep the string in .env.
+// No fallback on purpose: a missing DATABASE_URL should fail loudly, not
+// silently connect somewhere with a credential nobody can rotate.
+const DEFAULT_NEON = process.env.DATABASE_URL || ''
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -1000,6 +1005,164 @@ app.post('/api/applescript', (req, res) => {
       else     res.json({ result: stdout.trim() })
     })
   } catch (e) { res.json({ error: e.message }) }
+})
+
+
+// GET /api/fm/import-metadata
+//   ?dryRun=1 (DEFAULT) report only | ?dryRun=0 write | ?file=fm_mmw_flat.tsv
+//
+// Recovers mmw / ksl / description from the FileMaker export. The migration
+// never carried these columns: as of 2026-09-10 only 318 of 32,738 titles had
+// an mmw, and every one of those was created by the NEW intake (June 2026
+// onward). FileMaker would not mint a SKU with an untouched field, so the data
+// exists there -- this is a RECOVERY, not a re-typing job.
+//
+// File format: one record per line, TAB separated, header row
+//   sku_root <TAB> mmw <TAB> ksl <TAB> description
+// In-field line breaks are escaped as literal \n (FileMaker uses VT 0x0B).
+//
+// NEVER OVERWRITES. Only fills a column that is currently NULL or ''. Anything
+// a person has typed since the migration stays untouched.
+// Matching is case-insensitive on sku_root: the export carries case variants
+// (R19C0011, T73A0063) that an exact match would silently drop.
+app.get('/api/fm/import-metadata', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  const dryRun = req.query.dryRun !== '0'
+  const file   = path.join(__dirname, (req.query.file || 'fm_mmw_flat.tsv').replace(/[\/\\]/g, ''))
+  try {
+    if (!fs.existsSync(file)) return res.json({ ok: false, error: `not found: ${file}` })
+    const unesc = v => String(v || '').replace(/\\n/g, '\n').replace(/\\\\/g, '\\').trim()
+    const lines = fs.readFileSync(file, 'utf8').split('\n')
+    const recs = new Map()
+    for (let i = 1; i < lines.length; i++) {
+      if (!lines[i].trim()) continue
+      const [sku, mmw, ksl, desc] = lines[i].split('\t')
+      if (!sku) continue
+      recs.set(sku.trim().toLowerCase(), { sku: sku.trim(), mmw: unesc(mmw), ksl: unesc(ksl), desc: unesc(desc) })
+    }
+
+    // What the database is currently missing.
+    const live = (await _pgRetry(
+      `SELECT sku_root,
+              (mmw IS NULL OR mmw='')                 AS need_mmw,
+              (ksl_ids IS NULL OR ksl_ids='')         AS need_ksl,
+              (description IS NULL OR description='') AS need_desc
+         FROM titles`, [], 'fm-import live')).rows
+
+    const upd = { mmw: [], ksl: [], desc: [] }
+    let matched = 0
+    for (const t of live) {
+      const r = recs.get(String(t.sku_root).toLowerCase())
+      if (!r) continue
+      matched++
+      if (t.need_mmw  && r.mmw)  upd.mmw.push([t.sku_root, r.mmw])
+      if (t.need_ksl  && r.ksl)  upd.ksl.push([t.sku_root, r.ksl])
+      if (t.need_desc && r.desc) upd.desc.push([t.sku_root, r.desc])
+    }
+
+    const written = { mmw: 0, ksl: 0, desc: 0 }
+    if (!dryRun) {
+      const COLS = { mmw: 'mmw', ksl: 'ksl_ids', desc: 'description' }
+      for (const k of ['desc', 'mmw', 'ksl']) {           // description first: most important
+        const rows = upd[k], col = COLS[k]
+        for (let i = 0; i < rows.length; i += 500) {
+          const b = rows.slice(i, i + 500)
+          const r = await _pgRetry(
+            `UPDATE titles t SET ${col} = v.val, updated_at = now()
+               FROM unnest($1::text[], $2::text[]) AS v(sku, val)
+              WHERE t.sku_root = v.sku AND (t.${col} IS NULL OR t.${col} = '')`,
+            [b.map(x => x[0]), b.map(x => x[1])], `fm-import ${k} ${i}`)
+          written[k] += r.rowCount || 0
+        }
+      }
+    }
+
+    res.json({ ok: true, dryRun, file: path.basename(file),
+      exportRecords: recs.size, catalogueRows: live.length, matchedBySku: matched,
+      unmatchedInCatalogue: live.length - matched,
+      wouldFill: { description: upd.desc.length, mmw: upd.mmw.length, ksl: upd.ksl.length },
+      written,
+      sample: upd.desc.slice(0, 3).map(([s, v]) => ({ sku_root: s, description: v.slice(0, 120) })) })
+  } catch (e) {
+    console.error('[fm-import]', e)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+
+// GET /api/audio/detect?key=<b2 key>   (or ?path=<local absolute path>)
+// Returns { ok, bpm, key } using scripts/detect_key.sh — the SAME analyzer the
+// Intake and Finish Queue screens already use.
+//
+// Why this exists: the Finish Queue detects BPM+key by handing
+// runDetectScript() a LOCAL file path. Once its worklist comes from the
+// database rather than a folder scan, most songs have no local copy at all —
+// they live only in B2. This fetches the object to a temp file, runs the same
+// script, and deletes the temp file. Nothing about the analyzer changes.
+//
+// Fetches at most FETCH_CAP bytes: tempo and key detection need the opening of
+// the track, not all of a 30 MB wav, and the range fix makes a partial fetch
+// cheap. A truncated wav still decodes -- the header declares the full length
+// but readers stop at EOF.
+app.get('/api/audio/detect', async (req, res) => {
+  const localPath = req.query.path
+  const key = req.query.key
+  if (!localPath && !key) return res.json({ ok: false, error: 'need ?key= or ?path=' })
+
+  const script = path.join(__dirname, 'scripts', 'detect_key.sh')
+  if (!fs.existsSync(script)) return res.json({ ok: false, error: 'scripts/detect_key.sh missing' })
+
+  const FETCH_CAP = 12 * 1024 * 1024
+  let tmp = null
+  try {
+    let target = localPath
+    if (!target) {
+      if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+      const downloadHost = b2Auth.downloadUrl.replace(/^https?:\/\//, '')
+      const urlPath = `/file/haus-music/${key.split('/').map(s => encodeURIComponent(s)).join('/')}`
+      const buf = await new Promise((resolve, reject) => {
+        const rq = https.request({ hostname: downloadHost, path: urlPath, method: 'GET',
+          headers: { 'Authorization': b2Auth.authorizationToken, 'Range': `bytes=0-${FETCH_CAP - 1}` } }, r => {
+          if (r.statusCode !== 200 && r.statusCode !== 206) { r.resume(); return reject(new Error(`B2 ${r.statusCode}`)) }
+          const cs = []; r.on('data', c => cs.push(c)); r.on('end', () => resolve(Buffer.concat(cs))); r.on('error', reject)
+        })
+        rq.on('error', reject); rq.end()
+      })
+      if (buf.length < 1024) return res.json({ ok: false, error: `stub or empty (${buf.length} bytes)` })
+      const ext = (key.match(/\.([a-z0-9]+)$/i) || [, 'wav'])[1]
+      tmp = path.join(os.tmpdir(), `haus_detect_${Date.now()}.${ext}`)
+      fs.writeFileSync(tmp, buf)
+      target = tmp
+    }
+
+    const out = await new Promise(resolve => {
+      exec(`bash '${script.replace(/'/g, "'\\''")}' '${String(target).replace(/'/g, "'\\''")}'`,
+        { timeout: 90000, maxBuffer: 1024 * 1024 }, (err, stdout, stderr) => {
+          resolve({ err: err?.message || null, stdout: stdout || '', stderr: stderr || '' })
+        })
+    })
+    if (!out.stdout.trim()) {
+      return res.json({ ok: false, error: out.err || out.stderr?.slice(0, 200) || 'analyzer produced no output' })
+    }
+    let parsed = null
+    try { parsed = JSON.parse(out.stdout.trim()) } catch { /* fall through */ }
+    if (!parsed) return res.json({ ok: false, error: 'unparseable analyzer output', raw: out.stdout.slice(0, 200) })
+    if (parsed.error) return res.json({ ok: false, error: parsed.error })
+
+    // detect_key.py nulls bpm itself when confidence is below its threshold, so a
+    // null here means "the analyzer would not commit", not "it failed". Pass the
+    // confidence through: a sting or a one-shot has no tempo to find, and a
+    // human should see that rather than inherit a confident wrong number.
+    res.json({ ok: true,
+               bpm: parsed.bpm ?? null,
+               bpm_confidence: parsed.bpm_confidence ?? null,
+               key: parsed.key ?? null,
+               source: localPath ? 'local' : 'b2', derived: true })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  } finally {
+    if (tmp) { try { fs.unlinkSync(tmp) } catch {} }
+  }
 })
 
 // ─── FileMaker routes ──────────────────────────────────────────────────────
@@ -2942,26 +3105,48 @@ app.get('/api/b2/create-stems', async (req, res) => {
   if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
   const dryRun = req.query.dryRun !== '0'
   const cohort = req.query.cohort || null
+  const lotParam = req.query.lot || null
   const limit  = parseInt(req.query.limit || '0') || 0
   const STUB_LIMIT = 1024
   const AUDIO = /\.(wav|mp3|aif|aiff)$/i
 
   try {
-    // Titles that have NO stem rows at all.
+    // DEFAULT: titles that have NO stem rows at all.
+    //
+    // ?lot=<lot folder name>: every SKU in that lot folder, INCLUDING titles
+    // that already have some stem rows. THE ZERO-ROWS-ONLY RULE SILENTLY LOSES
+    // FILES -- a song folder holding 7 files whose title already had a single
+    // row from an earlier run was skipped entirely, and the other 6 uploads
+    // were recorded nowhere. They sat in B2, invisible to the app, with no
+    // error anywhere. Found 2026-09-11 while hardening the migration.
     const params = []
-    let sql = `SELECT t.sku_root, t.title
-                 FROM titles t
-                WHERE NOT EXISTS (SELECT 1 FROM mix_stems m WHERE m.sku_root = t.sku_root)`
-    if (cohort) {
-      params.push(cohort)
-      sql += ` AND EXISTS (SELECT 1 FROM work_queue w
-                            WHERE w.sku_root = t.sku_root
-                              AND w.cohort = $${params.length}
-                              AND w.resolved_at IS NULL)`
+    let sql
+    if (lotParam) {
+      const lotDirCS = path.join(req.query.base || LOT_BASE_DEFAULT, lotParam)
+      if (!fs.existsSync(lotDirCS)) return res.json({ ok: false, error: `lot folder not found: ${lotDirCS}` })
+      const lotSkus = [...new Set(_lotScan(lotDirCS).songs.map(x => x.skuRoot))]
+      if (!lotSkus.length) return res.json({ ok: false, error: 'no audio found in that lot' })
+      params.push(lotSkus)
+      sql = `SELECT t.sku_root, t.title FROM titles t WHERE t.sku_root = ANY($1::text[])`
+    } else {
+      sql = `SELECT t.sku_root, t.title
+               FROM titles t
+              WHERE NOT EXISTS (SELECT 1 FROM mix_stems m WHERE m.sku_root = t.sku_root)`
+      if (cohort) {
+        params.push(cohort)
+        sql += ` AND EXISTS (SELECT 1 FROM work_queue w
+                              WHERE w.sku_root = t.sku_root
+                                AND w.cohort = $${params.length}
+                                AND w.resolved_at IS NULL)`
+      }
     }
     sql += ' ORDER BY t.sku_root'
     if (limit) sql += ` LIMIT ${limit}`
-    const titles = (await pgPool.query(sql, params)).rows
+    // _pgRetry, not pgPool.query: Neon drops idle clients, and this endpoint then
+    // spends minutes paging the bucket. Grabbing a dead client here killed the run
+    // on 2026-09-10 ("[pool] client removed" then "Connection terminated
+    // unexpectedly"). Same trap as hide-strays. One retry gets a fresh connection.
+    const titles = (await _pgRetry(sql, params, 'create-stems titles')).rows
     if (!titles.length) return res.json({ ok: true, message: 'no titles without stem rows', cohort })
     const wanted = new Map(titles.map(t => [t.sku_root, t.title]))
 
@@ -2993,13 +3178,27 @@ app.get('/api/b2/create-stems', async (req, res) => {
         const sku = _skuFromKey(f.fileName)
         if (!sku || !wanted.has(sku)) continue
         if (!bySku.has(sku)) bySku.set(sku, [])
-        bySku.get(sku).push({ key: f.fileName, size: f.contentLength })
+        // contentSha1 is "none" for large multipart uploads; store null then.
+        const sh = /^[0-9a-f]{40}$/i.test(f.contentSha1 || '') ? f.contentSha1 : null
+        bySku.get(sku).push({ key: f.fileName, size: f.contentLength, sha1: sh })
       }
       startFileName = r.body.nextFileName
       pages++
     } while (startFileName && pages < 200)
 
-    const toInsert = [], ambiguous = [], noAudio = []
+    // Everything already recorded for these SKUs. Needed because ?lot= widens
+    // `wanted` to titles that ALREADY have rows -- without this we would insert
+    // a second copy of every existing row. There is no unique index on b2_key
+    // to save us (29 keys are legitimately duplicated today), so this is the
+    // only guard.
+    const existing = (await _pgRetry(
+      `SELECT sku_root, stem_name, filename, b2_key FROM mix_stems
+        WHERE sku_root = ANY($1::text[])`,
+      [[...wanted.keys()]], 'create-stems existing')).rows
+    const haveKey  = new Set(existing.filter(r => r.b2_key).map(r => r.b2_key))
+    const haveStem = new Set(existing.map(r => `${r.sku_root}\u0000${r.stem_name}\u0000${r.filename}`))
+
+    const toInsert = [], ambiguous = [], noAudio = [], alreadyRecorded = []
     for (const [sku, title] of wanted) {
       const files = bySku.get(sku)
       if (!files || !files.length) { noAudio.push({ sku_root: sku, title }); continue }
@@ -3029,8 +3228,12 @@ app.get('/api/b2/create-stems', async (req, res) => {
                            candidates: fs.map(x => ({ key: x.key, size: x.size })) })
           continue
         }
-        toInsert.push({ sku_root: sku, stem_name: stem,
-                        filename: fs[0].key.split('/').pop(), b2_key: fs[0].key, size: fs[0].size })
+        const fname = fs[0].key.split('/').pop()
+        if (haveKey.has(fs[0].key) || haveStem.has(`${sku}\u0000${stem}\u0000${fname}`)) {
+          alreadyRecorded.push({ sku_root: sku, b2_key: fs[0].key }); continue
+        }
+        toInsert.push({ sku_root: sku, stem_name: stem, filename: fname,
+                        b2_key: fs[0].key, size: fs[0].size, sha1: fs[0].sha1 })
       }
     }
 
@@ -3039,11 +3242,14 @@ app.get('/api/b2/create-stems', async (req, res) => {
       for (let i = 0; i < toInsert.length; i += 500) {
         const batch = toInsert.slice(i, i + 500)
         const r = await _pgRetry(
-          `INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key)
-           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[])
+          `INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key, size_bytes, sha1, source_lot)
+           SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[],
+                                $5::bigint[], $6::text[], $7::text[])
            ON CONFLICT DO NOTHING`,
           [batch.map(x => x.sku_root), batch.map(x => x.stem_name),
-           batch.map(x => x.filename), batch.map(x => x.b2_key)],
+           batch.map(x => x.filename), batch.map(x => x.b2_key),
+           batch.map(x => x.size), batch.map(x => x.sha1),
+           batch.map(() => lotParam)],
           `create-stems insert ${i}`)
         inserted += r.rowCount || 0
       }
@@ -3058,10 +3264,12 @@ app.get('/api/b2/create-stems', async (req, res) => {
 
     res.json({ ok: true, dryRun, cohort,
       objectsScanned: scanned, skippedMusicTree: skippedMusic, skippedStubs: skippedStub,
+      lot: lotParam,
       counts: { titlesConsidered: wanted.size,
                 titlesWithAudio: bySku.size,
                 rowsToCreate: toInsert.length,
                 inserted,
+                alreadyRecorded: alreadyRecorded.length,
                 ambiguous: ambiguous.length,
                 titlesWithNoAudio: noAudio.length },
       reportPath,
@@ -3365,15 +3573,27 @@ app.get('/api/b2/relocate-strays', async (req, res) => {
 // A pooled connection can go stale while a long B2 listing runs, surfacing as
 // "Connection terminated unexpectedly" on the next query. Retry once: the pool
 // hands back a fresh client on the second attempt.
+// Neon is SERVERLESS: its compute suspends when idle and can take several
+// seconds to wake. Two attempts one second apart was not enough — on 2026-09-10
+// both attempts landed inside the wake window and upload-lot died with
+// "Connection terminated unexpectedly". Back off instead: 1s, 2s, 4s, 8s.
+// Only retries connection-level failures; a genuine SQL error throws at once
+// rather than being retried four times.
 async function _pgRetry(sql, params = [], label = 'query') {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  const ATTEMPTS = 5
+  let last
+  for (let attempt = 0; attempt < ATTEMPTS; attempt++) {
     try { return await pgPool.query(sql, params) }
     catch (e) {
-      if (attempt === 1) throw e
-      console.warn(`[pg] ${label} failed (${e.message}) — retrying with a fresh connection`)
-      await new Promise(r => setTimeout(r, 1000))
+      last = e
+      const transient = /terminated|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|Connection|socket|starting up|shutting down/i.test(e.message || '')
+      if (!transient || attempt === ATTEMPTS - 1) throw e
+      const wait = 1000 * Math.pow(2, attempt)
+      console.warn(`[pg] ${label} failed (${e.message}) — waking/reconnecting, retry ${attempt + 1}/${ATTEMPTS - 1} in ${wait}ms`)
+      await new Promise(r => setTimeout(r, wait))
     }
   }
+  throw last
 }
 
 // ─── Refresh the stub audit from LIVE state ─────────────────────────────────
@@ -3459,6 +3679,549 @@ app.get('/api/b2/stub-audit-refresh', async (req, res) => {
     res.json({ ok: true, dryRun: false, counts, csvPath, backup })
   } catch (e) {
     console.error('[stub-audit] error:', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+
+// ─── LOT MIGRATION: shared helpers + the verification gate ───────────────────
+// Added 2026-09-11.
+//
+// The upload path was well defended against uploading GARBAGE (cloud-only
+// guard, sha1, three size checks) and poorly defended against uploading
+// correctly and then LOSING TRACK of it. A lot is not finished because a run
+// printed ok:true. A lot is finished because /api/b2/verify-lot says PASS.
+const LOT_BASE_DEFAULT = path.join(os.homedir(),
+  'Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/4. SKU but not tagged')
+const LOT_AUDIO = /\.(wav|mp3|aif|aiff)$/i
+const LOT_COLL  = { '1': 'stratus', '2': 'cumulus', '3': 'cirrus', '4': 'nimbus' }
+
+// Letters and digits only, lowercased. Folder names mix spaces, underscores,
+// CamelCase, parentheses and apostrophes interchangeably -- compare
+// "THE ACTION IS GO(Includes Vcls)_A_SoHoEDM" against "The Action Is Go" with
+// anything less aggressive and you get false mismatches.
+function _lotNorm(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]/g, '') }
+
+// Does this folder name actually contain the catalogue title for its SKU?
+// A folder whose SKU has a typo that happens to land on a DIFFERENT real title
+// uploads that audio under the wrong song, and every other check we have
+// passes -- sizes match, sha1 matches, the row inserts cleanly. SIX such
+// mis-attachments were already sitting in mix_stems when this was written
+// (S60a12253 in C32b3173's folder, T31a0013 in T31a0063's, S33a2461 in
+// S33a2541's). This is the only check that catches them.
+// Smallest edit distance between `needle` and ANY substring of `hay`
+// (Sellers' variant). Row 0 is all zeros so a match may begin anywhere, and
+// the answer is the minimum of the final row so it may end anywhere. That
+// tolerance is the point: a folder name carries a SKU prefix and trailing key
+// and tag tokens that the catalogue title does not.
+// Returns 1 = the title appears verbatim, 0 = nothing in common.
+function _lotFuzzyContains(hay, needle) {
+  if (!needle || !hay) return 0
+  const n = needle.length, m = hay.length
+  let prev = new Array(m + 1).fill(0), cur = new Array(m + 1).fill(0)
+  for (let i = 1; i <= n; i++) {
+    cur[0] = i
+    for (let j = 1; j <= m; j++) {
+      cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1,
+                        prev[j - 1] + (needle[i - 1] === hay[j - 1] ? 0 : 1))
+    }
+    const t = prev; prev = cur; cur = t
+  }
+  return 1 - (Math.min(...prev) / n)
+}
+
+// THE TITLE CROSS-CHECK.
+// upload-lot takes each song's SKU from the FIRST TOKEN of its folder name, so
+// a mistyped digit that lands on a different real title uploads that audio
+// under the wrong song and every other check still passes -- sizes match, sha1
+// matches, the row inserts cleanly. Six such mis-attachments were already in
+// mix_stems on 2026-09-11 (S60a12253 sitting in C32b3173's folder, T31a0013 in
+// T31a0063's, S33a2461 in S33a2541's). Comparing the folder's TITLE TEXT to
+// the catalogue title is the only independent signal we have.
+//
+// THRESHOLD 0.55, CHOSEN FROM THE DATA, NOT FROM TASTE. Measured over the
+// 30,063 catalogue songs that have a per-song folder:
+//   - Demanding a literal substring rejected 4.6% of the real catalogue.
+//   - Folders legitimately drop a leading word ("AC America The Beautiful"
+//     filed as AMERICA THE BEAUTIFUL, "Just Looking For Trouble" as
+//     "Looking For Trouble") or carry typos ("Suprise", "Agressive",
+//     "On Your Gaurd", "Fundemental"). Every one of the 14 closest calls in
+//     the catalogue was the SAME SONG.
+//   - Worst benign case measured: "RIMSKY KORSAKOV The Flight Of The
+//     Bumblebee" vs a folder without the composer prefix, ~0.63.
+//   - Genuine mis-attachments score 0.17 - 0.27.
+// Nothing lands between 0.28 and 0.62, so 0.55 has margin on both sides.
+//
+// RESIDUAL RISK, ACCEPTED DELIBERATELY: two distinct works whose titles differ
+// by a letter or two ("Shade" / "Shades") would pass. No automated check
+// catches that -- only someone listening.
+function _lotTitleMatches(folderName, title) {
+  const t = _lotNorm(title)
+  if (!t) return false
+  const f = _lotNorm(folderName)
+  if (f.includes(t)) return true
+  return _lotFuzzyContains(f, t) >= 0.55
+}
+
+// Walk one lot folder. blocks === 0 means Dropbox has NOT materialised the
+// bytes; st.size is still accurate, so VERIFYING an online-only lot is fine.
+// Only UPLOADING needs the bytes present.
+function _lotScan(lotDir) {
+  const songs = []
+  let cloudOnly = 0, onDisk = 0, cloudBytes = 0
+  for (const entry of fs.readdirSync(lotDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const files = []
+    const walk = d => {
+      for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+        const full = path.join(d, f.name)
+        if (f.isDirectory()) { walk(full); continue }
+        if (!LOT_AUDIO.test(f.name)) continue
+        const st = fs.statSync(full)
+        if (st.blocks === 0) { cloudOnly++; cloudBytes += st.size } else onDisk++
+        files.push({ path: full, name: f.name, size: st.size, blocks: st.blocks })
+      }
+    }
+    walk(path.join(lotDir, entry.name))
+    if (!files.length) continue
+    songs.push({ folder: entry.name, skuRoot: entry.name.split('_')[0], files })
+  }
+  return { songs, cloudOnly, onDisk, cloudBytes }
+}
+
+// The composer folder the catalogue ACTUALLY USES MOST for each SKU's
+// composer+collection. Derived, never constructed -- constructing it is what
+// produced the 92 stray root keys. Majority wins because B2 contains strays
+// (nimbus/C32_Hugo McLaughlin_NIMBUS has 19 objects, C32b_... has 5).
+async function _lotResolveSkus(skus) {
+  return (await _pgRetry(
+    `WITH folder_use AS (
+       SELECT left(m.sku_root,3) AS cid,
+              split_part(m.b2_key,'/',1) AS coll,
+              split_part(m.b2_key,'/',1) || '/' || split_part(m.b2_key,'/',2) AS folder,
+              count(*) AS n
+         FROM mix_stems m
+        WHERE m.b2_key IS NOT NULL AND m.b2_key LIKE '%/%/%'
+        GROUP BY 1,2,3
+     )
+     SELECT t.sku_root, t.title, f.folder AS sibling_key, f.n AS folder_objects
+       FROM titles t
+       LEFT JOIN LATERAL (
+         SELECT folder, n FROM folder_use fu
+          WHERE fu.cid = left(t.sku_root,3)
+            AND fu.coll = CASE right(t.sku_root,1)
+                            WHEN '1' THEN 'stratus' WHEN '2' THEN 'cumulus'
+                            WHEN '3' THEN 'cirrus'  WHEN '4' THEN 'nimbus' END
+          ORDER BY n DESC, folder ASC LIMIT 1) f ON TRUE
+      WHERE t.sku_root = ANY($1::text[])`,
+    [skus], 'lot resolve skus')).rows
+}
+
+// List every object under the given 2-segment composer folders, paged.
+// Returns Map<b2_key, { size, sha1 }>.
+async function _lotListB2(folders) {
+  const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+  const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+    urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+    headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+  const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+  if (!bucketId) throw new Error('bucket haus-music not found')
+  const map = new Map()
+  for (const folder of folders) {
+    let start = null
+    do {
+      const pr = new URLSearchParams({ bucketId, prefix: folder.replace(/\/?$/, '/'), maxFileCount: '10000' })
+      if (start) pr.set('startFileName', start)
+      const lr = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_file_names?${pr}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'lot list b2')
+      for (const f of lr.body.files || []) map.set(f.fileName, { size: f.contentLength, sha1: f.contentSha1 })
+      start = lr.body.nextFileName
+    } while (start)
+  }
+  return map
+}
+
+// GET /api/b2/verify-lot?lot=<lot folder name>[&base=...][&full=1]
+//
+// READ ONLY. Writes nothing, uploads nothing. Three-way reconciliation of
+// Dropbox <-> B2 <-> mix_stems for one lot, returning a hard verdict.
+//
+// verdict PASS means, for every audio file in the lot folder:
+//   - its SKU exists in titles
+//   - the folder name contains that title's text (right song)
+//   - an object exists in B2 at the expected key
+//   - that object's byte count equals the file on disk
+//   - a mix_stems row points at that exact key
+// Anything else is FAIL, and every offending file is listed.
+//
+// Works on an online-only lot: stat reports the true size without the bytes
+// being local, so you can set a lot back to online-only and still verify it.
+app.get('/api/b2/verify-lot', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const lot = req.query.lot
+  if (!lot) return res.json({ ok: false, error: 'need ?lot=<lot folder name>' })
+  const full = req.query.full === '1'
+  // &record=1 stamps size_bytes / sha1 / source_lot / verified_at onto the
+  // matched rows. It is DELIBERATELY gated on the verdict: a lot that does not
+  // PASS records nothing, so verified_at can never be a lie.
+  const record = req.query.record === '1'
+  const BASE = req.query.base || LOT_BASE_DEFAULT
+  const cap = a => full ? a : a.slice(0, 20)
+
+  try {
+    const lotDir = path.join(BASE, lot)
+    if (!fs.existsSync(lotDir)) return res.json({ ok: false, error: `lot folder not found: ${lotDir}` })
+
+    const { songs, cloudOnly, onDisk } = _lotScan(lotDir)
+    if (!songs.length) return res.json({ ok: false, error: 'no audio found in that lot' })
+
+    const skus = [...new Set(songs.map(s => s.skuRoot))]
+    const resolved = await _lotResolveSkus(skus)
+    const byS = new Map(resolved.map(r => [r.sku_root, r]))
+
+    // Every mix_stems row for these SKUs, keyed by b2_key.
+    const stemRows = (await _pgRetry(
+      `SELECT sku_root, stem_name, filename, b2_key, size_bytes
+         FROM mix_stems WHERE sku_root = ANY($1::text[]) AND b2_key IS NOT NULL`,
+      [skus], 'verify-lot stems')).rows
+    const stemByKey = new Map(stemRows.map(r => [r.b2_key, r]))
+
+    // Fold in folders the database already uses for these SKUs, not just the
+    // majority-derived one -- a previous run may have placed them elsewhere.
+    const folders = new Set()
+    for (const r of resolved) if (r.sibling_key) folders.add(r.sibling_key)
+    for (const r of stemRows) folders.add(r.b2_key.split('/').slice(0, 2).join('/'))
+    const b2 = await _lotListB2([...folders])
+    // Index by the last two path segments once, up front. Looking this up with
+    // a linear scan inside the per-file loop was O(files x objects) -- fine for
+    // 164 files, awful for a composer folder with thousands of objects, and
+    // "it looked hung" has already cost this project an hour once.
+    const b2BySuffix = new Map()
+    for (const k of b2.keys()) {
+      const suf = '/' + k.split('/').slice(-2).join('/')
+      if (!b2BySuffix.has(suf)) b2BySuffix.set(suf, k)
+    }
+
+    const problems = {
+      notInTitles: [], titleMismatch: [], noComposerFolder: [],
+      missingFromB2: [], sizeMismatch: [], missingFromDb: [], dbSizeUnrecorded: []
+    }
+    let expected = 0, okFiles = 0
+    const matched = []
+
+    for (const s of songs) {
+      const row = byS.get(s.skuRoot)
+      if (!row) { problems.notInTitles.push({ folder: s.folder, sku_root: s.skuRoot, files: s.files.length }); continue }
+      if (!_lotTitleMatches(s.folder, row.title)) {
+        problems.titleMismatch.push({ folder: s.folder, sku_root: s.skuRoot, catalogue_title: row.title })
+        continue
+      }
+      if (!row.sibling_key) { problems.noComposerFolder.push({ folder: s.folder, sku_root: s.skuRoot }); continue }
+
+      for (const f of s.files) {
+        expected++
+        // Prefer wherever the database already says this file lives.
+        const suffix = `/${s.folder}/${f.name}`
+        let key = `${row.sibling_key}${suffix}`
+        if (!b2.has(key)) {
+          const alt = b2BySuffix.get(suffix)
+          if (alt) key = alt
+        }
+        const obj = b2.get(key)
+        if (!obj) { problems.missingFromB2.push({ sku_root: s.skuRoot, expected_key: key, size: f.size }); continue }
+        if (Number(obj.size) !== Number(f.size)) {
+          problems.sizeMismatch.push({ sku_root: s.skuRoot, b2_key: key, b2_size: obj.size, disk_size: f.size })
+          continue
+        }
+        const st = stemByKey.get(key)
+        if (!st) { problems.missingFromDb.push({ sku_root: s.skuRoot, b2_key: key, size: f.size }); continue }
+        if (st.size_bytes == null) problems.dbSizeUnrecorded.push({ sku_root: s.skuRoot, b2_key: key })
+        matched.push({ sku: s.skuRoot, key, size: obj.size, sha1: obj.sha1 })
+        okFiles++
+      }
+    }
+
+    // dbSizeUnrecorded is a WARNING, not a failure: rows created before the
+    // size_bytes column existed are incomplete, not wrong.
+    const failing = ['notInTitles', 'titleMismatch', 'noComposerFolder',
+                     'missingFromB2', 'sizeMismatch', 'missingFromDb']
+    const failures = failing.reduce((n, k) => n + problems[k].length, 0)
+
+    // Match on sku_root AND b2_key, never b2_key alone: 29 keys in the
+    // catalogue are legitimately pointed at by two different SKUs, so a
+    // key-only UPDATE would stamp somebody else's row.
+    let recorded = 0
+    if (record && failures === 0 && matched.length) {
+      for (let i = 0; i < matched.length; i += 500) {
+        const b = matched.slice(i, i + 500)
+        const r = await _pgRetry(
+          `UPDATE mix_stems m
+              SET size_bytes = v.size, sha1 = v.sha1,
+                  source_lot = $5, verified_at = now()
+             FROM unnest($1::text[], $2::text[], $3::bigint[], $4::text[])
+                    AS v(sku, key, size, sha1)
+            WHERE m.sku_root = v.sku AND m.b2_key = v.key`,
+          [b.map(x => x.sku), b.map(x => x.key), b.map(x => x.size),
+           b.map(x => x.sha1), lot], `verify-lot record ${i}`)
+        recorded += r.rowCount || 0
+      }
+    }
+
+    // The dbSizeUnrecorded warnings were collected BEFORE the record step, so
+    // once recording has filled those columns they are stale by definition.
+    // Reporting 180 recorded alongside 164 "unrecorded" is just confusing.
+    if (recorded > 0) problems.dbSizeUnrecorded = []
+
+    res.json({
+      ok: true, lot,
+      verdict: failures === 0 ? 'PASS' : 'FAIL',
+      recorded: record ? recorded : undefined,
+      recordSkipped: record && failures > 0 ? 'lot did not PASS - nothing recorded' : undefined,
+      counts: {
+        songFolders: songs.length, localFiles: onDisk + cloudOnly,
+        cloudOnly, filesExpected: expected, filesFullyVerified: okFiles,
+        failures, warnings: problems.dbSizeUnrecorded.length
+      },
+      problems: Object.fromEntries(Object.entries(problems)
+        .filter(([, v]) => v.length)
+        .map(([k, v]) => [k, { count: v.length, sample: cap(v) }])),
+      composerFolders: [...folders],
+      note: failures === 0
+        ? 'PASS - every audio file in this lot is in B2 at the right size with a mix_stems row pointing at it.'
+        : 'FAIL - see problems. Do NOT mark this lot done.'
+    })
+  } catch (e) {
+    console.error('[verify-lot]', e)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// GET /api/b2/upload-lot
+//   ?lot=<lot folder name>   REQUIRED
+//   ?dryRun=1 (DEFAULT) | ?dryRun=0 | ?limit=N | ?base=<override base folder>
+//
+// Uploads one lot from "4. SKU but not tagged" to B2. ONE LOT AT A TIME on
+// purpose: 30 lots, ~3 GB each, 91.2 GB total. Doing it in 3 GB bites means we
+// never need 91 GB resident, Dropbox is never asked to materialise everything
+// at once, and a bad lot costs one lot rather than a day.
+//
+// THE CLOUD-ONLY GUARD IS THE WHOLE POINT. On 2026-09-10 all 6,808 files in
+// that folder were online-only: macOS reports the full size with ZERO BLOCKS.
+// Reading one gives you a placeholder, and that is exactly how the August
+// backfill uploaded thousands of stubs. fs.Stats.blocks === 0 means the bytes
+// are not on this machine. We REFUSE the lot rather than upload a stub.
+//
+// Composer folder is DERIVED, never constructed: we find an existing B2 key for
+// the same composer in the same collection and reuse its folder prefix. The 92
+// stray root keys last week came from constructing that path.
+const fsp = fs.promises
+app.get('/api/b2/upload-lot', async (req, res) => {
+  if (!b2Auth) return res.json({ ok: false, error: 'B2 not authorized' })
+  if (!pgPool)  return res.json({ ok: false, error: 'DB not connected' })
+  const lot = req.query.lot
+  if (!lot) return res.json({ ok: false, error: 'need ?lot=<lot folder name>' })
+  const dryRun = req.query.dryRun !== '0'
+  const limit  = parseInt(req.query.limit || '0') || 0
+  const BASE = req.query.base || path.join(os.homedir(),
+    'Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/4. SKU but not tagged')
+  const AUDIO = /\.(wav|mp3|aif|aiff)$/i
+  const COLL = { '1': 'stratus', '2': 'cumulus', '3': 'cirrus', '4': 'nimbus' }
+
+  try {
+    const lotDir = path.join(BASE, lot)
+    if (!fs.existsSync(lotDir)) return res.json({ ok: false, error: `lot folder not found: ${lotDir}` })
+
+    // Collect song folders and their audio, and check what is actually on disk.
+    const songs = []
+    let cloudOnly = 0, onDisk = 0, cloudBytes = 0
+    for (const entry of fs.readdirSync(lotDir, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const songDir = path.join(lotDir, entry.name)
+      const files = []
+      const walk = d => {
+        for (const f of fs.readdirSync(d, { withFileTypes: true })) {
+          const full = path.join(d, f.name)
+          if (f.isDirectory()) { walk(full); continue }
+          if (!AUDIO.test(f.name)) continue
+          const st = fs.statSync(full)
+          // blocks === 0 -> Dropbox online-only placeholder. NOT real bytes.
+          if (st.blocks === 0) { cloudOnly++; cloudBytes += st.size }
+          else onDisk++
+          files.push({ path: full, name: f.name, size: st.size, blocks: st.blocks })
+        }
+      }
+      walk(songDir)
+      if (!files.length) continue
+      songs.push({ folder: entry.name, skuRoot: entry.name.split('_')[0], files })
+    }
+
+    if (cloudOnly > 0) {
+      return res.json({ ok: false, cloudOnly: true, lot,
+        error: `${cloudOnly} of ${cloudOnly + onDisk} audio files in this lot are ONLINE-ONLY ` +
+               `(${(cloudBytes / 1e9).toFixed(1)} GB). Reading them would upload placeholders, not audio. ` +
+               `In Finder, right-click this lot folder and choose "Make Available Offline", wait for it to ` +
+               `finish, then run this again.`,
+        songFolders: songs.length })
+    }
+    if (!songs.length) return res.json({ ok: false, error: 'no audio found in that lot' })
+
+    // Resolve each SKU: composer folder DERIVED from an existing B2 key.
+    const skus = [...new Set(songs.map(s => s.skuRoot))]
+    // Pick the composer folder the catalogue ACTUALLY USES MOST for this composer
+    // and collection -- not just any existing key. B2 contains strays: e.g.
+    // nimbus/C32_Hugo McLaughlin_NIMBUS has 19 objects while
+    // nimbus/C32b_Hugo McLaughlin_NIMBUS has 5, left by an earlier bad run. An
+    // unordered LIMIT 1 picked the stray and would have uploaded 164 files into
+    // it -- the same mistake that produced the 92 stray root keys last week.
+    // Majority wins, and we return the count so a human can sanity-check it.
+    const known = (await _pgRetry(
+      `WITH folder_use AS (
+         SELECT left(m.sku_root,3) AS cid,
+                split_part(m.b2_key,'/',1) AS coll,
+                split_part(m.b2_key,'/',1) || '/' || split_part(m.b2_key,'/',2) AS folder,
+                count(*) AS n
+           FROM mix_stems m
+          WHERE m.b2_key IS NOT NULL AND m.b2_key LIKE '%/%/%'
+          GROUP BY 1,2,3
+       )
+       SELECT t.sku_root, t.title,
+              f.folder AS sibling_key, f.n AS folder_objects
+         FROM titles t
+         LEFT JOIN LATERAL (
+           SELECT folder, n FROM folder_use fu
+            WHERE fu.cid = left(t.sku_root,3)
+              AND fu.coll = CASE right(t.sku_root,1)
+                              WHEN '1' THEN 'stratus' WHEN '2' THEN 'cumulus'
+                              WHEN '3' THEN 'cirrus'  WHEN '4' THEN 'nimbus' END
+            ORDER BY n DESC, folder ASC
+            LIMIT 1) f ON TRUE
+        WHERE t.sku_root = ANY($1::text[])`,
+      [skus], 'upload-lot skus')).rows
+    const byS = new Map(known.map(r => [r.sku_root, r]))
+
+    const plan = [], skipped = []
+    for (const s of songs) {
+      const row = byS.get(s.skuRoot)
+      if (!row) { skipped.push({ folder: s.folder, why: 'sku_root not in titles' }); continue }
+      // TITLE CROSS-CHECK. Trusting the SKU off the folder name alone lets a
+      // typo that lands on a DIFFERENT real title upload that audio under the
+      // wrong song, and every other check still passes. Six such
+      // mis-attachments were already in mix_stems on 2026-09-11.
+      if (!_lotTitleMatches(s.folder, row.title)) {
+        skipped.push({ folder: s.folder, sku_root: s.skuRoot, catalogue_title: row.title,
+                       why: `folder name does not contain the catalogue title for ${s.skuRoot}` })
+        continue
+      }
+      const digit = s.skuRoot.slice(-1)
+      const collection = COLL[digit]
+      if (!collection) { skipped.push({ folder: s.folder, why: `album digit "${digit}" is not 1-4` }); continue }
+      if (!row.sibling_key) { skipped.push({ folder: s.folder, why: 'no existing B2 folder for this composer/collection to derive from' }); continue }
+      const composerFolder = row.sibling_key   // already the 2-segment folder
+      for (const f of s.files) {
+        plan.push({ sku_root: s.skuRoot, local: f.path, size: f.size,
+                    b2_key: `${composerFolder}/${s.folder}/${f.name}` })
+      }
+    }
+
+    const todo = limit ? plan.slice(0, limit) : plan
+    const result = { uploaded: 0, failed: 0, bytes: 0 }
+    const failures = []
+
+    // A SKIPPED FOLDER IS A HUMAN DECISION, NOT A FOOTNOTE. Lot 1 returned two
+    // skips inside ok:true and they were caught only because someone happened
+    // to read the JSON. Nobody reads the JSON on lot 17. Refuse the lot.
+    if (skipped.length && req.query.allowSkips !== '1') {
+      return res.json({ ok: false, lot, blocked: 'skipped folders',
+        error: `${skipped.length} of ${songs.length} song folders cannot be placed. ` +
+               `Fix the folder names, or add &allowSkips=1 to deliberately upload the rest without them.`,
+        songFolders: songs.length, wouldUpload: todo.length, skipped })
+    }
+
+    if (!dryRun) {
+      const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Retry({ method: 'GET', hostname: apiHost,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken } }, 'list buckets')
+      const bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+      if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
+
+      // Ask B2 what is ALREADY here, once, so a re-run does not re-send gigabytes.
+      // On 2026-09-10 a full run appeared to hang for an hour; it had re-uploaded
+      // the same first files. Idempotence makes interrupting this safe.
+      const present = new Map()
+      for (const folder of new Set(todo.map(t => t.b2_key.split('/').slice(0,2).join('/') + '/'))) {
+        let start = null
+        do {
+          const pr = new URLSearchParams({ bucketId, prefix: folder, maxFileCount: '10000' })
+          if (start) pr.set('startFileName', start)
+          const lr = await _b2Retry({ method: 'GET', hostname: apiHost,
+            urlPath: `/b2api/v3/b2_list_file_names?${pr}`,
+            headers: { 'Authorization': b2Auth.authorizationToken } }, 'list existing')
+          for (const f of lr.body.files || []) present.set(f.fileName, f.contentLength)
+          start = lr.body.nextFileName
+        } while (start)
+      }
+
+      let idx = 0
+      for (const w of todo) {
+        idx++
+        try {
+          if (present.get(w.b2_key) === w.size) {
+            result.skippedAlreadyThere = (result.skippedAlreadyThere || 0) + 1
+            continue
+          }
+          // ASYNC read. readFileSync blocked the whole event loop for every file --
+          // up to 30 MB each -- while intake was running ffmpeg through the SAME
+          // single-threaded server. That is what made this crawl.
+          const buf = await fsp.readFile(w.local)
+          console.log(`[upload-lot] ${idx}/${todo.length} ${(w.size/1e6).toFixed(1)}MB ${w.b2_key.split('/').pop()}`)
+          if (buf.length !== w.size || buf.length < 1024) {
+            result.failed++; failures.push({ key: w.b2_key, error: `read ${buf.length}, expected ${w.size}` }); continue
+          }
+          const up = await _b2Retry({ method: 'POST', hostname: apiHost,
+            urlPath: '/b2api/v3/b2_get_upload_url',
+            headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+            body: { bucketId } }, 'get upload url')
+          if (up.status !== 200) { result.failed++; failures.push({ key: w.b2_key, error: `upload url HTTP ${up.status}` }); continue }
+          const host   = up.body.uploadUrl.replace(/^https?:\/\//, '').split('/')[0]
+          const upPath = up.body.uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+          const sha1   = crypto.createHash('sha1').update(buf).digest('hex')
+          const put = await _b2Retry({ method: 'POST', hostname: host, urlPath: upPath,
+            headers: { 'Authorization': up.body.authorizationToken,
+                       'X-Bz-File-Name': w.b2_key.split('/').map(encodeURIComponent).join('/'),
+                       'Content-Type': 'b2/x-auto', 'X-Bz-Content-Sha1': sha1,
+                       'Content-Length': buf.length },
+            body: buf, isBuffer: true }, `upload ${w.b2_key}`)
+          const pb = Buffer.isBuffer(put.body) ? JSON.parse(put.body.toString()) : put.body
+          if (put.status !== 200)         { result.failed++; failures.push({ key: w.b2_key, error: pb?.message || `HTTP ${put.status}` }); continue }
+          if (pb.contentLength !== w.size) { result.failed++; failures.push({ key: w.b2_key, error: `B2 stored ${pb.contentLength}, expected ${w.size}` }); continue }
+          result.uploaded++; result.bytes += w.size
+        } catch (e) { result.failed++; failures.push({ key: w.b2_key, error: e.message }) }
+      }
+    }
+
+    res.json({ ok: true, dryRun, lot,
+      songFolders: songs.length, filesOnDisk: onDisk, cloudOnly,
+      wouldUpload: todo.length, totalGB: +(todo.reduce((a, x) => a + x.size, 0) / 1e9).toFixed(2),
+      skipped: skipped.length, skippedSample: skipped.slice(0, 8),
+      result, failures: failures.slice(0, 10),
+      composerFolders: [...new Set(plan.map(x => x.b2_key.split('/').slice(0,2).join('/')))]
+        .map(f => ({ folder: f, backedByObjects: (known.find(k => k.sibling_key === f) || {}).folder_objects })),
+      sample: todo.slice(0, 5).map(x => ({ sku_root: x.sku_root, b2_key: x.b2_key, size: x.size })),
+      // NEVER suggest a cohort filter here. The lot name does not predict the
+      // cohort -- every title in SOHO4_09_EDM(EX) turned out to be
+      // filemaker_migration_partial -- and filtering returns titlesWithAudio 0,
+      // which looks exactly like a failed upload. Cost an hour on 2026-09-10.
+      next: (() => {
+        const L = encodeURIComponent(lot)
+        return dryRun
+          ? `add &dryRun=0 to upload, then /api/b2/create-stems?lot=${L}&dryRun=1`
+          : `now /api/b2/create-stems?lot=${L}&dryRun=0, then /api/b2/verify-lot?lot=${L}&record=1`
+      })() })
+  } catch (e) {
+    console.error('[upload-lot]', e)
     res.json({ ok: false, error: e.message })
   }
 })

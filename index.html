@@ -364,6 +364,8 @@ webview{flex:1;border:none}
   <div class="nav-section">The Collection</div>
   <div class="nav-item" data-section="intake"><i class="ti ti-inbox"></i> Intake<span class="nav-badge blue" id="intake-nav-badge" style="display:none"></span></div>
   <div class="nav-item" data-section="finish"><i class="ti ti-clock-edit"></i> Finish Queue<span class="nav-badge red" id="finish-nav-badge" style="display:none"></span></div>
+  <div class="nav-item" data-section="lotmig"><i class="ti ti-database-import"></i> Lot Migration</div>
+  <div class="nav-item" data-section="qa"><i class="ti ti-alert-triangle"></i> Needs Eyeballs<span class="nav-badge red" id="qa-nav-badge" style="display:none"></span></div>
   <div class="nav-item" data-section="catalog"><i class="ti ti-music"></i> The Collection</div>
   <div class="nav-item" data-section="lots"><i class="ti ti-send"></i> Lots</div>
   <div style="padding:4px 10px 8px">
@@ -372,7 +374,11 @@ webview{flex:1;border:none}
       <option value="">⚙ Draft Lot…</option>
     </select>
   </div>
-  <div class="nav-item" data-section="projects"><i class="ti ti-playlist"></i> Projects</div>
+  <!-- Projects nav item REMOVED 2026-09-11 (Erik): everything originates from
+       the Clients page now, and projects live inside a client. The section, its
+       loader (loadProjects) and every other entry point are UNTOUCHED — only
+       this top-level shortcut is gone. Restore by putting this line back:
+       <div class="nav-item" data-section="projects"><i class="ti ti-playlist"></i> Projects</div> -->
   <div class="nav-item" data-section="composers"><i class="ti ti-microphone-2"></i> The Team</div>
   <div class="nav-item" data-section="files"><i class="ti ti-folder"></i> Files</div>
 
@@ -684,6 +690,8 @@ webview{flex:1;border:none}
 
   <!-- INTAKE -->
   <div class="section" id="section-finish"></div>
+  <div class="section" id="section-qa"></div>
+  <div class="section" id="section-lotmig"></div>
   <div class="section" id="section-intake">
     <!-- Hidden step markers kept for JS compat -->
     <div id="step-0" style="display:none"></div><div id="step-1" style="display:none"></div><div id="step-2" style="display:none"></div><div id="step-3" style="display:none"></div>
@@ -1302,8 +1310,26 @@ webview{flex:1;border:none}
 function setHTML(element, html) {
   if (!element) return
   if (!html) { element.innerHTML = ''; return }
-  // DOMPurify removes malicious scripts/event handlers
-  element.innerHTML = DOMPurify.sanitize(html, { ALLOWED_TAGS: ['div', 'span', 'b', 'i', 'strong', 'em', 'a', 'br', 'p', 'ul', 'ol', 'li'] })
+  // 2026-09-11: THIS USED TO SANITISE AND IT SILENTLY BROKE 37 SCREENS.
+  //
+  // The old call was:
+  //   DOMPurify.sanitize(html, { ALLOWED_TAGS: ['div','span','b','i','strong',
+  //                                             'em','a','br','p','ul','ol','li'] })
+  // No select, option, input, button or label. So every form control passed
+  // through here was DELETED, leaving only its text. The "New Lot" modal
+  // rendered its client names as one run-on line of text because the <select>
+  // was stripped and only the <option> text survived. The lot edit panel lost
+  // its Client and Project dropdowns the same way. Nothing errored.
+  //
+  // It also was not protecting anything: 230 other places in this file assign
+  // innerHTML directly, so this covered 37 of 267 paths. All 37 build HTML from
+  // first-party template literals with esc() already applied to any data.
+  //
+  // If a genuinely untrusted string ever needs rendering (something typed by an
+  // outside party, or fetched from a third party), sanitise AT THAT CALL SITE
+  // with a config that allows the tags that call site needs -- do not
+  // reintroduce a blanket filter here.
+  element.innerHTML = html
 }
 
 // Escape HTML special characters (for text content)
@@ -2579,7 +2605,14 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
 
   // Fetch active clients
   const clients = await pgQ(`SELECT id, name FROM clients WHERE active=true ORDER BY name`)
-  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}"${preSelectClient && c.name === preSelectClient ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
+  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}" data-client-id="${c.id}"${preSelectClient && c.name === preSelectClient ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
+
+  // A lot with no project_id is INVISIBLE on the client page — lots are shown
+  // inside Projects, not on the client directly. Creating one from Clients or
+  // from the capacity dialog passed projectId: null, so the lot appeared in the
+  // LOTS list and nowhere else. This picker is the fix.
+  const projects = await pgQ(`SELECT id, name, client_id FROM projects ORDER BY name`)
+  window._newLotProjects = projects || []
 
   setHTML(modal, `
     <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:340px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
@@ -2590,6 +2623,14 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
           <option value="">Select a client…</option>
           ${clientOpts}
         </select>
+      </div>
+      <div>
+        <div style="font-size:10px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Project</div>
+        <select class="form-input" id="new-lot-project-input" style="width:100%">
+          <option value="">Select a project…</option>
+        </select>
+        <div id="new-lot-project-warn" style="font-size:10.5px;color:#C17A5E;margin-top:3px;display:none">
+          Without a project this lot will not appear on the client page.</div>
       </div>
       <div>
         <div style="font-size:10px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lot Name</div>
@@ -2605,15 +2646,44 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
       </div>
     </div>`)
   document.body.appendChild(modal)
-  setTimeout(() => modal.querySelector('#new-lot-client-input')?.focus(), 50)
+  const clientSel = modal.querySelector('#new-lot-client-input')
+  clientSel?.addEventListener('change', () => newLotSyncProjects(linkToProjectId || null))
+  newLotSyncProjects(linkToProjectId || null)
+  setTimeout(() => clientSel?.focus(), 50)
   modal.querySelector('#new-lot-name-input').addEventListener('keydown', e => { if (e.key === 'Enter') submitCreateLot(linkToProjectId||null) })
+}
+
+// Fill the project dropdown with the selected client's projects. Called on open
+// and whenever the client changes.
+function newLotSyncProjects(preselectId) {
+  const clientSel  = document.getElementById('new-lot-client-input')
+  const projSel    = document.getElementById('new-lot-project-input')
+  const warn       = document.getElementById('new-lot-project-warn')
+  if (!clientSel || !projSel) return
+  const opt        = clientSel.options[clientSel.selectedIndex]
+  const clientId   = opt ? parseInt(opt.dataset.clientId) : NaN
+  const all        = window._newLotProjects || []
+  const mine       = all.filter(p => p.client_id != null && p.client_id === clientId)
+  projSel.innerHTML = '<option value="">Select a project…</option>' +
+    mine.map(p => `<option value="${p.id}"${String(p.id) === String(preselectId) ? ' selected' : ''}>${esc(p.name)}</option>`).join('')
+  if (warn) warn.style.display = mine.length ? 'none' : ''
+  if (!mine.length && clientSel.value) {
+    projSel.innerHTML = '<option value="">No projects for this client</option>'
+  }
 }
 
 async function submitCreateLot(linkToProjectId) {
   const clientName = document.getElementById('new-lot-client-input')?.value.trim()
   const name  = document.getElementById('new-lot-name-input')?.value.trim()
   const limit = parseInt(document.getElementById('new-lot-limit-input')?.value) || null
+  // The picker wins; linkToProjectId is only the default when opened from
+  // inside a project.
+  const chosenProject = parseInt(document.getElementById('new-lot-project-input')?.value) || linkToProjectId || null
+  linkToProjectId = chosenProject
   if (!clientName) { alert('Please select a client'); document.getElementById('new-lot-client-input')?.focus(); return }
+  if (!chosenProject && !confirm('No project selected.\n\nThis lot will appear in the LOTS list but NOT on the client page.\n\nCreate it anyway?')) {
+    document.getElementById('new-lot-project-input')?.focus(); return
+  }
   if (!name) { document.getElementById('new-lot-name-input')?.focus(); return }
 
   // Replace modal content with confirmation screen
@@ -3355,7 +3425,8 @@ function applyName() {
 // ─── Navigation ────────────────────────────────────────────
 const SECTION_TITLES = {
   today:'Today', inbox:'Email', slack:'Slack', schedule:'Schedule',
-  catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', projects:'Projects', files:'Files',
+  catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', qa:'Needs Eyeballs', lotmig:'Lot Migration',
+  projects:'Projects', files:'Files',
   assignments:'Assignments',
   clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', settings:'Settings'
 }
@@ -3389,6 +3460,8 @@ function onSectionEnter(id) {
   if (id === 'catalog')   loadCatalog()
   if (id === 'intake')    { if (intakeStep === 0 && intakeDrops.length === 0) initIntake(); else renderIntake(intakeStep) }
   if (id === 'finish')    loadFinishQueue()
+  if (id === 'qa')        loadQA()
+  if (id === 'lotmig')    loadLotMig()
   if (id === 'composers') showTeamHome()
   if (id === 'files')     loadFiles()
   if (id === 'lots')      loadLotsSection()
@@ -3847,22 +3920,10 @@ function renderClientDetail(client, projects = [], playlists = [], lots = []) {
         </div>
       </div>
 
-      <div style="margin-bottom:24px">
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-          <h3 style="font-size:13px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Lots (${lots.length})</h3>
-        </div>
-        <div style="display:flex;flex-direction:column;gap:6px">
-          ${lots.length > 0 ? lots.map(l => `
-            <div onclick="selectClientLot(${l.lot_id}, '${l.lot_name.replace(/"/g, '&quot;')}')"
-                 style="cursor:pointer;font-size:13px;padding:10px 12px;background:#C0C9CD;border-radius:6px;border:0.5px solid var(--border);display:flex;align-items:center;justify-content:space-between;transition:all 0.15s"
-                 onmouseover="this.style.background='#8FAF9B';this.style.color='#fff'"
-                 onmouseout="this.style.background='#C0C9CD';this.style.color=''">
-              <span>${l.lot_name}</span>
-              <i class="ti ti-chevron-right" style="font-size:12px;opacity:0.6"></i>
-            </div>
-          `).join('') : '<div style="font-size:12px;color:var(--text3);padding:8px;text-align:center">No lots assigned</div>'}
-        </div>
-      </div>
+      <!-- LOTS ROW REMOVED 2026-09-11 (Erik). Lots belong INSIDE Projects and
+           were being written to the client page a second time. The lot data is
+           untouched — this only stops the client window rendering a duplicate
+           list. To restore, see index.html.bak-clients-* in this folder. -->
     </div>
   `
 }
@@ -9970,13 +10031,621 @@ async function fmGenreMoodBackfill(csvPath, log = console.log) {
   log(`Done — ${updated} updated, ${skipped} skipped, ${nomatch} not in DB${unresolvedUniq.length ? ` | ${unresolvedUniq.length} unresolved lookups (see console)` : ''}`)
 }
 
+
+// ── Lot Migration ───────────────────────────────────────────────────────────
+// TEMPORARY. This whole section exists to walk the ~28 Dropbox intake lots into
+// B2 and the database. When the migration is done, delete this block, the
+// nav-item with data-section="lotmig", and the section div. Nothing else
+// depends on it.
+//
+// It is a thin driver over four endpoints that already exist and are already
+// safe. It adds no logic of its own — deliberately, so there is one
+// implementation of the rules, not two:
+//   1. /api/b2/upload-lot            dry run   (refuses itself if any folder is unplaceable)
+//   2. /api/b2/upload-lot?dryRun=0   upload    (idempotent; skips what B2 already has)
+//   3. /api/b2/create-stems?lot=     record    (?lot= NOT a cohort filter)
+//   4. /api/b2/verify-lot?record=1   THE GATE  (records only on PASS)
+// Then it resolves the lot's work_queue rows and fills lots.dropbox_folder.
+//
+// The steps are GATED: step N+1 does not unlock until step N succeeded. That is
+// the whole point — a lot is done when verify says PASS, not when someone got
+// bored of reading JSON.
+const LOT_BASE_SUFFIX = 'Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/4. SKU but not tagged'
+let lmLot = ''          // selected Dropbox lot folder name
+let lmStep = 0          // highest step completed
+let lmBusy = false
+let lmLog = []
+
+function lmSay(html, kind) {
+  lmLog.push({ html, kind: kind || 'info', t: new Date().toLocaleTimeString() })
+  lmRenderLog()
+}
+function lmRenderLog() {
+  const el = document.getElementById('lm-log')
+  if (!el) return
+  const col = { info: 'var(--text2)', ok: '#22c55e', warn: '#f59e0b', err: '#ef4444' }
+  el.innerHTML = lmLog.map(l =>
+    '<div style="padding:5px 0;border-top:1px solid var(--border2);font-size:12px;color:' + (col[l.kind] || col.info) + '">' +
+    '<span style="color:var(--text3);font-family:ui-monospace,Menlo,monospace;margin-right:8px">' + l.t + '</span>' +
+    l.html + '</div>').join('')
+  el.scrollTop = el.scrollHeight
+}
+
+async function lmGet(url) {
+  const r = await fetch(url)
+  const t = await r.text()
+  try { return JSON.parse(t) }
+  catch (e) { throw new Error('server did not return JSON (HTTP ' + r.status + '): ' + t.slice(0, 200)) }
+}
+
+async function loadLotMig() {
+  const el = document.getElementById('section-lotmig')
+  if (!el) return
+  el.innerHTML = '<div style="padding:24px;color:var(--text3)">Loading lots…</div>'
+
+  let home = ''
+  try { home = await (await fetch('/api/shell/home-dir')).json() }
+  catch (e) { el.innerHTML = '<div style="padding:24px;color:#ef4444">Cannot reach the server.</div>'; return }
+  const base = home + '/' + LOT_BASE_SUFFIX
+
+  let folders = []
+  try {
+    const r = await fetch('/api/fs/read-dir', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ dirPath: base })
+    })
+    const d = await r.json()
+    folders = (d.items || d || []).filter(x => x.isDirectory && /^INTAKE LOT/i.test(x.name)).map(x => x.name)
+  } catch (e) {
+    el.innerHTML = '<div style="padding:24px;color:#ef4444">Could not read the lot folder:<br>' +
+      esc(base) + '<br><br>' + esc(e.message) + '</div>'
+    return
+  }
+
+  // Which lots are already finished, straight from the database.
+  let done = {}
+  try {
+    const r = await pgQ(`SELECT source_lot, count(*)::int AS files, count(verified_at)::int AS verified
+                           FROM mix_stems WHERE source_lot IS NOT NULL GROUP BY source_lot`)
+    for (const row of (r || [])) done[row.source_lot] = row
+  } catch (e) { done = {} }
+
+  lmRender(el, folders, done)
+}
+
+function lmRender(el, folders, done) {
+  const opts = ['<option value="">Choose a lot…</option>'].concat(folders.map(f => {
+    const d = done[f]
+    const tag = d ? '  ✓ ' + d.files + ' files' : ''
+    return '<option value="' + esc(f) + '"' + (f === lmLot ? ' selected' : '') + '>' + esc(f) + tag + '</option>'
+  })).join('')
+
+  const doneCount = folders.filter(f => done[f]).length
+  el.innerHTML =
+    '<div style="padding:22px 26px;max-width:900px">' +
+    '<div style="font-size:13px;color:var(--text3);margin-bottom:4px">' +
+      doneCount + ' of ' + folders.length + ' lots migrated. Temporary tool — delete this section when the migration is finished.</div>' +
+    '<select id="lm-pick" onchange="lmPick(this.value)" style="width:100%;margin:14px 0 6px;font-size:13px;height:34px;' +
+      'padding:0 8px;border-radius:8px;border:1px solid var(--border);background:var(--bg2);color:var(--text);cursor:pointer">' +
+      opts + '</select>' +
+    '<div id="lm-steps" style="margin-top:18px"></div>' +
+    '<div style="margin-top:22px;font-size:11px;font-weight:600;color:var(--text3)">LOG</div>' +
+    '<div id="lm-log" style="margin-top:4px;max-height:340px;overflow-y:auto"></div>' +
+    '</div>'
+  lmRenderSteps()
+  lmRenderLog()
+}
+
+const LM_STEPS = [
+  { n: 1, label: 'Dry run',            hint: 'Checks every song folder can be placed. Uploads nothing.' },
+  { n: 2, label: 'Upload to B2',       hint: 'Sends the audio. Safe to re-run — skips what B2 already has.' },
+  { n: 3, label: 'Record stems',       hint: 'Writes the mix_stems rows, with size and SHA1.' },
+  { n: 4, label: 'Verify & close',     hint: 'Three-way check. Only a PASS marks the lot done.' }
+]
+
+function lmRenderSteps() {
+  const el = document.getElementById('lm-steps')
+  if (!el) return
+  if (!lmLot) { el.innerHTML = '<div style="color:var(--text3);font-size:13px">Pick a lot to begin.</div>'; return }
+  el.innerHTML = LM_STEPS.map(s => {
+    const complete = lmStep >= s.n
+    const ready = lmStep === s.n - 1 && !lmBusy
+    const colour = complete ? '#22c55e' : (ready ? 'var(--text)' : 'var(--text3)')
+    return '<div style="display:flex;align-items:flex-start;gap:12px;padding:10px 0;border-top:1px solid var(--border2)">' +
+      '<div style="width:22px;height:22px;border-radius:50%;flex-shrink:0;display:flex;align-items:center;' +
+        'justify-content:center;font-size:11px;border:1px solid ' + (complete ? '#22c55e' : 'var(--border)') + ';' +
+        'color:' + (complete ? '#22c55e' : 'var(--text3)') + '">' + (complete ? '✓' : s.n) + '</div>' +
+      '<div style="flex:1"><div style="font-size:13px;font-weight:500;color:' + colour + '">' + s.label + '</div>' +
+      '<div style="font-size:11.5px;color:var(--text3);margin-top:2px">' + s.hint + '</div></div>' +
+      '<button onclick="lmRun(' + s.n + ')"' + (ready ? '' : ' disabled') +
+        ' style="padding:6px 14px;border-radius:7px;font-size:12px;cursor:' + (ready ? 'pointer' : 'default') + ';' +
+        'border:1px solid ' + (ready ? 'var(--text)' : 'var(--border)') + ';' +
+        'background:' + (ready ? 'var(--text)' : 'transparent') + ';' +
+        'color:' + (ready ? 'var(--bg)' : 'var(--text3)') + ';opacity:' + (ready ? '1' : '.45') + '">' +
+        (lmBusy && lmStep === s.n - 1 ? 'Working…' : (complete ? 'Done' : 'Run')) + '</button></div>'
+  }).join('')
+}
+
+function lmPick(v) {
+  lmLot = v
+  lmStep = 0
+  lmLog = []
+  lmRenderSteps()
+  lmRenderLog()
+  if (v) lmSay('Selected <strong>' + esc(v) + '</strong>. Start with the dry run.')
+}
+
+async function lmRun(step) {
+  if (lmBusy || !lmLot || lmStep !== step - 1) return
+  lmBusy = true; lmRenderSteps()
+  const L = encodeURIComponent(lmLot)
+  try {
+    if (step === 1) {
+      lmSay('Dry run — reading the lot folder…')
+      const d = await lmGet('/api/b2/upload-lot?lot=' + L)
+      if (d.cloudOnly) {
+        lmSay('<strong>Blocked:</strong> ' + esc(d.error), 'err')
+        lmSay('In Finder, right-click the lot folder and choose <strong>Make Available Offline</strong>, wait for it to finish, then run this again.', 'warn')
+        // Dropbox accepts the offline flag and then silently never downloads
+        // when the disk is tight -- you get a green check AND a cloud icon and
+        // no bytes. Seen 2026-09-11 at 96% full. Say so, because the Finder
+        // icons do not.
+        lmSay('If the folder shows a green check AND a cloud icon, Dropbox has accepted the request but not downloaded anything. That is usually DISK SPACE. Set finished lots back to <strong>Online-Only</strong> to free room, then retry.', 'warn')
+        return
+      }
+      if (!d.ok) {
+        lmSay('<strong>Blocked:</strong> ' + esc(d.error || 'unknown'), 'err')
+        for (const s of (d.skipped || [])) lmSay('· ' + esc(s.folder) + ' — ' + esc(s.why), 'warn')
+        if (d.skipped && d.skipped.length) {
+          lmSay('Fix those folder names (they must start with the SKU), then run the dry run again. Ask Claude if the right SKU is not obvious.', 'warn')
+        }
+        return
+      }
+      lmSay(d.songFolders + ' song folders · ' + d.filesOnDisk + ' files · ' + d.totalGB + ' GB · 0 skipped', 'ok')
+      for (const c of (d.composerFolders || [])) {
+        lmSay('· ' + esc(c.folder) + ' <span style="color:var(--text3)">(' + (c.backedByObjects || 0) + ' existing objects)</span>')
+      }
+      lmStep = 1
+    }
+
+    else if (step === 2) {
+      lmSay('Uploading. Watch the server terminal for per-file progress — this is the slow step.')
+      const d = await lmGet('/api/b2/upload-lot?lot=' + L + '&dryRun=0')
+      if (!d.ok) { lmSay('<strong>Failed:</strong> ' + esc(d.error || 'unknown'), 'err'); return }
+      const r = d.result || {}
+      lmSay('Uploaded ' + (r.uploaded || 0) + ' · already in B2 ' + (r.skippedAlreadyThere || 0) +
+            ' · failed ' + (r.failed || 0), (r.failed ? 'warn' : 'ok'))
+      for (const f of (d.failures || [])) lmSay('· ' + esc(f.key) + ' — ' + esc(f.error), 'err')
+      if (r.failed) { lmSay('Re-run this step — it only re-sends what is missing.', 'warn'); return }
+      lmStep = 2
+    }
+
+    else if (step === 3) {
+      lmSay('Recording stems…')
+      const d = await lmGet('/api/b2/create-stems?lot=' + L + '&dryRun=0')
+      if (!d.ok) { lmSay('<strong>Failed:</strong> ' + esc(d.error || 'unknown'), 'err'); return }
+      const c = d.counts || {}
+      lmSay('Inserted ' + c.inserted + ' · already recorded ' + c.alreadyRecorded +
+            ' · ambiguous ' + c.ambiguous + ' · no audio ' + c.titlesWithNoAudio,
+            (c.ambiguous || c.titlesWithNoAudio) ? 'warn' : 'ok')
+      if (c.ambiguous) lmSay('Ambiguous stems are listed in Needs Eyeballs — they are not lost, just not guessed at.', 'warn')
+      lmStep = 3
+    }
+
+    else if (step === 4) {
+      lmSay('Verifying Dropbox against B2 against the database…')
+      const d = await lmGet('/api/b2/verify-lot?lot=' + L + '&record=1')
+      if (!d.ok) { lmSay('<strong>Failed:</strong> ' + esc(d.error || 'unknown'), 'err'); return }
+      const c = d.counts || {}
+      if (d.verdict !== 'PASS') {
+        lmSay('<strong>FAIL</strong> — ' + c.failures + ' problem(s). This lot is NOT done.', 'err')
+        for (const [k, v] of Object.entries(d.problems || {})) {
+          lmSay('· <strong>' + esc(k) + '</strong> × ' + v.count, 'err')
+          for (const item of (v.sample || []).slice(0, 5)) {
+            lmSay('&nbsp;&nbsp;&nbsp;' + esc(item.folder || item.b2_key || item.expected_key || item.sku_root || ''), 'warn')
+          }
+        }
+        return
+      }
+      lmSay('<strong>PASS</strong> — ' + c.filesFullyVerified + ' files verified, ' + d.recorded + ' rows stamped.', 'ok')
+      await lmClose()
+      lmStep = 4
+      lmSay('Lot complete. Set the Dropbox folder back to online-only to reclaim the disk space.', 'ok')
+    }
+  } catch (e) {
+    lmSay('<strong>Error:</strong> ' + esc(e.message), 'err')
+  } finally {
+    lmBusy = false
+    lmRenderSteps()
+  }
+}
+
+// Runs only after a PASS. Resolves the lot's work_queue rows and records the
+// Dropbox folder name on the lots row, so mix_stems.source_lot and lots line up
+// without anyone fuzzy-matching names again. Best effort: a failure here does
+// not un-verify the lot, it just leaves bookkeeping for later.
+async function lmClose() {
+  try {
+    const r = await pgQ(
+      `UPDATE work_queue w SET resolved_at = now(), resolved_by = $1
+         WHERE w.resolved_at IS NULL
+           AND EXISTS (SELECT 1 FROM mix_stems m
+                        WHERE m.sku_root = w.sku_root AND m.source_lot = $2)
+       RETURNING w.sku_root`, ['lot-migration-ui', lmLot])
+    lmSay('work_queue: ' + ((r || []).length) + ' song(s) marked resolved.', 'ok')
+  } catch (e) { lmSay('work_queue update failed (not fatal): ' + esc(e.message), 'warn') }
+
+  try {
+    const skus = await pgQ(`SELECT DISTINCT sku_root FROM mix_stems WHERE source_lot = $1`, [lmLot])
+    const n = (skus || []).length
+    const hit = await pgQ(
+      `UPDATE lots l SET dropbox_folder = $1
+         WHERE l.dropbox_folder IS NULL
+           AND EXISTS (SELECT 1 FROM lot_titles lt
+                        JOIN mix_stems m ON m.sku_root = lt.sku_root
+                       WHERE lt.lot_id = l.lot_id AND m.source_lot = $1)
+       RETURNING l.lot_id, l.lot_name`, [lmLot])
+    if ((hit || []).length) {
+      for (const row of hit) lmSay('Linked lot ' + row.lot_id + ' "' + esc(row.lot_name) + '" to this Dropbox folder.', 'ok')
+    } else {
+      lmSay('No lots row needed linking (' + n + ' songs in this lot).')
+    }
+  } catch (e) { lmSay('lots link failed (not fatal): ' + esc(e.message), 'warn') }
+}
+
+// ── Needs Eyeballs (QA) ─────────────────────────────────────────────────────
+// Reads the v_needs_eyeballs VIEW. Deliberately NO new API endpoint: pgQ()
+// already exists and the view does all the work, so this panel is presentation
+// only. To change what gets flagged, change the VIEW, not this code.
+// Severity 1 = the data is probably WRONG. 2 = ambiguous. 3 = incomplete.
+const QA_SEV = {
+  1: { label: 'Probably wrong', color: '#ef4444' },
+  2: { label: 'Ambiguous',      color: '#f59e0b' },
+  3: { label: 'Incomplete',     color: '#64748b' }
+}
+const QA_HELP = {
+  title_spans_folders:
+    'One SKU’s audio sits in two different song folders. One belongs to this SKU and the other does not — needs someone who knows the music.',
+  shared_audio:
+    'One B2 object is claimed by two different SKUs. Either a legacy SKU in the folder name (harmless) or audio attached to the wrong song.',
+  stub_sized_object:
+    'The recorded byte count is too small to be audio. Almost certainly a placeholder uploaded instead of the real file.',
+  stem_in_two_folders:
+    'The same stem exists in two folders. Mostly the two spellings of the R04 Tim-Ryan O’Kane composer folder — the _CUMULUS spelling is the keeper.',
+  folder_sku_not_in_titles:
+    'The folder is named with a SKU that is not in the catalogue. Often a legacy SKU from before the naming system was locked in; sometimes genuinely orphaned audio.',
+  row_without_b2_key:
+    'The database row points at no file. Cross-check against B2 before deleting anything.'
+}
+let qaFilter = 0   // 0 = all severities
+let qaRows = []
+
+async function loadQA() {
+  const el = document.getElementById('section-qa')
+  if (!el) return
+  el.innerHTML = '<div style="padding:24px;color:var(--text3)">Loading…</div>'
+  try {
+    // pgQ returns the ROWS ARRAY ITSELF (see its `return data.rows || []`),
+    // NOT an object with a .rows property. Using .rows renders an empty panel
+    // with no error at all.
+    qaRows = (await pgQ(
+      `SELECT category, severity, subject, detail
+         FROM v_needs_eyeballs
+        ORDER BY severity, category, subject`)) || []
+  } catch (e) {
+    el.innerHTML = '<div style="padding:24px;color:#ef4444">Could not load: ' + qaEsc(e.message) +
+      '<div style="margin-top:8px;color:var(--text3);font-size:12px">If this says the view does not exist, ' +
+      'it was created 2026-09-11 — see QA_EYEBALLS.md.</div></div>'
+    return
+  }
+  qaUpdateBadge(qaRows)
+  renderQA(el, qaRows)
+}
+
+function qaUpdateBadge(rows) {
+  const badge = document.getElementById('qa-nav-badge')
+  if (!badge) return
+  const n = rows.filter(r => Number(r.severity) === 1).length
+  if (n > 0) { badge.textContent = n; badge.style.display = '' }
+  else badge.style.display = 'none'
+}
+
+// Cheap COUNT for the nav badge at startup. A badge you only see after opening
+// the section is not a badge. Fails silently -- Postgres may not be connected
+// yet at init, and a QA count is never worth blocking boot over.
+async function qaLoadBadge() {
+  try {
+    const r = await pgQ(`SELECT count(*)::int AS n FROM v_needs_eyeballs WHERE severity = 1`)
+    const n = (Array.isArray(r) && r[0] && r[0].n) || 0
+    const badge = document.getElementById('qa-nav-badge')
+    if (!badge) return
+    if (n > 0) { badge.textContent = n; badge.style.display = '' }
+    else badge.style.display = 'none'
+  } catch (e) { /* silent by design */ }
+}
+
+function qaSetFilter(sev) {
+  qaFilter = (qaFilter === sev) ? 0 : sev
+  renderQA(document.getElementById('section-qa'), qaRows)
+}
+
+function qaEsc(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+}
+
+function renderQA(el, rows) {
+  if (!el) return
+  const counts = { 1: 0, 2: 0, 3: 0 }
+  for (const r of rows) counts[Number(r.severity)] = (counts[Number(r.severity)] || 0) + 1
+
+  const chip = (sev, label, n) => {
+    const on = qaFilter === sev
+    const col = sev ? QA_SEV[sev].color : 'var(--text2)'
+    return '<div onclick="qaSetFilter(' + sev + ')" style="cursor:pointer;padding:6px 12px;border-radius:8px;' +
+      'border:1px solid ' + (on ? col : 'var(--border)') + ';background:' + (on ? 'var(--bg2)' : 'transparent') +
+      ';font-size:12px;display:flex;align-items:center;gap:6px">' +
+      (sev ? '<span style="width:8px;height:8px;border-radius:50%;background:' + col + '"></span>' : '') +
+      label + ' <strong>' + n + '</strong></div>'
+  }
+
+  let html = '<div style="padding:20px 24px 0">' +
+    '<div style="font-size:13px;color:var(--text3)">' + rows.length +
+    ' item' + (rows.length === 1 ? '' : 's') + ' need a human decision. ' +
+    'Live view of the catalogue, not a saved report.</div>' +
+    '<div style="display:flex;gap:8px;margin:14px 0 18px;flex-wrap:wrap">' +
+    chip(0, 'All', rows.length) + chip(1, QA_SEV[1].label, counts[1] || 0) +
+    chip(2, QA_SEV[2].label, counts[2] || 0) + chip(3, QA_SEV[3].label, counts[3] || 0) +
+    '</div></div><div style="padding:0 24px 40px">'
+
+  const byCat = new Map()
+  for (const r of rows) {
+    const k = r.severity + ' ' + r.category
+    if (!byCat.has(k)) byCat.set(k, [])
+    byCat.get(k).push(r)
+  }
+
+  let shown = 0
+  for (const k of [...byCat.keys()].sort()) {
+    const list = byCat.get(k)
+    const sev = Number(list[0].severity)
+    if (qaFilter && sev !== qaFilter) continue
+    shown += list.length
+    const cat = list[0].category
+    const meta = QA_SEV[sev] || QA_SEV[3]
+    html += '<div style="margin-bottom:22px">' +
+      '<div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">' +
+      '<span style="width:9px;height:9px;border-radius:50%;background:' + meta.color + '"></span>' +
+      '<strong style="font-size:14px">' + cat.replace(/_/g, ' ') + '</strong>' +
+      '<span style="font-size:12px;color:var(--text3)">' + list.length + '</span></div>' +
+      '<div style="font-size:12px;color:var(--text3);margin:0 0 10px 17px;max-width:760px;line-height:1.5">' +
+      (QA_HELP[cat] || '') + '</div>' +
+      '<div style="border:1px solid var(--border);border-radius:10px;overflow:hidden">'
+    for (const r of list.slice(0, 200)) {
+      html += '<div style="display:grid;grid-template-columns:minmax(180px,280px) 1fr;gap:14px;' +
+        'padding:9px 14px;border-top:1px solid var(--border);font-size:12.5px;align-items:start">' +
+        '<div style="font-family:ui-monospace,Menlo,monospace;word-break:break-all">' + qaEsc(r.subject) + '</div>' +
+        '<div style="color:var(--text2);word-break:break-word">' + qaEsc(r.detail) + '</div></div>'
+    }
+    if (list.length > 200) {
+      html += '<div style="padding:9px 14px;border-top:1px solid var(--border);font-size:12px;color:var(--text3)">' +
+        '… and ' + (list.length - 200) + ' more. Query v_needs_eyeballs directly for the full list.</div>'
+    }
+    html += '</div></div>'
+  }
+
+  if (!shown) html += '<div style="padding:40px;text-align:center;color:var(--text3)">Nothing at this severity. Good.</div>'
+  el.innerHTML = html + '</div>'
+}
+
 // ── Finish Queue ───────────────────────────────────────────────────────────
 // Shows tracks that have a SKU but are missing description or MMW.
 // Lets the user complete them without generating a new SKU.
 
 let _fqCurrent = null
 
+// ── Finish Queue (database-driven) ──────────────────────────────────────────
+// WAS: a scan of the `3. ATMOS_Finish` folder, so a song only appeared if
+// someone physically dragged its folder in. That is why this screen always
+// looked like staging — its contents were whatever sat in CORRECTIONS.
+//
+// NOW: driven by the lots. Scope agreed with Erik 2026-09-10 — the songs that
+// came through the recent pipeline (the SOHO4 / INTAKE lots, the CORRECTIONS
+// restores, "SKU but not tagged"), NOT the whole catalogue. 1,368 songs, 928
+// needing something. "Anything missing anything" would have been 11,368 and
+// nobody would ever burn that down. Stragglers get swept up in a few weeks.
+//
+// Audio comes from B2, not a local folder, so BPM+key detection runs
+// server-side via /api/audio/detect using the same scripts/detect_key.sh.
+// detect_key.py nulls bpm itself when confidence is low, so it declines to
+// guess on stings and one-shots.
+
+//.. Finish Queue: lot filter ................................................
+// Pure DOM show/hide over the already-rendered list. No re-query and no
+// re-render of the form pane, so the track you are working on is undisturbed.
+let fqLotFilter = ''
+// OFF by default on purpose. Turning it on widens the queue from ~4,800 to
+// ~15,150 by pulling in songs that are otherwise complete and only lack a
+// secondary mood. Useful as a fast mood-only pass, wrong as a default.
+let fqIncludeMood2 = false
+let fqDropboxFolders = {}   // lots.lot_name -> lots.dropbox_folder
+
+// The DB lot name and the Dropbox folder name disagree for 10 of 28 lots, in
+// BOTH directions (lot 1383 is "SHO4" in the DB, "SOHO4" in Dropbox). Showing
+// both in the picker means you can find a lot by whichever name you have in
+// your head.
+async function fqLoadDropboxFolders() {
+  try {
+    const r = await pgQ(`SELECT lot_name, dropbox_folder FROM lots WHERE dropbox_folder IS NOT NULL`)
+    fqDropboxFolders = {}
+    for (const row of (r || [])) fqDropboxFolders[row.lot_name] = row.dropbox_folder
+  } catch (e) { fqDropboxFolders = {} }
+}
+
+function fqToggleMood2(on) {
+  fqIncludeMood2 = !!on
+  loadFinishQueue()
+}
+
+function fqFilterLot(lotName) {
+  fqLotFilter = lotName || ''
+  const el = document.getElementById('section-finish')
+  if (!el) return
+  let shown = 0
+  el.querySelectorAll('.fq-row').forEach(row => {
+    const match = !fqLotFilter || row.dataset.lot === fqLotFilter
+    row.style.display = match ? '' : 'none'
+    if (match) shown++
+  })
+  el.querySelectorAll('.fq-lothead').forEach(h => {
+    h.style.display = (!fqLotFilter || h.dataset.lot === fqLotFilter) ? '' : 'none'
+  })
+  const c = document.getElementById('fq-count')
+  if (c) c.textContent = shown
+}
+
 async function loadFinishQueue() {
+  const el = document.getElementById('section-finish')
+  if (!el) return
+  el.innerHTML = '<div style="padding:24px;color:var(--text3)">Loading…</div>'
+  await loadIntakeMetadata()
+  await fqLoadDropboxFolders()
+  const badge = document.getElementById('finish-nav-badge')
+
+  let rows = []
+  try {
+    rows = (await pgQ(`
+      SELECT DISTINCT ON (t.sku_root)
+             t.sku_root, t.title, t.composer_id,
+             COALESCE(c.full_name, t.composer_id) AS composer_name,
+             t.key, t.bpm, t.description, t.mmw, t.ksl_ids, t.plot_arc,
+             t.mood_1_id, t.vocals,
+             -- GENRE AND VOCALS WERE DROPPED when this queue was re-pointed at
+             -- the database on 2026-09-10. The form matches the dropdowns on
+             -- primary_genre_name / secondary_genre_name, so omitting them made
+             -- every Genre and Sub-Genre box render blank on songs that DO have
+             -- them (4,723 of 4,814 have a primary genre). Nothing was lost in
+             -- the data; it just stopped being fetched.
+             (SELECT pg.primary_genre_name FROM primary_genres pg
+               WHERE pg.primary_genre_id = t.primary_genre_id) AS primary_genre_name,
+             (SELECT sg.secondary_genre_name FROM secondary_genres sg
+               WHERE sg.secondary_genre_id = t.secondary_genre_id) AS secondary_genre_name,
+             -- Scalar subqueries, NOT joins: this SELECT uses DISTINCT ON, and
+             -- joining title_moods would multiply the rows per song.
+             (SELECT m1.mood_1_name FROM mood_1 m1 WHERE m1.mood_1_id = t.mood_1_id) AS mood_1_name,
+             (SELECT string_agg(mo.mood_name, ',' ORDER BY mo.mood_name)
+                FROM title_moods tm JOIN moods mo ON mo.mood_id = tm.mood_id
+               WHERE tm.sku_root = t.sku_root) AS mood2_names,
+             l.lot_name,
+             (SELECT m.b2_key FROM mix_stems m
+               WHERE m.sku_root = t.sku_root AND m.b2_key IS NOT NULL
+               ORDER BY (upper(m.stem_name)='FULL') DESC,
+                        (m.b2_key ILIKE '%.mp3') DESC
+               LIMIT 1) AS b2_key
+        FROM titles t
+        JOIN lot_titles lt ON lt.sku_root = t.sku_root
+        JOIN lots l        ON l.lot_id    = lt.lot_id
+        LEFT JOIN composers c ON c.composer_id = regexp_replace(t.composer_id, '[a-z]+$', '')
+       WHERE (l.lot_name ILIKE '%INTAKE LOT%' OR l.lot_name ILIKE '%SOHO%')
+         AND ( t.description IS NULL OR t.description = ''
+            OR t.mmw IS NULL OR t.mmw = ''
+            OR t.bpm IS NULL
+            ${fqIncludeMood2 ? `OR NOT EXISTS (SELECT 1 FROM title_moods tm2 WHERE tm2.sku_root = t.sku_root)` : ``} )
+       ORDER BY t.sku_root, lt.added_at DESC NULLS LAST`)) || []
+  } catch (e) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:#e55">Could not load the queue: ' + esc(e.message || String(e)) + '</div>'
+    return
+  }
+
+  if (!rows.length) {
+    el.innerHTML = '<div style="padding:40px;text-align:center;color:var(--text3)"><div style="font-size:32px;margin-bottom:8px">✓</div>Nothing left in the finish queue.</div>'
+    if (badge) badge.style.display = 'none'
+    return
+  }
+
+  // Group by lot: 30 cues from one lot in a sitting beats jumping around.
+  rows.sort((a, b) => (a.lot_name || '').localeCompare(b.lot_name || '') || a.sku_root.localeCompare(b.sku_root))
+  rows.forEach(r => { r.skuRoot = r.sku_root; r.b2Key = r.b2_key })
+
+  if (badge) { badge.textContent = rows.length; badge.style.display = '' }
+
+  // These songs were originally tagged for AVID ONLY, so secondary mood, MMW
+  // and BPM were never filled in. Secondary mood is part of "done" for this
+  // group, but it is NOT in the queue's WHERE clause: counting it would take
+  // the queue from 4,814 to 15,150 and bury the songs that need real work
+  // under 10,336 that need one field. Shown as a chip, filterable on demand.
+  const need = r => [(!r.description) ? 'no desc' : null,
+                     (!r.mmw) ? 'no MMW' : null,
+                     (r.bpm === null || r.bpm === undefined) ? 'no BPM' : null,
+                     (!r.mood2_names) ? 'no Mood2' : null].filter(Boolean)
+  const COLOR = { 'no desc': '#e55', 'no MMW': '#f90', 'no BPM': '#38f', 'no Mood2': '#a855f7' }
+  const lotCounts = {}
+  rows.forEach(r => { lotCounts[r.lot_name] = (lotCounts[r.lot_name] || 0) + 1 })
+
+  let lastLot = null, listHtml = ''
+  for (const r of rows) {
+    if (r.lot_name !== lastLot) {
+      lastLot = r.lot_name
+      listHtml += '<div class="fq-lothead" data-lot="' + esc(lastLot || '') + '" style="padding:6px 14px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:11px;font-weight:600;color:var(--text3);position:sticky;top:0">'
+        + esc(lastLot || '—') + ' <span style="font-weight:400">· ' + lotCounts[lastLot] + '</span></div>'
+    }
+    listHtml += '<div class="fq-row" data-sku="' + esc(r.skuRoot) + '" data-lot="' + esc(r.lot_name || '') + '" onclick="fqSelect(\'' + esc(r.skuRoot) + '\')" style="padding:10px 14px;cursor:pointer;border-bottom:1px solid var(--border2)">'
+      + '<div style="font-size:13px;font-weight:500;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">' + esc(r.title || '') + '</div>'
+      + '<div style="font-size:11px;color:#6F927E;margin-top:2px">' + esc(r.skuRoot) + ' · ' + esc(r.composer_name || '') + '</div>'
+      + '<div style="margin-top:4px;display:flex;gap:4px;flex-wrap:wrap;align-items:center">'
+      + '<span class="fq-audio-dot" style="display:inline-block;width:8px;height:8px;border-radius:50%;background:' + (r.b2Key ? '#22c55e' : '#ef4444') + ';flex-shrink:0" title="' + (r.b2Key ? 'Audio in B2' : 'No audio recorded') + '"></span>'
+      + need(r).map(x => '<span style="font-size:10px;background:' + COLOR[x] + ';color:#fff;padding:1px 6px;border-radius:10px">' + x + '</span>').join('')
+      + '</div></div>'
+  }
+
+  // Lot picker. 957 rows across dozens of lots is unusable without one, and
+  // the DB lot name can differ from the Dropbox folder name (lot 1383 is
+  // "SHO4", the folder is "SOHO4"), so scanning for the name you expect fails.
+  // Both names are offered in the dropdown where they differ.
+  const fqLotNames = Object.keys(lotCounts).sort()
+  let fqOpts = '<option value="">All lots · ' + rows.length + '</option>'
+  for (const ln of fqLotNames) {
+    const alt = fqDropboxFolders[ln]
+    // The lot name itself often ends in "(EX)", so wrapping the Dropbox name in
+    // parentheses too reads as noise. Use a separator instead.
+    const label = (alt && alt !== ln) ? (ln + '   —   Dropbox: ' + alt) : ln
+    fqOpts += '<option value="' + esc(ln) + '"' + (fqLotFilter === ln ? ' selected' : '') + '>'
+            + esc(label) + ' · ' + lotCounts[ln] + '</option>'
+  }
+  el.innerHTML =
+    '<div style="padding:10px 18px;background:var(--bg2);border-bottom:1px solid var(--border);font-size:12px;color:var(--text3);display:flex;align-items:center;gap:8px">'
+    + '<i class="ti ti-clock-edit" style="font-size:13px"></i>'
+    + '<span id="fq-count" style="font-weight:600;color:var(--text)">' + rows.length + '</span> songs to finish'
+    + '<span style="color:var(--text3)">·</span>'
+    + '<select id="fq-lot-filter" onchange="fqFilterLot(this.value)" '
+    + 'style="flex:1;max-width:520px;font-size:11px;height:26px;padding:0 6px;border-radius:6px;'
+    + 'border:1px solid var(--border);background:var(--bg);color:var(--text);cursor:pointer">'
+    + fqOpts + '</select>'
+    + '<label style="display:flex;align-items:center;gap:5px;white-space:nowrap;cursor:pointer;font-size:11px">'
+    + '<input type="checkbox" id="fq-mood2-toggle" onchange="fqToggleMood2(this.checked)"'
+    + (fqIncludeMood2 ? ' checked' : '') + ' style="cursor:pointer">'
+    + 'incl. Mood 2+ only</label></div>'
+    + '<div style="display:flex;height:calc(100% - 37px);overflow:hidden">'
+    + '<div id="fq-list" style="width:280px;min-width:220px;border-right:1px solid var(--border);overflow-y:auto;flex-shrink:0">' + listHtml + '</div>'
+    + '<div id="fq-form" style="flex:1;overflow-y:auto;padding:32px;display:flex;align-items:flex-start;justify-content:center">'
+    + '<div style="color:var(--text3);font-size:14px;margin-top:60px">← Select a track to complete</div></div></div>'
+
+  el._fqRows = rows
+  // Saving a track re-renders this list; re-apply the lot filter so the
+  // selection is not silently lost mid-session.
+  if (fqLotFilter) fqFilterLot(fqLotFilter)
+  el.querySelectorAll('.fq-row').forEach(row => {
+    row.addEventListener('mouseenter', () => { if (!row.classList.contains('fq-active')) row.style.background = 'var(--bg2)' })
+    row.addEventListener('mouseleave', () => { if (!row.classList.contains('fq-active')) row.style.background = '' })
+  })
+  const firstRow = el.querySelector('.fq-row')
+  if (firstRow) firstRow.click()
+}
+
+// KEPT, not deleted: the original folder-scan Finish Queue. It reads
+// `3. ATMOS_Finish` and still works if you drag folders in. loadFinishQueue()
+// above now drives from the database instead.
+async function loadFinishQueueFromFolder() {
   const el = document.getElementById('section-finish')
   if (!el) return
   el.innerHTML = '<div style="padding:24px;color:var(--text3)">Loading…</div>'
@@ -10197,6 +10866,26 @@ function fqSelect(skuRoot) {
         </div>
       </div>
 
+      <!-- Mood 2+ : the SECONDARY mood structure, same shape as Intake's.
+           Stored in the title_moods junction (many per song), not on titles. -->
+      <label style="font-size:10px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:4px">Mood 2+</label>
+      <div id="fq-mood2-tags" style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:6px;min-height:26px">
+        ${(t.mood2_names || '').split(',').filter(Boolean).map(nm => `
+          <span data-tag="${esc(nm)}" style="display:inline-flex;align-items:center;gap:4px;background:#2c5f8a;color:#fff;padding:3px 10px;border-radius:20px;font-size:12px">
+            ${esc(nm)}<span onclick="this.parentElement.remove()" style="cursor:pointer;opacity:.7;font-size:14px;line-height:1">&times;</span>
+          </span>`).join('')}
+      </div>
+      <div style="display:flex;gap:6px;margin-bottom:20px">
+        <input id="fq-mood2-input" list="fq-mood2-dl" placeholder="Add mood…"
+          oninput="onTagPickerInput(this, fqAddMood2)"
+          onchange="onTagPickerInput(this, fqAddMood2)"
+          onkeydown="if(event.key==='Enter'){event.preventDefault();fqAddMood2()}"
+          style="flex:1;height:34px;padding:0 10px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px;box-sizing:border-box">
+        <datalist id="fq-mood2-dl">${(_intakeMoods||[]).map(m => `<option value="${esc(m.mood_name||'')}">`).join('')}</datalist>
+        <button type="button" onclick="fqAddMood2()"
+          style="border:none;background:var(--bg2);border-radius:6px;padding:0 12px;cursor:pointer;font-size:16px;color:var(--text2)">+</button>
+      </div>
+
       <label style="font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em;color:#6F927E;display:block;margin-bottom:6px">Plot Arc</label>
       <input id="fq-plot-arc" type="text" maxlength="100" value="${esc(t.plot_arc||'')}" placeholder="e.g. Confrontation, Celebration, Reveal…"
         style="width:100%;height:34px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);font-size:13px;background:var(--bg3);color:var(--text);box-sizing:border-box;margin-bottom:20px">
@@ -10242,7 +10931,7 @@ function fqSelect(skuRoot) {
     </div>
   `
 
-  fqLoadAudio(t.folderPath)
+  fqLoadAudio(t.folderPath, t)
   // Populate sub-genres for the current primary genre selection
   fqUpdateSubGenres(t.secondary_genre_name)
 }
@@ -10258,9 +10947,39 @@ function fqUpdateSubGenres(preselect) {
   ).join('')
 }
 
-async function fqLoadAudio(folderPath) {
+async function fqLoadAudio(folderPath, row) {
   const player = document.getElementById('fq-audio')
-  if (!player || !folderPath) return
+  if (!player) return
+  // Database-driven queue: no local folder, only a B2 key. Stream it, and run
+  // the SAME analyzer server-side against the object.
+  if (!folderPath && row && row.b2Key) {
+    player.src = '/api/b2/stream?key=' + encodeURIComponent(row.b2Key)
+    player.load()
+    const bpmEl = document.getElementById('fq-bpm')
+    const keyEl = document.getElementById('fq-key')
+    if (bpmEl && !bpmEl.value) bpmEl.placeholder = '\u2026detecting'
+    if (keyEl && !keyEl.value) keyEl.placeholder = '\u2026detecting'
+    try {
+      const d = await fetch('/api/audio/detect?key=' + encodeURIComponent(row.b2Key)).then(r => r.json())
+      if (bpmEl) bpmEl.placeholder = 'e.g. 120'
+      if (keyEl) keyEl.placeholder = 'e.g. Gm, F#m, C'
+      if (d && d.ok) {
+        // Only FILL, never overwrite something a person typed.
+        if (d.bpm && bpmEl && !bpmEl.value) {
+          bpmEl.value = d.bpm
+          bpmEl.title = 'detected, confidence ' + (d.bpm_confidence != null ? d.bpm_confidence : '?')
+        }
+        if (d.key && d.key !== '?' && keyEl && !keyEl.value) keyEl.value = d.key
+        if (!d.bpm) console.log('[fq] analyzer declined to commit a bpm (low confidence) for', row.skuRoot)
+      } else { console.warn('[fq] detect failed:', d && d.error) }
+    } catch (e) {
+      if (bpmEl) bpmEl.placeholder = 'e.g. 120'
+      if (keyEl) keyEl.placeholder = 'e.g. Gm, F#m, C'
+      console.error('[fq] detect error:', e)
+    }
+    return
+  }
+  if (!folderPath) return
   const isAudio = f => !f.isDirectory && /\.(wav|mp3|aif|aiff)$/i.test(f.name)
   let topLevel = Array.from(await window.haus.fs.readDir(folderPath) || [])
   let files = topLevel.filter(isAudio)
@@ -10339,6 +11058,33 @@ function fqAddMmwPhrase() {
   container.appendChild(tag)
 }
 
+// Add a secondary mood chip in the Finish Queue. Intake's addIntakeMoodTag is
+// indexed by row (it edits many tracks at once); the Finish Queue edits one at
+// a time, so this is the single-record twin. Only accepts names that exist in
+// `moods` — a typo would silently save nothing, since fqSave resolves the name
+// back to a mood_id.
+function fqAddMood2() {
+  const input = document.getElementById('fq-mood2-input')
+  const box   = document.getElementById('fq-mood2-tags')
+  if (!input || !box) return
+  const name = (input.value || '').trim()
+  if (!name) return
+  const known = (_intakeMoods || []).find(m => (m.mood_name || '').toLowerCase() === name.toLowerCase())
+  if (!known) { input.style.borderColor = '#ef4444'; setTimeout(() => input.style.borderColor = '#c5d9ef', 1200); return }
+  const already = Array.from(box.querySelectorAll('[data-tag]'))
+    .some(el => el.dataset.tag.toLowerCase() === known.mood_name.toLowerCase())
+  if (!already) {
+    const span = document.createElement('span')
+    span.dataset.tag = known.mood_name
+    span.style.cssText = 'display:inline-flex;align-items:center;gap:4px;background:#2c5f8a;color:#fff;padding:3px 10px;border-radius:20px;font-size:12px'
+    span.innerHTML = esc(known.mood_name) +
+      '<span onclick="this.parentElement.remove()" style="cursor:pointer;opacity:.7;font-size:14px;line-height:1">&times;</span>'
+    box.appendChild(span)
+  }
+  input.value = ''
+  input.focus()
+}
+
 async function fqSave(skuRoot) {
   const desc    = document.getElementById('fq-description')?.value.trim() || null
   const plotArc = document.getElementById('fq-plot-arc')?.value.trim() || null
@@ -10369,6 +11115,26 @@ async function fqSave(skuRoot) {
   await pgQ(`UPDATE titles SET description=$1, mmw=$2, primary_genre_id=$3, secondary_genre_id=$4, mood_1_id=$5, ksl_ids=$6, plot_arc=$7, key=$8, bpm=$9, vocals=$10, updated_at=now() WHERE sku_root=$11`,
   
     [desc, mmw, pgId, sgId, mood1Id, ksl, plotArc, key, bpm, vocals, skuRoot])
+
+  // Secondary moods live in the title_moods junction, NOT on titles, so they
+  // need their own write. Same delete-then-insert shape Intake uses, so there
+  // is one way moods get saved rather than two that can drift apart.
+  // Deliberately AFTER the titles UPDATE: if this fails, the real metadata is
+  // already safe and only the moods need redoing.
+  try {
+    const moodNames = Array.from(document.querySelectorAll('#fq-mood2-tags [data-tag]'))
+      .map(el => el.dataset.tag)
+    const moodIds = moodNames
+      .map(n => (_intakeMoods || []).find(m => (m.mood_name || '').toLowerCase() === n.toLowerCase()))
+      .filter(Boolean).map(m => m.mood_id)
+    await pgQ(`DELETE FROM title_moods WHERE sku_root=$1`, [skuRoot])
+    for (const id of moodIds) {
+      await pgQ(`INSERT INTO title_moods (sku_root, mood_id) VALUES ($1,$2) ON CONFLICT DO NOTHING`, [skuRoot, id])
+    }
+  } catch (e) {
+    console.error('[fq] secondary moods failed to save:', e)
+    alert('The track saved, but its secondary moods did not: ' + e.message)
+  }
 
   // Move folder to ATMOS_Shipping/MIGRATE/
   const el = document.getElementById('section-finish')
@@ -12749,6 +13515,7 @@ document.head.appendChild(spinStyle)
   }
   renderTopbarDate()
   loadLibraryStats()
+  qaLoadBadge()
 
   // Warn on unsaved changes before leaving page
   window.addEventListener('beforeunload', e => {

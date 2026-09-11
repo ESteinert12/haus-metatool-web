@@ -28,3 +28,8 @@ Thumbs.db
 # Embedded copy of this same repo — tracked as a stray gitlink, now de-nested
 HAUS Workspace.app/Contents/Resources/haus-workspace/
 
+.env*
+.b2-chunk-*
+*.tsv
+B2_SKUS.txt
+B2_PAIR_RESULTS.txt

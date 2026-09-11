@@ -270,17 +270,42 @@
 ---
 
 ## Session notes index (newest first)
+- `DATA_SAFETY.md` - **READ BEFORE DELETING, HIDING OR MOVING ANYTHING.**
+  Erik keeps a spare copy of everything in an ARCHIVE Dropbox and cannot afford
+  to lose anything. What a verify PASS does and does not prove, the measured
+  bucket settings, and why the Archive is currently the ONLY redundancy.
+- `LOT_TITLES_DAMAGE_2026_09_11.md` - lot_titles is 97.5% broken (the July
+  migration stripped the album digit), which is why the Finish Queue looks
+  emptier than reality. 959 collisions point at the WRONG song.
+- `QA_EYEBALLS.md` - the `v_needs_eyeballs` VIEW: 900 items that need a human
+  decision, ranked by severity. Always current, never stale. **Read before
+  "fixing" any catalogue oddity - most of them are already listed and
+  categorised there.**
+- `SESSION_2026_09_10.md` - **START HERE for 10 Sep.** 28,370 MMW recovered,
+  lot 1 uploaded and closed, Finish Queue re-pointed at the database, and the
+  four mistakes made that day. Ends with the prioritised next list.
+- `SKU_FORMAT_CORRECTION_2026_09_10.md` — the "immutable" SKU pattern in the
+  old notes is WRONG and the CHECK constraints DO NOT EXIST. **Read before
+  touching SKUs.**
+- `FM_MMW_IMPORT_2026_09_10.md` — 28,370 MMW recovered from a FileMaker
+  export. The remaining gap is NEW intake, not the migration.
+- `LOT_UPLOAD_RUNBOOK.md` — **the per-lot upload loop + progress checklist.**
+  Multi-week job. Follow it step by step; the gotchas are all in there.
+- `HANDOFF_2026_09_09.md` — **START HERE.** Full state of play, backend and
+  optimization backlog, and the open questions only Erik can answer.
+- `GIT_LAYOUT_AND_RULES.md` — THREE working copies of one repo, which one is
+  live, and why Claude must never run git here. **Read before any git work.**
 - `SESSION_2026_09_09.md` — Wed 9 Sep: 492 songs REPAIRED, /api/b2/create-stems
-  built, root cause of the 3,261 found and fixed. **Read this first.**
+  built, root cause of the 3,261 found and fixed.
 - `SESSION_2026_09_08.md` — Tue 8 Sep: shell/exec guard shipped, server
-  restarted (detectStemName live), b2/stream range bug found. **Read this
-  first, it carries the current open list.**
+  restarted (detectStemName live), b2/stream range bug found. Its open list is
+  SUPERSEDED by HANDOFF_2026_09_09.md.
 - `SHELL_EXEC_LOCKDOWN_2026_09_08.md` — the guard: what it blocks, what it
   deliberately does NOT block, how to flip the allowlist to enforcing.
 - `B2_STREAM_RANGE_BUG_2026_09_08.md` — playback re-downloads whole files
-  from B2 on every request. Diagnosed, fix designed, not applied.
+  from B2 on every request. FIXED AND VERIFIED 2026-09-09.
 - `WORK_QUEUE_2026_09_09.md` — the 3,261 unfinished songs: what they are,
-  the two cohorts, and the work_queue table + v_work_queue_open view that now
+  the THREE cohorts, and the work_queue table + v_work_queue_open view that now
   flag them. **Read before touching the 3,261.**
 - `B2_INVENTORY_FINDINGS_2026_09_09.md` — full B2 inventory (255,532 objects),
   the ^HAUS_ filter that caused the 3,261, and the 187 GB `music/` duplicate
@@ -289,6 +314,12 @@
 - `CORRECTIONS_RESTORE_2026_09_08.md`, `MP3_IS_THE_PLAYBACK_SOURCE.md`,
   `AUDIO_BACKLOG_MASTER_PLAN.md`, `b2_stray_root_keys_2026_09_04.md`,
   `dropbox_api_auth.md`
+
+### SourceAudio is GONE — but bpm/mmw are STILL REQUIRED (Erik, 2026-09-09)
+ATMOSPHERE replaces SourceAudio, so it needs the same metadata. Older notes
+saying bpm/mmw are "for SourceAudio deployment" explain why they were left
+empty; the requirement moved in-house, it did not disappear.
+A song is finished only when it has BOTH stem rows AND bpm+mmw.
 
 ### Two facts that keep getting relearned the hard way
 1. **Album digit is the LAST character of `sku_root`:**
