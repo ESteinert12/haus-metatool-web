@@ -1535,7 +1535,10 @@ async function doLogin() {
 const USER_PATH_DEFAULTS = {
   kyle:  {
     intake:  '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/1. ATMOS_Staging',
-    hausjup: '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping',
+    // 2026-09-12: shipping is the SAME local path for everyone. It used to point
+    // at Dropbox here, so Kyle's intake shipped somewhere else than Erik's and
+    // the AVID export could not find those lots. One destination, one truth.
+    hausjup: '/Users/HAUS/Downloads/1. ATMOS_SHIPPING',
     staging: '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/1. ATMOS_Staging',
     finish:  '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/3. ATMOS_Finish',
   },
@@ -2127,7 +2130,7 @@ async function loadLots(lotType, clientName) {
   return (await pgQ(sql, params)) || []
 }
 
-async function getOrCreateLot(lotName, lotType, clientName, trackLimit) {
+async function getOrCreateLot(lotName, lotType, clientName, trackLimit, projectId = null) {
   let rows = await pgQ(`SELECT lot_id, track_limit FROM lots WHERE lot_name=$1`, [lotName])
   if (rows && rows.length) {
     // Backfill track_limit if it was never set (legacy lots created without one)
@@ -2137,8 +2140,8 @@ async function getOrCreateLot(lotName, lotType, clientName, trackLimit) {
     return rows[0].lot_id
   }
   rows = await pgQ(
-    `INSERT INTO lots (lot_name, lot_type, client, track_limit) VALUES ($1, $2, $3, $4) RETURNING lot_id`,
-    [lotName, lotType || 'client', clientName || null, trackLimit || 30]
+    `INSERT INTO lots (lot_name, lot_type, client, track_limit, project_id) VALUES ($1, $2, $3, $4, $5) RETURNING lot_id`,
+    [lotName, lotType || 'client', clientName || null, trackLimit || 30, projectId || null]
   )
   return rows ? rows[0].lot_id : null
 }
@@ -2497,7 +2500,8 @@ async function exportAvidComments(lotId, lotName) {
     ORDER BY t.title ASC
   `, [lotId])
 
-  if (!rows || !rows.length) { alert('No tracks found in this lot.'); return }
+  if (!rows) { alert(`AVID Comments could not be generated for lot ${lotId} — the query failed. Check the console.`); return }
+  if (!rows.length) { alert(`No tracks found in lot ${lotId} ("${lotName}").\n\nThe lot has no songs linked to it in the database, so there is nothing to export.`); return }
 
   const csvRows = [['SKU', 'TITLE', 'COMMENTS']]
   for (const r of rows) {
@@ -2605,7 +2609,7 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
 
   // Fetch active clients
   const clients = await pgQ(`SELECT id, name FROM clients WHERE active=true ORDER BY name`)
-  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}" data-client-id="${c.id}"${preSelectClient && c.name === preSelectClient ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
+  const clientOpts = (clients || []).map(c => `<option value="${esc(c.name)}" data-client-id="${c.id}"${preSelectClient && c.name.toUpperCase() === String(preSelectClient).toUpperCase() ? ' selected' : ''}>${esc(c.name)}</option>`).join('')
 
   // A lot with no project_id is INVISIBLE on the client page — lots are shown
   // inside Projects, not on the client directly. Creating one from Clients or
@@ -2656,19 +2660,18 @@ async function showCreateLotModal(linkToProjectId, preSelectClient=null, intakeI
 // Fill the project dropdown with the selected client's projects. Called on open
 // and whenever the client changes.
 function newLotSyncProjects(preselectId) {
-  const clientSel  = document.getElementById('new-lot-client-input')
-  const projSel    = document.getElementById('new-lot-project-input')
-  const warn       = document.getElementById('new-lot-project-warn')
+  const clientSel = document.getElementById('new-lot-client-input')
+  const projSel   = document.getElementById('new-lot-project-input')
   if (!clientSel || !projSel) return
-  const opt        = clientSel.options[clientSel.selectedIndex]
-  const clientId   = opt ? parseInt(opt.dataset.clientId) : NaN
-  const all        = window._newLotProjects || []
-  const mine       = all.filter(p => p.client_id != null && p.client_id === clientId)
-  projSel.innerHTML = '<option value="">Select a project…</option>' +
-    mine.map(p => `<option value="${p.id}"${String(p.id) === String(preselectId) ? ' selected' : ''}>${esc(p.name)}</option>`).join('')
-  if (warn) warn.style.display = mine.length ? 'none' : ''
-  if (!mine.length && clientSel.value) {
-    projSel.innerHTML = '<option value="">No projects for this client</option>'
+  lotFillProjectSelect(clientSel, projSel, window._newLotProjects || [], preselectId, document.getElementById('new-lot-project-warn'))
+  if (!projSel._newBound) {
+    projSel.addEventListener('change', async () => {
+      if (projSel.value !== '__new__') return
+      const row = await lotCreateProjectInline(clientSel)
+      if (row && !(window._newLotProjects || []).some(p => p.id === row.id)) (window._newLotProjects ||= []).push(row)
+      newLotSyncProjects(row ? row.id : null)
+    })
+    projSel._newBound = true
   }
 }
 
@@ -2685,6 +2688,14 @@ async function submitCreateLot(linkToProjectId) {
     document.getElementById('new-lot-project-input')?.focus(); return
   }
   if (!name) { document.getElementById('new-lot-name-input')?.focus(); return }
+  const chosenProjectName = ((window._newLotProjects || []).find(p => p.id === chosenProject) || {}).name || ''
+  const backCtx = window._createLotContext || {}
+  window._createLotBack = async () => {
+    document.getElementById('create-lot-modal')?.remove()
+    await showCreateLotModal(chosenProject, clientName, backCtx.intakeIndexCtx ?? null)
+    const n = document.getElementById('new-lot-name-input');  if (n) n.value = name
+    const l = document.getElementById('new-lot-limit-input'); if (l && limit) l.value = limit
+  }
 
   // Replace modal content with confirmation screen
   const modal = document.getElementById('create-lot-modal')
@@ -2698,6 +2709,10 @@ async function submitCreateLot(linkToProjectId) {
           <span style="font-weight:600">${esc(clientName)}</span>
         </div>
         <div style="display:flex;justify-content:space-between;font-size:13px">
+          <span style="color:var(--text3)">Project</span>
+          <span style="font-weight:600;${chosenProjectName ? '' : 'color:#C17A5E'}">${chosenProjectName ? esc(chosenProjectName) : 'None — not on client page'}</span>
+        </div>
+        <div style="display:flex;justify-content:space-between;font-size:13px">
           <span style="color:var(--text3)">Lot Name</span>
           <span style="font-weight:600">${esc(name)}</span>
         </div>
@@ -2707,7 +2722,7 @@ async function submitCreateLot(linkToProjectId) {
         </div>
       </div>
       <div style="display:flex;gap:8px;justify-content:flex-end">
-        <button class="btn" onclick="document.getElementById('create-lot-modal').remove();showCreateLotModal(${linkToProjectId||'null'})">Back</button>
+        <button class="btn" onclick="window._createLotBack()">Back</button>
         <button class="btn primary" onclick="confirmCreateLotSubmit('${esc(clientName)}', '${esc(name)}', ${limit}, ${linkToProjectId || 'null'})"><i class="ti ti-plus"></i> Create Lot</button>
       </div>`
   }
@@ -2815,7 +2830,11 @@ async function downloadForAVID(lotId, lotName) {
     const result = await fetch('/api/lot/download-avid-wavs', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ lotId, lotName, safeName })
+      // Send the shipping path the APP is configured with. The server used to
+      // read only HAUS_SHIPPING / ~/.haus-workspace-cfg.json, which still pointed
+      // into Dropbox CloudStorage while intake had moved to Downloads -- two
+      // sources of truth, and the export looked in the wrong place.
+      body: JSON.stringify({ lotId, lotName, safeName, shippingBase: cfg.hausjup || '' })
     }).then(r => r.json())
 
     if (result.ok) {
@@ -4130,7 +4149,7 @@ async function selectClientPlaylist(playlistId, playlistName) {
         <div style="display:flex;gap:8px;margin-bottom:20px">
           <button onclick="savePlaylistMeta(${playlistId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-check"></i> Save</button>
           <button onclick="downloadForAVID(${playlistId}, '${esc(playlistName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-download"></i> Download for AVID</button>
-          <button onclick="exportAvidComments(${playlistId}, '${esc(playlistName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-download"></i> AVID Comments</button>
+          <button onclick="exportPlaylistAvidComments()" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-download"></i> AVID Comments</button>
         </div>
 
         <div style="display:flex;flex-direction:column;gap:8px;max-height:500px;overflow-y:auto;padding-right:8px">
@@ -4253,7 +4272,8 @@ async function selectClientLot(lotId, lotName) {
 
         <div style="display:flex;flex-direction:column;gap:8px;max-height:500px;overflow-y:auto;padding-right:8px">
           ${tracks && tracks.length > 0 ? tracks.map((t, i) => `
-            <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px">
+            <div style="padding:10px 12px;background:#E0EEEA;border-radius:6px;border:0.5px solid #C0D8D0;font-size:12px;cursor:pointer"
+                 onclick="openMetadataEditor('${esc(t.sku_root)}')" title="Click to edit metadata">
               <div style="font-weight:600;margin-bottom:6px;color:#6F927E">${i + 1}. ${esc(t.title)}</div>
               <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Composer:</strong> ${t.composer_name || '—'}</div>
               <div style="font-size:11px;color:#333;margin-bottom:3px"><strong>Key:</strong> ${t.key || '—'}</div>
@@ -7140,9 +7160,22 @@ async function loadTrackLotHistory(skuRoot) {
 }
 
 async function showMoveLotModal(skuRoot, fromLotId, fromLotName) {
-  // Load all lots for picker
-  const lots = await pgQ(`SELECT lot_id, lot_name, client FROM lots ORDER BY lot_name DESC LIMIT 200`)
+  // Same criteria as the intake Choose Lot picker (2026-09-12, Erik): ACTIVE
+  // lots only -- not sent, not closed, not already at their track limit --
+  // newest first, 50 max. One rule for "which lots can take a song", in both
+  // places, so the two pickers cannot disagree.
+  const lots = await pgQ(
+    `SELECT l.lot_id, l.lot_name, l.client, l.track_limit,
+            (SELECT count(*) FROM lot_titles lt WHERE lt.lot_id = l.lot_id) AS n
+       FROM lots l
+      WHERE l.sent_date IS NULL
+        AND (l.status IS NULL OR lower(l.status) = 'active')
+        AND (l.track_limit IS NULL
+             OR (SELECT count(*) FROM lot_titles lt WHERE lt.lot_id = l.lot_id) < l.track_limit)
+      ORDER BY l.lot_id DESC
+      LIMIT 50`)
   if (!lots) { alert('Could not load lots'); return }
+  if (!lots.length) { alert('No active lots to move this song into.\n\nEvery lot is either sent, closed or full.'); return }
 
   const isMove = !!fromLotId
   const title = isMove ? `Move <b>${esc(skuRoot)}</b> from <b>${esc(fromLotName)}</b>` : `Add <b>${esc(skuRoot)}</b> to a lot`
@@ -7158,8 +7191,8 @@ async function showMoveLotModal(skuRoot, fromLotId, fromLotName) {
           <div class="move-lot-row" data-name="${esc(l.lot_name).toLowerCase()}" data-id="${l.lot_id}" data-name-raw="${esc(l.lot_name)}"
             style="padding:7px 10px;border-radius:6px;cursor:pointer;font-size:12px;background:var(--bg2)"
             onmouseover="this.style.background='var(--bg3)'" onmouseout="this.style.background='var(--bg2)'"
-            onclick="confirmMoveLot('${skuRoot.replace(/'/g,"\\'")}', ${fromLotId || 'null'}, this.dataset.id, this.dataset.nameRaw)">
-            ${esc(l.lot_name)}${l.client ? `<span style="color:var(--text3);margin-left:6px">${esc(l.client)}</span>` : ''}
+            onclick="lotAssignChoice('${skuRoot.replace(/'/g,"\\'")}', ${fromLotId || 'null'}, this.dataset.id, this.dataset.nameRaw)">
+            ${esc(l.lot_name)}<span style="color:var(--text3);margin-left:6px">${l.track_limit ? `${l.n}/${l.track_limit}` : l.n}${l.client ? ` · ${esc(l.client)}` : ''}</span>
           </div>
         `).join('')}
       </div>
@@ -7167,6 +7200,10 @@ async function showMoveLotModal(skuRoot, fromLotId, fromLotName) {
         <button class="btn" onclick="this.closest('[style*=fixed]').remove()">Cancel</button>
       </div>
     </div>`
+  // Closable without hunting for Cancel: click the backdrop, or press Escape.
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  const onEsc = e => { if (e.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', onEsc) } }
+  document.addEventListener('keydown', onEsc)
   document.body.appendChild(modal)
   modal.querySelector('#move-lot-search').focus()
 }
@@ -7178,9 +7215,79 @@ function filterMoveLotList() {
   })
 }
 
-async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
-  document.querySelector('[style*="position:fixed"][style*="z-index:9999"]')?.remove()
+// 2026-09-12, Erik: "should we do a thing that stipulates Add or Move?" Both
+// behaviours already existed but were invisible -- the header button ADDED, the
+// row arrow MOVED, and clicking either committed on the spot. A song legitimately
+// belongs to several lots (the same track sent to a second client), so neither is
+// wrong; the user just has to say which. ADD keeps every existing lot and moves
+// no files. MOVE leaves one lot and takes the files with it.
+async function lotAssignChoice(skuRoot, fromLotId, toLotId, toLotName) {
   toLotId = parseInt(toLotId)
+  const current = await pgQ(
+    `SELECT l.lot_id, l.lot_name FROM lot_titles lt JOIN lots l ON l.lot_id = lt.lot_id
+      WHERE lt.sku_root = $1 AND l.lot_id <> $2 ORDER BY l.lot_id DESC`, [skuRoot, toLotId]).catch(() => []) || []
+
+  // Came from a row arrow, or the song is in no other lot: nothing to choose.
+  if (fromLotId || !current.length) return confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName)
+
+  document.querySelector('#move-lot-picker-modal')?.remove()
+  const m = document.createElement('div')
+  m.id = 'lot-assign-choice'
+  m.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:10000;display:flex;align-items:center;justify-content:center'
+  const sage = 'background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:600'
+  const states = `onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'" onmousedown="this.style.background='#C0C9CD'" onmouseup="this.style.background='#6F927E'"`
+  m.innerHTML = `
+    <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:420px;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+      <div style="font-size:14px;font-weight:700">${esc(skuRoot)} → ${esc(toLotName)}</div>
+      <div style="font-size:12px;color:var(--text2);line-height:1.5">
+        This song is already in ${current.length === 1 ? '' : 'these lots:'}
+        <b>${current.map(l => esc(l.lot_name)).join('</b>, <b>')}</b>.
+      </div>
+      <div style="display:flex;flex-direction:column;gap:8px">
+        <button class="btn" style="${sage};padding:9px" ${states}
+          onclick="document.getElementById('lot-assign-choice').remove();confirmMoveLot('${skuRoot.replace(/'/g,"\\'")}', null, ${toLotId}, '${String(toLotName).replace(/'/g,"\\'")}')">
+          Add — keep ${current.length === 1 ? 'the other lot' : 'the other lots'}, move no files
+        </button>
+        ${current.map(l => `
+        <button class="btn" style="${sage};padding:9px" ${states}
+          onclick="document.getElementById('lot-assign-choice').remove();confirmMoveLot('${skuRoot.replace(/'/g,"\\'")}', ${l.lot_id}, ${toLotId}, '${String(toLotName).replace(/'/g,"\\'")}')">
+          Move — leave ${esc(l.lot_name)} and take the files
+        </button>`).join('')}
+      </div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn" onclick="document.getElementById('lot-assign-choice').remove()">Cancel</button>
+      </div>
+    </div>`
+  m.addEventListener('click', e => { if (e.target === m) m.remove() })
+  const onEsc = e => { if (e.key === 'Escape') { m.remove(); document.removeEventListener('keydown', onEsc) } }
+  document.addEventListener('keydown', onEsc)
+  document.body.appendChild(m)
+}
+
+async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
+  toLotId = parseInt(toLotId)
+  // 2026-09-12, Erik: clicking a row used to commit the move on the spot -- files
+  // moved and lot links rewritten with no confirmation, and Cancel was the only
+  // button in the window. Confirm first, naming both lots and the file count.
+  {
+    let fileNote = ''
+    if (fromLotId) {
+      const n = await pgQ(
+        `SELECT count(*) AS c FROM mix_stems WHERE sku_root = $1`, [skuRoot]).catch(() => null)
+      const c = n?.[0]?.c
+      if (c) fileNote = `\n\n${c} file(s) will move on disk.`
+    } else {
+      fileNote = '\n\nNo files move — this only adds the song to that lot.'
+    }
+    const fromName = fromLotId
+      ? ((await pgQ(`SELECT lot_name FROM lots WHERE lot_id = $1`, [fromLotId]).catch(() => null))?.[0]?.lot_name || `lot ${fromLotId}`)
+      : null
+    const what = fromName
+      ? `Move ${skuRoot}\n\nfrom:  ${fromName}\nto:      ${toLotName}`
+      : `Add ${skuRoot} to ${toLotName}`
+    if (!confirm(`${what}${fileNote}`)) return
+  }
+  document.querySelector('[style*="position:fixed"][style*="z-index:9999"]')?.remove()
 
   try {
     // PHASE 1: Check for conflicts before committing
@@ -7220,7 +7327,14 @@ async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
       await pgQ(`DELETE FROM lot_titles WHERE lot_id = $1 AND (sku_root = $2 OR (length(sku_root)=7 AND $2 LIKE sku_root || '_'))`, [fromLotId, skuRoot])
     }
     await pgQ(`INSERT INTO lot_titles (lot_id, sku_root) VALUES ($1, $2) ON CONFLICT DO NOTHING`, [toLotId, skuRoot])
-    console.log(`[confirmMoveLot] DB updated: ${skuRoot} moved from lot ${fromLotId} to ${toLotId}`)
+    // lot_titles drives the lot panels, but titles.lot_id is the song's OWN lot
+    // and used to be left behind on a move -- the song showed in the new lot while
+    // its own field still named the old one. Only touched on a real move, and only
+    // when it still points at the lot being left.
+    if (fromLotId) {
+      await pgQ(`UPDATE titles SET lot_id = $1 WHERE sku_root = $2 AND lot_id = $3`, [toLotId, skuRoot, fromLotId])
+    }
+    console.log(`[confirmMoveLot] DB updated: ${skuRoot} ${fromLotId ? `moved from lot ${fromLotId}` : 'added'} to ${toLotId}`)
 
     // PHASE 3: Move physical files (if DB succeeded)
     if (filesToMove.length > 0) {
@@ -9486,6 +9600,12 @@ async function loadIntakeTrackForm(idx) {
           <button id="tap-btn-${i}" onclick="tapTempo(${i})" title="Tap the beat to set BPM"
             style="flex-shrink:0;padding:0 10px;height:36px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:12px;font-weight:700;color:var(--text2);cursor:pointer;user-select:none"
             onmousedown="this.style.background='var(--accent-tint,#e8f0ff)'" onmouseup="this.style.background='var(--bg2)'" onmouseleave="this.style.background='var(--bg2)'">TAP</button>
+          <button onclick="bpmScale(${i}, 0.5)" title="Halve the BPM — detection often doubles it (180 for 90)"
+            style="flex-shrink:0;padding:0 8px;height:36px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:12px;font-weight:700;color:var(--text2);cursor:pointer;user-select:none"
+            onmousedown="this.style.background='var(--accent-tint,#e8f0ff)'" onmouseup="this.style.background='var(--bg2)'" onmouseleave="this.style.background='var(--bg2)'">.5</button>
+          <button onclick="bpmScale(${i}, 2)" title="Double the BPM — detection often halves it (65 for 126)"
+            style="flex-shrink:0;padding:0 8px;height:36px;background:var(--bg2);border:1px solid var(--border);border-radius:6px;font-size:12px;font-weight:700;color:var(--text2);cursor:pointer;user-select:none"
+            onmousedown="this.style.background='var(--accent-tint,#e8f0ff)'" onmouseup="this.style.background='var(--bg2)'" onmouseleave="this.style.background='var(--bg2)'">2x</button>
         </div>
         <div id="bpm-src-${i}" style="font-size:10px;color:var(--text3);margin-top:3px;min-height:14px"></div>
       </div>
@@ -11860,11 +11980,12 @@ async function resolveCurrentLot(clientName) {
   // No open lot found — suggest a name and ask user to confirm before creating
   if (!lotName) {
     const suggestedName = await suggestLotName(clientName)
-    const confirmed = await _confirmNewLot(suggestedName)
+    const confirmed = await _confirmNewLot(suggestedName, clientName)
     if (!confirmed) return { lotName: null, lotId: null }
     lotName  = confirmed.name
-    const lotType2 = lotTypeFromClient(clientName)
-    const lotId2   = await getOrCreateLot(lotName, lotType2, clientName, confirmed.limit || 30)
+    const lotClient = confirmed.clientName || clientName
+    const lotType2 = lotTypeFromClient(lotClient)
+    const lotId2   = await getOrCreateLot(lotName, lotType2, lotClient, confirmed.limit || 30, confirmed.projectId)
     await window.haus.shell.exec(`mkdir -p "${hausjup}/${lotName}"`)
     await loadLotPortalPicker()
     return { lotName, lotId: lotId2 }
@@ -11880,7 +12001,18 @@ async function resolveCurrentLot(clientName) {
   return { lotName, lotId }
 }
 
-function _confirmNewLot(suggestedName) {
+// Rollover popup: the current lot is full, confirm the next one. Carries
+// Client + Project so lots made during intake land on the client page
+// (a lot with NULL project_id is invisible there). Project defaults to the
+// project of this client's most recent lot, i.e. the lot that just filled.
+async function _confirmNewLot(suggestedName, clientName) {
+  const clients  = await pgQ(`SELECT id, name FROM clients WHERE active=true ORDER BY name`) || []
+  const projects = await pgQ(`SELECT id, name, client_id FROM projects ORDER BY name`) || []
+  const prev = clientName ? await pgQ(
+    `SELECT project_id FROM lots WHERE upper(trim(client))=upper(trim($1)) AND project_id IS NOT NULL
+     ORDER BY created_at DESC NULLS LAST, lot_id DESC LIMIT 1`, [clientName]).catch(() => []) : []
+  const prevProjectId = prev?.[0]?.project_id || null
+  const lbl = 'font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px'
   return new Promise(resolve => {
     const modal = document.createElement('div')
     modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
@@ -11889,11 +12021,23 @@ function _confirmNewLot(suggestedName) {
         <div style="font-size:14px;font-weight:700">New Lot Required</div>
         <div style="font-size:12px;color:var(--text3)">The current lot is full or doesn't exist. Confirm the details before creating.</div>
         <div>
-          <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lot Name</div>
+          <div style="${lbl}">Client</div>
+          <select class="form-input" id="_cnl-client" style="width:100%">
+            <option value="">Select a client…</option>
+            ${clients.map(c => `<option value="${esc(c.name)}" data-client-id="${c.id}"${clientName && c.name.toUpperCase() === clientName.toUpperCase() ? ' selected' : ''}>${esc(c.name)}</option>`).join('')}
+          </select>
+        </div>
+        <div>
+          <div style="${lbl}">Project</div>
+          <select class="form-input" id="_cnl-project" style="width:100%"></select>
+          <div id="_cnl-project-warn" style="font-size:10.5px;color:#C17A5E;margin-top:3px;display:none">Without a project this lot will not appear on the client page.</div>
+        </div>
+        <div>
+          <div style="${lbl}">Lot Name</div>
           <input class="form-input" id="_cnl-name" style="width:100%" value="${esc(suggestedName)}">
         </div>
         <div>
-          <div style="font-size:10px;font-weight:700;color:var(--text3);text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Track Limit</div>
+          <div style="${lbl}">Track Limit</div>
           <input class="form-input" id="_cnl-limit" type="number" min="1" max="500" style="width:100%" value="30">
         </div>
         <div style="display:flex;gap:8px;justify-content:flex-end">
@@ -11902,17 +12046,72 @@ function _confirmNewLot(suggestedName) {
         </div>
       </div>`
     document.body.appendChild(modal)
-    document.getElementById('_cnl-name').focus()
-    document.getElementById('_cnl-cancel').onclick = () => { modal.remove(); resolve(null) }
-    document.getElementById('_cnl-confirm').onclick = () => {
-      const name  = document.getElementById('_cnl-name').value.trim()
-      const limit = parseInt(document.getElementById('_cnl-limit').value) || null
-      if (!name) { document.getElementById('_cnl-name').focus(); return }
+    const cSel = modal.querySelector('#_cnl-client'), pSel = modal.querySelector('#_cnl-project')
+    const nameEl = modal.querySelector('#_cnl-name')
+    let nameTouched = false
+    nameEl.addEventListener('input', () => { nameTouched = true })
+    const sync = (pre) => lotFillProjectSelect(cSel, pSel, projects, pre, modal.querySelector('#_cnl-project-warn'))
+    sync(prevProjectId)
+    cSel.addEventListener('change', async () => {
+      sync(null)
+      if (!nameTouched && cSel.value) nameEl.value = await suggestLotName(cSel.value)
+    })
+    pSel.addEventListener('change', async () => {
+      if (pSel.value !== '__new__') return
+      const row = await lotCreateProjectInline(cSel)
+      if (row) projects.push(row)
+      sync(row ? row.id : null)
+    })
+    nameEl.focus()
+    modal.querySelector('#_cnl-cancel').onclick = () => { modal.remove(); resolve(null) }
+    modal.querySelector('#_cnl-confirm').onclick = () => {
+      const name  = nameEl.value.trim()
+      const limit = parseInt(modal.querySelector('#_cnl-limit').value) || null
+      const client = cSel.value.trim()
+      const projectId = parseInt(pSel.value) || null
+      if (!client) { cSel.focus(); return }
+      if (!name) { nameEl.focus(); return }
+      if (!projectId && !confirm('No project selected.\n\nThis lot will appear in the LOTS list but NOT on the client page.\n\nCreate it anyway?')) { pSel.focus(); return }
       modal.remove()
-      resolve({ name, limit })
+      resolve({ name, limit, clientName: client, projectId })
     }
-    document.getElementById('_cnl-name').addEventListener('keydown', e => { if (e.key === 'Enter') document.getElementById('_cnl-confirm').click() })
+    nameEl.addEventListener('keydown', e => { if (e.key === 'Enter') modal.querySelector('#_cnl-confirm').click() })
   })
+}
+
+// Shared by both lot popups: fill a Project <select> with the chosen client's
+// projects, plus a "+ New project…" entry so a client with none is not a dead end.
+function lotFillProjectSelect(clientSel, projSel, allProjects, preselectId, warnEl) {
+  const opt = clientSel.options[clientSel.selectedIndex]
+  const clientId = opt ? parseInt(opt.dataset.clientId) : NaN
+  const mine = (allProjects || []).filter(p => p.client_id != null && p.client_id === clientId)
+  if (!clientSel.value) {
+    projSel.innerHTML = '<option value="">Select a client first</option>'
+    if (warnEl) warnEl.style.display = 'none'
+    return
+  }
+  projSel.innerHTML = `<option value="">${mine.length ? 'Select a project…' : 'No projects for this client'}</option>` +
+    mine.map(p => `<option value="${p.id}"${String(p.id) === String(preselectId) ? ' selected' : ''}>${esc(p.name)}</option>`).join('') +
+    '<option value="__new__">+ New project…</option>'
+  if (warnEl) warnEl.style.display = projSel.value ? 'none' : ''
+  if (!projSel._warnBound) {
+    projSel.addEventListener('change', () => { if (warnEl) warnEl.style.display = parseInt(projSel.value) ? 'none' : '' })
+    projSel._warnBound = true
+  }
+}
+
+// Create a project under the client currently selected in clientSel.
+// Returns the new row {id, name, client_id} or null if cancelled.
+async function lotCreateProjectInline(clientSel) {
+  const opt = clientSel.options[clientSel.selectedIndex]
+  const clientId = opt ? parseInt(opt.dataset.clientId) : NaN
+  if (!clientSel.value || isNaN(clientId)) { alert('Select a client first'); return null }
+  const name = (prompt(`New project for ${clientSel.value}:`) || '').trim()
+  if (!name) return null
+  const dup = await pgQ(`SELECT id, name, client_id FROM projects WHERE client_id=$1 AND lower(trim(name))=lower($2)`, [clientId, name])
+  if (dup?.length) return dup[0]
+  const rows = await pgQ(`INSERT INTO projects (name, client_id, client_name) VALUES ($1, $2, $3) RETURNING id, name, client_id`, [name, clientId, clientSel.value])
+  return rows?.[0] || null
 }
 
 async function suggestLotName(clientName) {
@@ -11969,26 +12168,21 @@ async function createAndPickLot() {
 }
 
 async function showIntakeLotPicker() {
-  const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
-  console.log('[showIntakeLotPicker] intakeClient:', intakeClient, 'clientArg:', clientArg)
-  // Match case-insensitively against BOTH client columns. `client` holds the show
-  // ("American Pickers") and `lot_client` the production company ("CINEFLIX NY"),
-  // and the data has casing drift ("Haus Internal" vs "HAUS INTERNAL"), so an exact
-  // match on one column silently returned nothing.
-  let lots = clientArg ? (await pgQ(
-    `SELECT lot_id, lot_name, lot_type FROM lots
-      WHERE lower(trim(client)) = lower(trim($1)) OR lower(trim(lot_client)) = lower(trim($1))
-      ORDER BY lot_name DESC LIMIT 50`, [clientArg]) || []) : []
-
-  // Nothing matched this client — fall back to recent lots rather than an empty
-  // dropdown, which is indistinguishable from a failed query.
-  let fellBack = false
-  if (!lots.length) {
-    fellBack = true
-    lots = await pgQ(
-      `SELECT lot_id, lot_name, lot_type FROM lots ORDER BY lot_id DESC LIMIT 50`) || []
-  }
-  console.log(`[showIntakeLotPicker] ${lots.length} lots${fellBack ? ' (no client match — showing most recent)' : ` for client "${clientArg}"`}`)
+  // 2026-09-12, Erik: just list ACTIVE lots, newest first, limit 50. Matching on
+  // the client columns showed only ONE lot -- the show name lives in `client` on
+  // some lots and the production company on others, so the filter hid the very
+  // lots he was working in. Active = not sent and not already at its track limit.
+  const lots = await pgQ(
+    `SELECT l.lot_id, l.lot_name, l.lot_type, l.track_limit,
+            (SELECT count(*) FROM lot_titles lt WHERE lt.lot_id = l.lot_id) AS n
+       FROM lots l
+      WHERE l.sent_date IS NULL
+        AND (l.status IS NULL OR lower(l.status) = 'active')
+        AND (l.track_limit IS NULL
+             OR (SELECT count(*) FROM lot_titles lt WHERE lt.lot_id = l.lot_id) < l.track_limit)
+      ORDER BY l.lot_id DESC
+      LIMIT 50`) || []
+  console.log(`[showIntakeLotPicker] ${lots.length} active lots`)
 
   const modal = document.createElement('div')
   modal.id = 'intake-lot-picker-modal'
@@ -11998,11 +12192,12 @@ async function showIntakeLotPicker() {
       <div style="font-size:14px;font-weight:600">Choose Lot</div>
       <select id="lot-picker-select" class="form-input" style="width:100%;padding:8px;font-size:12px">
         <option value="">-- Select a lot --</option>
-        ${lots.map(l => `<option value="${l.lot_id}" ${intakeLotId===l.lot_id?'selected':''}>${esc(l.lot_name)}</option>`).join('')}
+        ${lots.map(l => `<option value="${l.lot_id}" ${intakeLotId===l.lot_id?'selected':''}>${esc(l.lot_name)}${l.track_limit ? ` — ${l.n}/${l.track_limit}` : ` — ${l.n}`}</option>`).join('')}
+        ${lots.length ? '' : '<option value="" disabled>No active lots — use New Lot</option>'}
       </select>
       <div style="display:flex;gap:8px">
-        <button class="btn" onclick="confirmLotSelection()" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500">Select</button>
-        <button class="btn" onclick="showCreateLotModal(null, '${esc(intakeClient)}', ${intakeIndex})" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500"><i class="ti ti-plus"></i> New Lot</button>
+        <button class="btn" onclick="confirmLotSelection()" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'" onmousedown="this.style.background='#C0C9CD'" onmouseup="this.style.background='#6F927E'">Select</button>
+        <button class="btn" onclick="showCreateLotModal(null, '${esc(intakeClient)}', ${intakeIndex})" style="flex:1;display:inline-flex;align-items:center;gap:5px;justify-content:center;font-size:12px;background:#8FAF9B;color:#fff;border:none;cursor:pointer;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'" onmousedown="this.style.background='#C0C9CD'" onmouseup="this.style.background='#6F927E'"><i class="ti ti-plus"></i> New Lot</button>
         <button class="btn" onclick="document.getElementById('intake-lot-picker-modal').remove()">Cancel</button>
       </div>
     </div>
@@ -12631,6 +12826,12 @@ async function executeIntake(snapshot = null) {
   const bgMode = !!snapshot
   if (!snapshot) { _intakeUploadFailures = []; _intakeArchiveFailures = [] }
   try {
+  // B2 is the second copy. Without it a song still ships locally and saves, but
+  // nothing is uploaded and source folders are kept rather than retired. Say so
+  // once, up front, instead of only warning in the console.
+  if (!bgMode && (!b2Connected || !b2BucketId)) {
+    if (!confirm('B2 is not connected.\n\nThe song will be renamed, shipped to Downloads and saved to the database, but NOTHING will be uploaded to B2 and the composer\'s source folder will be kept instead of retired.\n\nRun intake anyway?')) return
+  }
   const results = []
   const batchIndices = snapshot
     ? snapshot.batchIndices
@@ -12724,22 +12925,12 @@ async function executeIntake(snapshot = null) {
           // Do NOT delete the source. "Audio already in shipping for this SKU" only
           // proves *something* is there — it may be an older take, and this drop a
           // re-delivery. Archive it if we can; otherwise leave it and report.
-          {
-            const archiveDupe = `${cfg.hausjup}/${dupeLotFolder}`
-            let archived = false
-            if (archiveDupe && archiveDupe !== cfg.intake) {
-              const mk = await window.haus.shell.exec(`mkdir -p "${archiveDupe}"`)
-              if (!mk?.err) {
-                const base = d.path.split('/').pop()
-                const mv = await window.haus.shell.exec(`mv "${d.path}" "${archiveDupe}/${base}"`)
-                archived = !mv?.err
-              }
-            }
-            if (!archived) {
-              console.warn(`[executeIntake] duplicate SKU — source left in place: ${d.path}`)
-              _intakeArchiveFailures.push(d.path)
-            }
-          }
+          // 2026-09-12: no longer archived to cfg.finish -- that folder is the
+          // legacy two-stage backlog and intake must not add to it. A duplicate
+          // means the shipped audio may be an older take and this drop a
+          // re-delivery, so the source is LEFT IN PLACE for a human to compare.
+          console.warn(`[executeIntake] duplicate SKU — source left in place for review: ${d.path}`)
+          _intakeArchiveFailures.push(`${d.path} (duplicate SKU — compare with what is already shipped)`)
           results.push({ name: title, sku: skuRoot, isJup: info.isJup, isDuplicate: true, skippedFiles: true })
           continue
         }
@@ -12934,6 +13125,9 @@ async function executeIntake(snapshot = null) {
           cowriterNames: info.cowriterNames || [],
           description:   info.description || null,
           plotArc:       info.plotArc || null,
+          // 2026-09-12: vocals was collected in the form and dropped here, so every
+          // song saved as 'no_vocals' no matter what was picked.
+          vocals:        info.vocals || 'no_vocals',
           releaseDate:   info.releaseDate || null,
           isPublic:      info.isPublic !== false
         })
@@ -12954,42 +13148,48 @@ async function executeIntake(snapshot = null) {
     const md = `# ${title}\n\n**Composer:** ${info.id}\n**Key:** ${info.key}\n**Genre 1:** ${info.genre}\n**Genre 2:** ${info.subGenre || '—'}\n${skuLine}${dupeLine}${kslLine}${mmwLine}${bpmLine}${vocalsLine}${descLine}**Type:** ${info.isJup ? 'JUP' : 'Regular'}\n**Date Intake:** ${now}\n\n## Files\n${renamedFiles.map(f => `- ${f}`).join('\n')}\n`
     await window.haus.fs.writeFile(`${destDir}/${mdName}`, md)
 
-    // Move the source folder in beside its own deliverables, in SHIPPING.
-    // It used to go to cfg.finish (3. ATMOS_Finish), which is a separate legacy
-    // project folder for an old show -- consumed sources were being dumped in
-    // there and it could never empty out. Shipping is on local disk (Downloads),
-    // deliberately not Dropbox, to avoid cloud-storage stubs and partial uploads.
-    // Destination is the LOT folder chosen in intake: the source sits beside the
-    // SKU folders for that lot. Everything for a lot is then in one place and is
-    // deleted together once the client has it and B2 is confirmed. The "already
-    // shipped?" probe globs the SKU folder with -maxdepth 1, so a source folder
-    // sitting at lot level cannot cause a false positive.
-    const archiveDir = `${cfg.hausjup}/${lotFolder}`
-    if (archiveDir && archiveDir !== cfg.intake) {
-      // Create archive folder if needed
-      const mkArchive = await window.haus.shell.exec(`mkdir -p "${archiveDir}"`)
-      if (!mkArchive?.err) {
-        const baseName = d.path.split('/').pop()
-        // Move (not delete) the source folder to archive
-        const mvR = await window.haus.shell.exec(`mv "${d.path}" "${archiveDir}/${baseName}"`)
-        if (mvR?.err) {
-          // NEVER delete here. A failed move means the files were not archived,
-          // so the source folder is still the only copy. Leave it in place — it
-          // will reappear as a drop, which is visible and recoverable.
-          console.warn(`[executeIntake] failed to move "${d.path}" to archive:`, mvR.err)
-          _intakeArchiveFailures.push(d.path)
-        } else {
-          console.log(`[executeIntake] archived intake folder: ${archiveDir}/${baseName}`)
-        }
+    // ── Retire the source folder ───────────────────────────────────────────
+    // 2026-09-12, Erik: in ATMOSPHERE a song is FINISHED at intake (the old
+    // two-stage FileMaker/SourceAudio flow is gone), so the composer's original
+    // folder has no reason to survive and its presence is actively confusing.
+    // It is NOT archived to cfg.finish any more -- that folder is the legacy
+    // two-stage backlog and intake must stop adding to it.
+    //
+    // DELETE ONLY WITH TWO VERIFIED COPIES. Every file must have landed in
+    // SHIPPING at a matching byte count (checked above -- cpErrors aborts the
+    // track) AND have a confirmed B2 key. Otherwise the source stays exactly
+    // where it is and is reported: it will reappear as a drop, which is visible
+    // and recoverable. An earlier version deleted unconditionally and destroyed
+    // delivered audio when the archive path happened to be blank.
+    //
+    // Files are removed ONE BY ONE (never `rm -r`, which the shell/exec guard
+    // refuses by design) and then the folder is rmdir'd -- rmdir fails if
+    // anything unaccounted for is still inside, which is the behaviour we want.
+    {
+      const srcAudio = Array.from(srcSizes.keys())
+      const b2Missing = b2Connected && b2BucketId
+        ? renamedFiles.filter(f => !b2Keys[f])
+        : renamedFiles
+      if (!renamedFiles.length || b2Missing.length) {
+        const why = (!b2Connected || !b2BucketId)
+          ? 'B2 not connected — no second copy'
+          : `${b2Missing.length} file(s) not confirmed in B2`
+        console.warn(`[executeIntake] source KEPT for "${title}": ${why} — ${d.path}`)
+        _intakeArchiveFailures.push(`${d.path} (${why})`)
       } else {
-        console.warn(`[executeIntake] could not create archive dir ${archiveDir}:`, mkArchive.err)
+        let rmErrors = 0
+        for (const fname of srcAudio.concat(['.DS_Store'])) {
+          const rmR = await window.haus.shell.exec(`rm -f "${d.path}/${fname}"`)
+          if (rmR?.err) { rmErrors++; console.warn(`[executeIntake] could not remove source file ${fname}:`, rmR.err) }
+        }
+        const rd = await window.haus.shell.exec(`rmdir "${d.path}"`)
+        if (rd?.err || rmErrors) {
+          console.warn(`[executeIntake] source folder not fully removed (${rmErrors} file errors):`, rd?.err || '')
+          _intakeArchiveFailures.push(`${d.path} (not fully removed — check it by hand)`)
+        } else {
+          console.log(`[executeIntake] source retired after verified copies (shipping + B2): ${d.path}`)
+        }
       }
-    } else {
-      // No archive configured. Previously this deleted the source folder, which
-      // destroyed delivered audio whenever cfg.finish happened to be blank.
-      // Leave the files alone and report instead.
-      console.warn(`[executeIntake] no archive folder configured — leaving source in place: ${d.path}`)
-      _intakeArchiveFailures.push(d.path)
     }
     // Always purge from staged_files DB cache by filepath (covers both cache and live-scan drops)
     fetch(`/api/staged-files/by-path?path=${encodeURIComponent(d.path)}`, { method: 'DELETE' }).catch(() => {})
@@ -13039,6 +13239,24 @@ async function executeIntake(snapshot = null) {
 
 // ─── Tap Tempo ────────────────────────────────────────────────────────────────
 const _tapState = {}
+
+// Detection frequently lands on an octave of the real tempo -- 180 for a 90 BPM
+// song, 65 for 126. These two buttons (.5 and 2x, beside TAP) correct that in one
+// click instead of retyping. Rounds to a whole number and stays inside the field's
+// own 40-300 range; marks the value as manual so it is not mistaken for detected.
+function bpmScale(i, factor) {
+  const el = document.getElementById(`bpm-${i}`)
+  if (!el) return
+  const cur = parseFloat(el.value)
+  if (!cur || isNaN(cur)) return
+  const next = Math.round(cur * factor)
+  if (next < 40 || next > 300) return
+  el.value = next
+  const src = document.getElementById(`bpm-src-${i}`)
+  if (src) src.textContent = `${factor === 2 ? 'doubled' : 'halved'} from ${cur} — manual`
+  el.dispatchEvent(new Event('input', { bubbles: true }))
+  el.dispatchEvent(new Event('change', { bubbles: true }))
+}
 
 function tapTempo(i) {
   const now = performance.now()

@@ -270,6 +270,14 @@
 ---
 
 ## Session notes index (newest first)
+- `SESSION_2026_09_12.md` - **START HERE for 12 Sep.** Intake ergonomics: the
+  _SOURCE confusion settled by measurement, the vocals bug (every song saved
+  no_vocals), the AVID shipping-path fix (needs a server restart), one ACTIVE-lot
+  rule for both lot pickers, explicit Add vs Move. Ends with what is still open.
+- `DESIGN_COLORS.md` - the palette and the button hover/click states. #6F9276 is
+  deliberate, not a typo.
+- `UI_LOTS_CLIENTS_2026_09_11.md` - new lots now carry a project (rollover
+  popup rebuilt with Client + Project). Old lots out of scope by Erik's ruling.
 - `DATA_SAFETY.md` - **READ BEFORE DELETING, HIDING OR MOVING ANYTHING.**
   Erik keeps a spare copy of everything in an ARCHIVE Dropbox and cannot afford
   to lose anything. What a verify PASS does and does not prove, the measured

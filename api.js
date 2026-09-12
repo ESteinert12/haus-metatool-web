@@ -660,7 +660,7 @@ app.post('/api/lot/create', async (req, res) => {
 
 // ─── Download lot WAV files for AVID ───────────────────────────────────────
 app.post('/api/lot/download-avid-wavs', async (req, res) => {
-  const { lotId, lotName, safeName } = req.body
+  const { lotId, lotName, safeName, shippingBase: clientBase } = req.body
   try {
     // Get lot details from DB
     const lotRows = await pgPool.query('SELECT * FROM lots WHERE lot_id = $1', [lotId])
@@ -671,8 +671,13 @@ app.post('/api/lot/download-avid-wavs', async (req, res) => {
     const avidDir = path.resolve(path.join(os.homedir(), 'Downloads', `AVID_${safeName}`))
     if (!fs.existsSync(avidDir)) fs.mkdirSync(avidDir, { recursive: true })
 
-    // Find lot folder in shipping directory (read from config)
-    let shippingBase = process.env.HAUS_SHIPPING
+    // Find lot folder in shipping directory.
+    // Order matters: the APP's own configured path wins, because that is where
+    // intake actually wrote the files. HAUS_SHIPPING and the cfg file are only
+    // fallbacks -- both lagged behind the move from Dropbox to Downloads.
+    let shippingBase = (typeof clientBase === 'string' && clientBase.startsWith('/') && fs.existsSync(clientBase))
+      ? clientBase
+      : process.env.HAUS_SHIPPING
 
     if (!shippingBase) {
       try {
@@ -695,7 +700,11 @@ app.post('/api/lot/download-avid-wavs', async (req, res) => {
     console.log('[AVID] Looking for lot folder:', lotFolder)
 
     if (!fs.existsSync(lotFolder)) {
-      return res.json({ ok: false, error: `Lot folder not found: ${lotFolder}. Checked shipping path: ${shippingBase}` })
+      // Name drift between lots.lot_name and the folder on disk is common, so say
+      // exactly what was looked for and what is actually there.
+      let siblings = []
+      try { siblings = fs.readdirSync(shippingBase).filter(n => !n.startsWith('.')).slice(0, 40) } catch (e) {}
+      return res.json({ ok: false, error: `Lot folder not found.\n\nLooked for: ${lotFolder}\nShipping path: ${shippingBase}\n\nFolders there: ${siblings.join(', ') || '(none)'}` })
     }
 
     // Recursively find all WAV files and copy them
