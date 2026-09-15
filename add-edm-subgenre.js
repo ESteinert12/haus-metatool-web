@@ -3,7 +3,7 @@
 // Run: node add-edm-subgenre.js
 
 const { Pool } = require('pg')
-const CONN = process.env.DATABASE_URL || 'postgresql://neondb_owner:PASTE_NEW_PASSWORD_HERE@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+const CONN = process.env.DATABASE_URL
 
 async function main() {
   const pool = new Pool({ connectionString: CONN, ssl: { rejectUnauthorized: false } })
