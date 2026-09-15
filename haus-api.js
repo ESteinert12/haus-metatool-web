@@ -22,7 +22,6 @@
   // ── Filesystem ──────────────────────────────────────────────────────────
   const fs = {
     readDir:     (p)       => _post('/api/fs/read-dir',     { dirPath: p }),
-    countFiles:  (p, ext)  => _post('/api/fs/count-files',  { dirPath: p, ext }),
     pathExists:  (p)       => _post('/api/fs/path-exists',  { filePath: p }),
     readFile:    (p)       => _post('/api/fs/read-file',    { filePath: p }),
     writeFile:   (p, c)    => _post('/api/fs/write-file',   { filePath: p, content: c }),

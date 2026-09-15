@@ -39,17 +39,31 @@ app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
 
 // ✅ SECURITY: Load session secret from environment variable
-const sessionSecret = process.env.SESSION_SECRET || 'haus-workspace-secret-2024'
-if (!process.env.SESSION_SECRET) {
-  console.warn('⚠️  WARNING: SESSION_SECRET not set; using fallback. Set SESSION_SECRET env var for production.')
+// No fallback secret. A published fallback is the same as no secret at all: anyone
+// with the repo can forge a session cookie. Refuse to start instead.
+const sessionSecret = process.env.SESSION_SECRET
+if (!sessionSecret) {
+  console.error('FATAL: SESSION_SECRET is not set. Generate one with:')
+  console.error('  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"')
+  console.error('and put it in .env (local) or the Vercel project env vars (deployed).')
+  process.exit(1)
 }
+
+// secure:true off a real HTTPS origin. Local dev over plain http sets HAUS_INSECURE_COOKIE=1.
+const secureCookie = process.env.HAUS_INSECURE_COOKIE !== '1'
 
 app.use(session({
   secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: true, secure: false } // httpOnly prevents JS access; set secure:true if HTTPS
+  cookie: {
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: 'lax'
+  }
 }))
+if (secureCookie) app.set('trust proxy', 1)   // Vercel/Cloudflare terminate TLS upstream
 
 // Disable caching for all files
 app.use((req, res, next) => {
@@ -73,32 +87,206 @@ app.get('/haus-api.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'haus-api.js'))
 })
 
-// Serve static files (index.html, assets, etc.)
-app.use(express.static(__dirname))
+// Static serving used to be express.static(__dirname), which published the entire
+// repository over HTTP with no login: GET /mydatabase.bak returned the 7 MB database
+// backup and GET /api.js returned this file, connection string and all. Serve only
+// the handful of things the browser actually asks for.
+app.use('/assets', express.static(path.join(__dirname, 'assets')))
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html']) {
+  app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
+}
 
-// Auth guard — only these routes are public; everything else requires session authentication
+// ─── Auth guard ────────────────────────────────────────────────────────────
+// Public means "reachable with no login at all", so the list is method-aware:
+// GET /cfg/server-paths is read by loadCfg() before the login screen appears,
+// but POST /cfg/server-paths rewrites the server's folder config and is not public.
+//
+// Removed from this list, and why:
+//   /fs/*              arbitrary file read/write on the host (see _safeRead/_safeWrite)
+//   /pg/connect        repointed the server's pool at any Postgres the caller named
+//   /shell/*           open-external and show-in-finder act on the host desktop
+//   /b2/*              nine routes, several of which mutate the bucket
 const PUBLIC_ROUTES = [
-  // Auth (needed before login)
-  '/auth/login', '/pg/connect', '/pg/status',
-  // Config (safe, no credentials)
-  '/cfg/server-paths',
-  // File ops (needed for file browser before login) — TODO: implement path validation
-  '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
-  '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
-  // Shell ops (safe ones only)
-  '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
-  // B2 (mostly audit/recovery operations)
-  '/b2/stream', '/b2/authorize', '/b2/status', '/b2/rebuild-stem-keys', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots'
+  'POST /auth/login',
+  'GET /auth/me',
+  'GET /pg/status',
+  'GET /cfg/server-paths'
 ]
+// Routes that can do damage no amount of SQL could reproduce: host side effects,
+// bucket mutations, and config the whole team shares. Admin only.
+const ADMIN_ROUTES = [
+  'POST /shell/exec',
+  'POST /applescript',
+  'POST /fs/write-file',
+  'POST /cfg/server-paths',
+  'POST /pg/connect',
+  'POST /db/migrate-client-ids',
+  'POST /clients/import-csv',
+  'POST /b2/upload-file',
+  'POST /b2/get-upload-url',
+  'POST /b2/rebuild-stem-keys',
+  'GET /b2/heal',
+  'GET /b2/hide-strays',
+  'GET /b2/relocate-strays',
+  'GET /b2/repair',
+  'GET /b2/recover-broken',
+  'GET /b2/recovery-from-dropbox',
+  'GET /b2/batch-upload-shipping',
+  'GET /b2/stub-audit-refresh'
+]
+
 app.use('/api', (req, res, next) => {
-  if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
+  const sig = `${req.method} ${req.path}`
+  if (PUBLIC_ROUTES.includes(sig)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  if (ADMIN_ROUTES.includes(sig) && req.session.user.role !== 'admin') {
+    console.warn(`[authz] ${req.session.user.username} denied ${sig} (role=${req.session.user.role})`)
+    return res.status(403).json({ ok: false, error: 'Admin only' })
+  }
   next()
 })
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
-function _hashPassword(pw) {
+// Legacy scheme: unsalted sha256 with a fixed prefix. A fixed prefix is a pepper,
+// not a salt — identical passwords hash identically and the whole space is
+// brute-forceable at GPU speed. Kept only to verify an old hash once, at which
+// point the row is rewritten in the new format. Never used to write a new hash.
+function _legacyHash(pw) {
   return crypto.createHash('sha256').update('haus-workspace:' + pw).digest('hex')
+}
+
+// scrypt, per-user random salt. Stored as: scrypt$<N>$<saltHex>$<keyHex>
+const _SCRYPT_N = 16384
+function _hashPassword(pw) {
+  const salt = crypto.randomBytes(16)
+  const key  = crypto.scryptSync(pw, salt, 64, { N: _SCRYPT_N, r: 8, p: 1 })
+  return `scrypt$${_SCRYPT_N}$${salt.toString('hex')}$${key.toString('hex')}`
+}
+
+// Constant-time verify. Returns { ok, needsUpgrade }.
+function _verifyPassword(pw, stored) {
+  if (typeof stored !== 'string' || !stored) return { ok: false, needsUpgrade: false }
+  if (stored.startsWith('scrypt$')) {
+    const [, nStr, saltHex, keyHex] = stored.split('$')
+    try {
+      const key = crypto.scryptSync(pw, Buffer.from(saltHex, 'hex'), 64, { N: parseInt(nStr, 10), r: 8, p: 1 })
+      const exp = Buffer.from(keyHex, 'hex')
+      return { ok: key.length === exp.length && crypto.timingSafeEqual(key, exp), needsUpgrade: false }
+    } catch { return { ok: false, needsUpgrade: false } }
+  }
+  const a = Buffer.from(_legacyHash(pw), 'utf8')
+  const b = Buffer.from(stored, 'utf8')
+  const ok = a.length === b.length && crypto.timingSafeEqual(a, b)
+  return { ok, needsUpgrade: ok }
+}
+
+// ─── Filesystem access control ─────────────────────────────────────────────
+// Every /api/fs/* handler resolves its caller-supplied path through one of these.
+// Writes are confined to the four configured working folders, tmp, and ~/Downloads
+// (where the lot export defaults) — an app that files deliverables into Dropbox has
+// no reason to write anywhere else. Reads are the same set plus the app dir, for the
+// migration .sql files index.html reads at boot.
+//
+// Reads used to be allowed anywhere under the user's home. Nothing in the app needs
+// that: the only two read call sites are the boot migrations (app dir) and the
+// FileMaker backfill's pasted CSV path, which belongs in a working folder or
+// Downloads like every other file this app touches. A denied read logs one
+// "[fs-guard] read denied (outside roots)" line with the offending path.
+//
+// One rule covers the sensitive cases: no path segment may begin with a dot. That
+// excludes .ssh, .aws, .env, .config and .haus-workspace-cfg.json in a single check,
+// and no music file or CSV lives in a dotfolder.
+const FS_ROOT_KEYS = ['hausjup', 'staging', 'intake', 'finish']
+
+function _configuredRoots() {
+  const roots = []
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
+    for (const k of FS_ROOT_KEYS) if (cfg[k]) roots.push(_resolveReal(cfg[k]))
+  } catch {}
+  for (const extra of (process.env.HAUS_FS_EXTRA_ROOTS || '').split(':')) {
+    if (extra.trim()) roots.push(_resolveReal(extra.trim()))
+  }
+  return roots
+}
+
+function _resolveReal(p) {
+  const abs = path.resolve(p)
+  // Resolve symlinks so a link inside a root cannot point outside one. A path that
+  // does not exist yet (a file about to be written) resolves via its parent.
+  try { return fs.realpathSync(abs) } catch {}
+  try { return path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs)) } catch {}
+  return abs
+}
+
+function _under(real, roots) {
+  return roots.some(r => real === r || real.startsWith(r + path.sep))
+}
+
+function _hasDotSegment(real) {
+  return real.split(path.sep).some(seg => seg.startsWith('.') && seg !== '.' && seg !== '..')
+}
+
+function _guard(p, roots, kind) {
+  if (typeof p !== 'string' || !p.trim()) return null
+  const real = _resolveReal(p)
+  if (_hasDotSegment(real)) { console.warn(`[fs-guard] ${kind} denied (dot segment): ${p}`); return null }
+  if (!_under(real, roots))  { console.warn(`[fs-guard] ${kind} denied (outside roots): ${p}`); return null }
+  return real
+}
+
+// Every root goes through _resolveReal, the same resolution the caller's path gets.
+// A root left unresolved silently refuses everything under it whenever the path to
+// it crosses a symlink — which on macOS is the normal case, not an edge case:
+// os.tmpdir() reports /var/folders/... and /var is a symlink to /private/var, so a
+// candidate resolves to /private/var/folders/... and matches no root at all. The
+// same trap catches any working folder reached through a symlink.
+//
+// os.tmpdir() is also NOT /tmp on macOS — it is the per-user $TMPDIR under
+// /var/folders. index.html's Excel IP export writes /tmp/gen_ip.py and
+// /tmp/ip_data.json and then runs python3 over them, so /tmp has to be a root in
+// its own right or that export silently fails: writeFile returns false, nothing
+// checks it, and the shell.exec that follows runs a script that was never written.
+function _tempRoots() {
+  const roots = []
+  for (const d of [os.tmpdir(), '/tmp']) {
+    const r = _resolveReal(d)
+    if (!roots.includes(r)) roots.push(r)
+  }
+  return roots
+}
+// ~/Downloads is a write root because the lot export defaults there
+// (index.html: _exportFolder = home + '/Downloads').
+function _writeRoots() {
+  return _dedupe([..._configuredRoots(), ..._tempRoots(), _resolveReal(path.join(os.homedir(), 'Downloads'))])
+}
+// Reads add only the app directory, for the migration .sql files index.html
+// reads at boot (index.html: sqlPath, derived from shell.appPath()).
+function _readRoots() {
+  return _dedupe([..._writeRoots(), _resolveReal(__dirname)])
+}
+function _dedupe(list) {
+  return list.filter((v, i) => v && list.indexOf(v) === i)
+}
+function _safeRead(p) {
+  return _guard(p, _readRoots(), 'read')
+}
+function _safeWrite(p) {
+  return _guard(p, _writeRoots(), 'write')
+}
+const _DENIED = { ok: false, error: 'Path not allowed' }
+
+// Print the active roots at startup. If a legitimate folder is missing from this
+// list, /api/fs/* will refuse it and the reason will be one line in the log
+// ("[fs-guard] ... denied") rather than a mystery. Add roots with HAUS_FS_EXTRA_ROOTS.
+function _logFsRoots() {
+  const cfg = _configuredRoots()
+  console.log('[fs-guard] write roots:', _writeRoots().join('  |  '))
+  console.log('[fs-guard] read  roots:', _readRoots().join('  |  '))
+  if (!cfg.length) {
+    console.warn('[fs-guard] ⚠ no working folders configured — /api/fs/* writes will be refused')
+    console.warn('[fs-guard]   set them in Settings (admin), or via HAUS_FS_EXTRA_ROOTS')
+  }
 }
 
 function _b2Request(opts) {
@@ -196,7 +384,10 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_VWPl7U3kYwJb@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+// The connection string used to be hardcoded here, in a public repository, and this
+// file was served over HTTP by express.static(__dirname). It comes from the
+// environment now; see .env.example.
+const DEFAULT_NEON = process.env.DATABASE_URL || null
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -210,14 +401,29 @@ async function runServerMigrations(pool) {
       created_at    TIMESTAMPTZ DEFAULT now()
     )
   `)
-  // Default password: haus2024  (sha256 of 'haus-workspace:haus2024')
-  const defaultHash = 'b306649bab59e11eea165a339f03855f9a1d9290364f0187f49294a3555a5f5b'
-  await pool.query(`
-    INSERT INTO haus_users (username, display_name, password_hash) VALUES
-      ('erik', 'Erik', $1),
-      ('kyle', 'Kyle', $1)
-    ON CONFLICT (username) DO NOTHING
-  `, [defaultHash])
+  await pool.query(`ALTER TABLE haus_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`)
+  await pool.query(`ALTER TABLE haus_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false`)
+  // Seed accounts get a random password nobody knows, flagged must_change_password.
+  // The old seed used sha256('haus-workspace:haus2024') with the plaintext spelled out
+  // in the comment, in a public repo — so anyone could sign in as erik or kyle.
+  // Anyone still on that hash is force-reset here.
+  const LEAKED_DEFAULT = 'b306649bab59e11eea165a339f03855f9a1d9290364f0187f49294a3555a5f5b'
+  for (const [username, display, role] of [['erik', 'Erik', 'admin'], ['kyle', 'Kyle', 'admin']]) {
+    await pool.query(
+      `INSERT INTO haus_users (username, display_name, password_hash, role, must_change_password)
+       VALUES ($1, $2, $3, $4, true) ON CONFLICT (username) DO NOTHING`,
+      [username, display, _hashPassword(crypto.randomBytes(24).toString('hex')), role]
+    )
+  }
+  const reset = await pool.query(
+    `UPDATE haus_users SET password_hash=$1, must_change_password=true
+      WHERE password_hash=$2 RETURNING username`,
+    [_hashPassword(crypto.randomBytes(24).toString('hex')), LEAKED_DEFAULT]
+  )
+  if (reset.rowCount) {
+    console.warn(`⚠ reset ${reset.rowCount} account(s) still using the published default password: ${reset.rows.map(r => r.username).join(', ')}`)
+    console.warn('  Set a new one with: node scripts/set-password.js <username>')
+  }
   console.log('✅ haus_users ready')
 
   // staged_files: pre-scraped metadata for files waiting in the staging folder
@@ -268,14 +474,26 @@ async function runServerMigrations(pool) {
 // Neon serverless computes may sleep after ~5 min of inactivity (30-60s cold start).
 // We don't ping proactively — next query wakes compute if needed.
 
+_logFsRoots()
+
 // Auto-connect to Neon on startup — tries saved config first, falls back to default
 ;(async () => {
   try {
+    // DATABASE_URL wins over the saved config file. The other way round, a stale
+    // pgConn left in ~/.haus-workspace-cfg.json would keep the app pointed at a
+    // rotated-away credential and it would look broken for no visible reason.
     let connStr = DEFAULT_NEON
-    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-    if (fs.existsSync(cfgPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      if (cfg.pgConn) connStr = cfg.pgConn
+    if (!connStr) {
+      const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+        if (cfg.pgConn) connStr = cfg.pgConn
+      }
+    }
+    if (!connStr) {
+      console.error('FATAL: no database connection string. Set DATABASE_URL in .env')
+      console.error('(or the Vercel project env vars). Nothing works without it.')
+      process.exit(1)
     }
 
     // Retry logic for initial connection (Neon can reset on cold start)
@@ -330,14 +548,33 @@ app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const hash   = _hashPassword(password)
+    // Fetch by username, then verify — the old query compared the hash in SQL, which
+    // cannot work once each row has its own salt.
     const result = await pgPool.query(
-      `SELECT user_id, username, display_name FROM haus_users WHERE LOWER(username)=LOWER($1) AND password_hash=$2`,
-      [username, hash]
+      `SELECT user_id, username, display_name, password_hash, role, must_change_password
+         FROM haus_users WHERE LOWER(username)=LOWER($1)`,
+      [username]
     )
-    if (!result.rows.length) return res.json({ ok: false, error: 'Invalid username or password' })
-    req.session.user = result.rows[0]
-    res.json({ ok: true, user: result.rows[0] })
+    const row = result.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Invalid username or password' })
+    const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
+    if (!ok) return res.json({ ok: false, error: 'Invalid username or password' })
+    // Transparent re-hash: an account on the legacy scheme is migrated the first
+    // time it signs in, without anyone being locked out.
+    if (needsUpgrade) {
+      await pgPool.query(`UPDATE haus_users SET password_hash=$1 WHERE user_id=$2`,
+        [_hashPassword(password), row.user_id]).catch(e => console.warn('[auth] rehash failed:', e.message))
+      console.log(`[auth] upgraded ${row.username} to scrypt`)
+    }
+    const user = {
+      user_id: row.user_id,
+      username: row.username,
+      display_name: row.display_name,
+      role: row.role || 'user',
+      must_change_password: row.must_change_password === true
+    }
+    req.session.user = user
+    res.json({ ok: true, user })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
@@ -354,13 +591,20 @@ app.post('/api/auth/change-password', async (req, res) => {
   const { username, oldPassword, newPassword } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const oldHash = _hashPassword(oldPassword)
-    const newHash = _hashPassword(newPassword)
-    const result  = await pgPool.query(
-      `UPDATE haus_users SET password_hash=$1 WHERE LOWER(username)=LOWER($2) AND password_hash=$3 RETURNING user_id`,
-      [newHash, username, oldHash]
-    )
-    if (!result.rowCount) return res.json({ ok: false, error: 'Current password incorrect' })
+    if (!newPassword || String(newPassword).length < 12) {
+      return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+    }
+    const cur = await pgPool.query(
+      `SELECT user_id, password_hash FROM haus_users WHERE LOWER(username)=LOWER($1)`, [username])
+    const row = cur.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Current password incorrect' })
+    if (!_verifyPassword(oldPassword || '', row.password_hash).ok) {
+      return res.json({ ok: false, error: 'Current password incorrect' })
+    }
+    await pgPool.query(
+      `UPDATE haus_users SET password_hash=$1, must_change_password=false WHERE user_id=$2`,
+      [_hashPassword(newPassword), row.user_id])
+    if (req.session?.user?.user_id === row.user_id) req.session.user.must_change_password = false
     res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -439,7 +683,8 @@ app.get('/api/pg/status', async (req, res) => {
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
 app.post('/api/fs/read-dir', (req, res) => {
-  const { dirPath } = req.body
+  const dirPath = _safeRead(req.body.dirPath)
+  if (!dirPath) return res.json({ error: 'Path not allowed' })
   try {
     const items = fs.readdirSync(dirPath, { withFileTypes: true })
     const result = items
@@ -460,8 +705,8 @@ app.post('/api/fs/read-dir', (req, res) => {
 
 // Read BPM/key from audio file tags (same music-metadata library used by staging watcher)
 app.post('/api/fs/audio-meta', async (req, res) => {
-  const { filePath } = req.body
-  if (!filePath) return res.json({ ok: false, error: 'No path' })
+  const filePath = _safeRead(req.body.filePath)
+  if (!filePath) return res.json(_DENIED)
   try {
     let mm = null
     try { mm = require('music-metadata') } catch { return res.json({ ok: false, error: 'music-metadata not installed' }) }
@@ -486,7 +731,8 @@ app.post('/api/fs/audio-meta', async (req, res) => {
 
 // Check whether _FULL audio files are locally available or cloud-only (Dropbox SmartSync)
 app.post('/api/fs/audio-status', async (req, res) => {
-  const { folderPath } = req.body
+  const folderPath = _safeRead(req.body.folderPath)
+  if (!folderPath) return res.json({ mp3: 'error', wav: 'error' })
   try {
     const names = await fs.promises.readdir(folderPath).catch(() => [])
     const checkFile = async (pattern) => {
@@ -505,46 +751,31 @@ app.post('/api/fs/audio-status', async (req, res) => {
   } catch (e) { res.json({ mp3: 'error', wav: 'error' }) }
 })
 
-app.post('/api/fs/count-files', (req, res) => {
-  const { dirPath, ext } = req.body
-  try {
-    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
-    const result = execSync(cmd).toString().trim()
-    res.json(parseInt(result, 10))
-  } catch { res.json(0) }
-})
-
 app.post('/api/fs/path-exists', (req, res) => {
-  const { filePath } = req.body
-  res.json(fs.existsSync(filePath))
+  const filePath = _safeRead(req.body.filePath)
+  res.json(filePath ? fs.existsSync(filePath) : false)
 })
 
 app.post('/api/fs/read-file', (req, res) => {
-  const { filePath } = req.body
+  const filePath = _safeRead(req.body.filePath)
+  if (!filePath) return res.json(null)
   try { res.json(fs.readFileSync(filePath, 'utf8')) }
   catch { res.json(null) }
 })
 
 app.post('/api/fs/write-file', (req, res) => {
-  const { filePath, content } = req.body
+  const filePath = _safeWrite(req.body.filePath)
+  if (!filePath) return res.json(false)
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
-    fs.writeFileSync(filePath, content, 'utf8')
+    fs.writeFileSync(filePath, req.body.content ?? '', 'utf8')
     res.json(true)
   } catch { res.json(false) }
 })
 
-app.post('/api/fs/mkdir', (req, res) => {
-  const { dirPath } = req.body
-  if (!dirPath) return res.json({ ok: false, error: 'No dirPath provided' })
-  try {
-    fs.mkdirSync(dirPath, { recursive: true })
-    res.json({ ok: true, path: dirPath })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
 app.post('/api/fs/folder-stats', (req, res) => {
-  const { dirPath } = req.body
+  const dirPath = _safeRead(req.body.dirPath)
+  if (!dirPath) return res.json({ audioCount: 0, totalCount: 0, folderCount: 0 })
   try {
     const audioExts = ['.wav', '.mp3', '.aiff', '.aif']
     let audioCount = 0, totalCount = 0, folderCount = 0
@@ -737,7 +968,10 @@ app.get('/api/shell/show-folder-picker', (req, res) => {
 
 // ─── Server-side canonical paths ───────────────────────────────────────────
 // Stores shared folder paths so all users inherit them without local config.
-const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
+// 'pgConn' was in this list, and GET /api/cfg/server-paths is read before login —
+// so the database connection string was handed to anyone who asked. The server gets
+// its connection from DATABASE_URL now and the browser never needs one.
+const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail']
 
 app.get('/api/cfg/server-paths', (req, res) => {
   const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
@@ -756,6 +990,10 @@ app.post('/api/cfg/server-paths', (req, res) => {
     if (req.body[k] !== undefined) cfg[k] = req.body[k]
   }
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
+  // A second app.post('/api/cfg/server-paths') was registered later in this file to
+  // restart the staging watcher on a path change. Express matches the first route,
+  // so that hook never ran and the watcher kept watching the old folder. Folded in here.
+  res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
   res.json({ ok: true })
 })
 
@@ -770,6 +1008,8 @@ app.get('/api/audio/stream', async (req, res) => {
     try { filePath = Buffer.from(req.query.h, 'hex').toString('utf8') } catch {}
   }
   if (!filePath) return res.status(400).json({ error: 'No path', receivedQuery: req.query })
+  filePath = _safeRead(filePath)
+  if (!filePath) return res.status(403).json({ error: 'Path not allowed' })
   let stat
   try { stat = await fs.promises.stat(filePath) } catch { return res.status(404).json({ error: 'File not found' }) }
 
@@ -3996,13 +4236,6 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     console.error('[import] Unexpected error:', e.message)
     res.status(500).json({ ok: false, error: e.message })
   }
-})
-
-// Restart watcher when staging path changes
-app.post('/api/cfg/server-paths', async (req, res, next) => {
-  // handled by original route below — we just hook to restart watcher
-  res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
-  next()
 })
 
 // ─── Clients import ────────────────────────────────────────────────────────

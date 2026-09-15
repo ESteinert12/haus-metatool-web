@@ -1317,7 +1317,11 @@ const DEFAULT_CFG = {
   slack:   'https://app.slack.com',
   name:    'Boss',
   // PostgreSQL
-  pgConn:  'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen.c-10.us-east-1.aws.neon.tech/neondb?sslmode=prefer',
+  // The Neon connection string used to live here, which meant the database password
+  // was in the page source of every browser that loaded the app. The server holds its
+  // own connection (DATABASE_URL in the environment) and connects at startup; the
+  // browser only ever asks whether that connection is up.
+  pgConn:  '',
   // FileMaker Data API
   fmHost:          '',
   fmDatabase:      '',
@@ -1415,8 +1419,8 @@ async function loadCfg() {
   applyName()
   autoFillDropboxPaths()
   await pgAutoConnect()
-  await loadFolderTags()   // must complete before any folder is parsed
-  b2AutoConnect()
+  // loadFolderTags() and b2AutoConnect() both hit routes that now require a session.
+  // Running them on the login screen just produced 401s. doLogin() calls them.
 }
 
 
@@ -1493,6 +1497,15 @@ async function doLogin() {
   currentUser = r.user
   pgClearAuthFailure()          // queries were suppressed while logged out
   runMigrations().catch(e => console.warn('[migrations]', e?.message))
+  await loadFolderTags().catch(() => {})   // must complete before any folder is parsed
+  b2AutoConnect().catch(() => {})
+  if (r.user.must_change_password) {
+    alert(`Your password was reset because the old one was published in the repository.\n\nSet a new one now: Settings → Change Password.`)
+  }
+  // Admin-only controls stay hidden for everyone else; the server enforces it either way.
+  if (r.user.role !== 'admin') {
+    document.querySelectorAll('[data-admin-only]').forEach(el => { el.style.display = 'none' })
+  }
   loadLotPortalPicker().catch(() => {})   // rendered empty pre-login; refresh it now
   // Update nav user display
   const nameEl   = document.getElementById('user-name')
@@ -1582,22 +1595,12 @@ async function runMigration(name, sqlFile, checkQuery) {
   }
 }
 
-async function seedHausUsers() {
-  await pgQ(`CREATE TABLE IF NOT EXISTS haus_users (
-    user_id      SERIAL PRIMARY KEY,
-    username     TEXT UNIQUE NOT NULL,
-    display_name TEXT NOT NULL,
-    password_hash TEXT NOT NULL,
-    created_at   TIMESTAMPTZ DEFAULT now()
-  )`)
-  // Seed initial users (password: haus2024 — change after first login)
-  const initialHash = 'b306649bab59e11eea165a339f03855f9a1d9290364f0187f49294a3555a5f5b'
-  await pgQ(`INSERT INTO haus_users (username, display_name, password_hash) VALUES
-    ('erik',  'Erik',  $1),
-    ('kyle',  'Kyle',  $1)
-    ON CONFLICT (username) DO NOTHING`, [initialHash])
-  console.log('[seed] haus_users ready')
-}
+// seedHausUsers() lived here. It ran on every login and re-inserted erik and kyle
+// with sha256('haus-workspace:haus2024') — the password published in this repo.
+// ON CONFLICT DO NOTHING kept it from clobbering existing rows, but it would
+// recreate them with the leaked hash if the table were ever emptied. The server
+// owns haus_users now (runServerMigrations in api.js): scrypt hashes, a role
+// column, and a random password flagged must_change_password.
 
 async function seedRmo() {
   const check = await pgQ('SELECT COUNT(*) AS n FROM rmo')
@@ -1642,7 +1645,6 @@ async function runMigrations() {
       SET next_seq = GREATEST(sku_sequences.next_seq, EXCLUDED.next_seq)
   `).catch(e => console.warn('[migration] sku_sequences seed:', e.message))
 
-  await seedHausUsers()
 
   // ── Composers: active/inactive flag ──────────────────────────────────────
   await pgQ(`ALTER TABLE composers ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE`).catch(() => {})
@@ -1871,16 +1873,19 @@ async function runMigrations() {
 }
 
 async function pgAutoConnect() {
-  const connStr = cfg.pgConn || DEFAULT_CFG.pgConn
   const retryEl = document.getElementById('nav-pg-retry')
 
-  // Try up to 4 times (0s, 2s, 4s, 6s)
+  // Was: POST /api/pg/connect with a connection string from client config, before
+  // anyone had logged in — so an unauthenticated caller could repoint the server's
+  // pool at any Postgres they named. The server connects itself at startup; all the
+  // browser needs is whether that worked.
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt > 0) {
       if (retryEl) retryEl.style.display = 'inline'
       await new Promise(res => setTimeout(res, 2000))
     }
-    const r = await window.haus.pg.connect(connStr)
+    const st = await window.haus.pg.status().catch(() => ({ connected: false }))
+    const r = { ok: st.connected, error: st.connected ? null : 'Server is not connected to the database' }
     if (r.ok) {
       if (retryEl) retryEl.style.display = 'none'
       pgConnected = true // allow pgQ() during migrations
@@ -1899,8 +1904,11 @@ async function pgAutoConnect() {
   }
 }
 async function pgConnectManual() {
-  cfg.pgConn = document.getElementById('cfg-pg-conn').value.trim() || DEFAULT_CFG.pgConn
-  localStorage.setItem('haus-cfg', JSON.stringify(cfg))
+  const connStr = document.getElementById('cfg-pg-conn').value.trim()
+  if (!connStr) { await pgAutoConnect(); return }
+  // POST /api/pg/connect is admin-only now, and 403s for everyone else.
+  const r = await window.haus.pg.connect(connStr)
+  if (!r.ok) { alert(r.error || 'Could not connect. Reconnecting to the server database instead.'); }
   await pgAutoConnect()
 }
 
