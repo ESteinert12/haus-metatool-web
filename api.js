@@ -91,7 +91,7 @@ app.get('/haus-api.js', (req, res) => {
 // backup and GET /api.js returned this file, connection string and all. Serve only
 // the handful of things the browser actually asks for.
 app.use('/assets', express.static(path.join(__dirname, 'assets')))
-for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html']) {
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html', 'client-portal.html']) {
   app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
 }
 
@@ -134,8 +134,23 @@ const ADMIN_ROUTES = [
   'GET /b2/stub-audit-refresh'
 ]
 
+// Client Portal logins (producers/clients) are a separate identity from
+// haus_users admin logins — req.session.portalUser, never req.session.user.
+// A portal login must never satisfy the admin guard below, or vice versa.
+const PORTAL_PUBLIC_ROUTES = [
+  'POST /portal/auth/login',
+  'GET /portal/auth/me'
+]
+
 app.use('/api', (req, res, next) => {
   const sig = `${req.method} ${req.path}`
+
+  if (req.path.startsWith('/portal/')) {
+    if (PORTAL_PUBLIC_ROUTES.includes(sig)) return next()
+    if (!req.session?.portalUser) return res.status(401).json({ ok: false, error: 'Not logged in' })
+    return next()
+  }
+
   if (PUBLIC_ROUTES.includes(sig)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
   if (ADMIN_ROUTES.includes(sig) && req.session.user.role !== 'admin') {
@@ -467,6 +482,109 @@ async function runServerMigrations(pool) {
     `)
     console.log('✅ ksl unique constraint ready')
   } catch (e) { console.warn('[schema] ksl unique constraint:', e.message) }
+
+  // ── Client Portal: producers (reuses the existing `clients` table imported
+  // from FileMaker — CL074 AETN Networks, etc. — rather than a parallel
+  // table), portal login, briefs/pitches/licenses/messages/playlists. All
+  // scoped by clients.id via client_id, guarded IF NOT EXISTS so this is safe
+  // to run against whatever the real `clients` table already looks like.
+  try {
+    await pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS haus_rep TEXT`)
+    await pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS portal_enabled BOOLEAN NOT NULL DEFAULT false`)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_users (
+        portal_user_id        SERIAL PRIMARY KEY,
+        client_id              INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        email                   TEXT UNIQUE NOT NULL,
+        display_name            TEXT NOT NULL,
+        password_hash           TEXT NOT NULL,
+        must_change_password    BOOLEAN NOT NULL DEFAULT true,
+        created_at               TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS briefs (
+        brief_id      SERIAL PRIMARY KEY,
+        client_id     INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        title         TEXT NOT NULL,
+        description   TEXT,
+        mood_tags     TEXT[] NOT NULL DEFAULT '{}',
+        budget_type   TEXT,
+        due_date      DATE,
+        status        TEXT NOT NULL DEFAULT 'draft',
+        created_by    INTEGER REFERENCES portal_users(portal_user_id) ON DELETE SET NULL,
+        created_at    TIMESTAMPTZ DEFAULT now(),
+        updated_at    TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pitches (
+        pitch_id      SERIAL PRIMARY KEY,
+        client_id     INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        brief_id      INTEGER REFERENCES briefs(brief_id) ON DELETE SET NULL,
+        sku_root      VARCHAR NOT NULL REFERENCES titles(sku_root) ON DELETE CASCADE,
+        rep_note      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        responded_at  TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (client_id, sku_root, brief_id)
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS licenses (
+        license_id     SERIAL PRIMARY KEY,
+        client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        sku_root       VARCHAR NOT NULL REFERENCES titles(sku_root) ON DELETE CASCADE,
+        brief_id       INTEGER REFERENCES briefs(brief_id) ON DELETE SET NULL,
+        license_type   TEXT NOT NULL DEFAULT 'Sync+Master',
+        formats        TEXT[] NOT NULL DEFAULT '{WAV,MP3}',
+        expires_at     DATE,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_messages (
+        message_id     SERIAL PRIMARY KEY,
+        client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        sender_type    TEXT NOT NULL CHECK (sender_type IN ('portal_user','haus_rep')),
+        sender_id      INTEGER,
+        sender_name    TEXT NOT NULL,
+        body           TEXT NOT NULL,
+        read_at        TIMESTAMPTZ,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_playlists (
+        playlist_id    SERIAL PRIMARY KEY,
+        client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        name           TEXT NOT NULL,
+        share_token    TEXT UNIQUE,
+        created_by     TEXT,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_playlist_tracks (
+        playlist_id  INTEGER NOT NULL REFERENCES portal_playlists(playlist_id) ON DELETE CASCADE,
+        sku_root     VARCHAR NOT NULL REFERENCES titles(sku_root) ON DELETE CASCADE,
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playlist_id, sku_root)
+      )
+    `)
+
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_briefs_client ON briefs(client_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_pitches_client ON pitches(client_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_licenses_client ON licenses(client_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_client ON portal_messages(client_id)`)
+    console.log('✅ client portal tables ready')
+  } catch (e) { console.warn('[schema] client portal tables:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -605,6 +723,241 @@ app.post('/api/auth/change-password', async (req, res) => {
       [_hashPassword(newPassword), row.user_id])
     if (req.session?.user?.user_id === row.user_id) req.session.user.must_change_password = false
     res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+
+// ─── Client Portal routes ───────────────────────────────────────────────────
+// Producers/clients (the `clients` table) log in here with their own email +
+// password, entirely separate from haus_users admin login. Every query below
+// is scoped by req.session.portalUser.client_id so one client can never see
+// another's briefs, pitches, licenses, or messages.
+app.post('/api/portal/auth/login', async (req, res) => {
+  const { email, password } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT pu.portal_user_id, pu.client_id, pu.email, pu.display_name,
+              pu.password_hash, pu.must_change_password,
+              c.name AS client_name, c.haus_rep
+         FROM portal_users pu
+         JOIN clients c ON c.id = pu.client_id
+        WHERE LOWER(pu.email) = LOWER($1)`,
+      [email]
+    )
+    const row = result.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Invalid email or password' })
+    const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
+    if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (needsUpgrade) {
+      await pgPool.query(`UPDATE portal_users SET password_hash=$1 WHERE portal_user_id=$2`,
+        [_hashPassword(password), row.portal_user_id]).catch(e => console.warn('[portal-auth] rehash failed:', e.message))
+    }
+    const portalUser = {
+      portal_user_id: row.portal_user_id,
+      client_id: row.client_id,
+      email: row.email,
+      display_name: row.display_name,
+      client_name: row.client_name,
+      haus_rep: row.haus_rep,
+      must_change_password: row.must_change_password === true
+    }
+    req.session.portalUser = portalUser
+    res.json({ ok: true, user: portalUser })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/auth/logout', (req, res) => {
+  req.session.destroy()
+  res.json({ ok: true })
+})
+
+app.get('/api/portal/auth/me', (req, res) => {
+  res.json({ user: req.session?.portalUser || null })
+})
+
+app.post('/api/portal/auth/change-password', async (req, res) => {
+  const { oldPassword, newPassword } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const pu = req.session?.portalUser
+  if (!pu) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    if (!newPassword || String(newPassword).length < 12) {
+      return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+    }
+    const cur = await pgPool.query(`SELECT password_hash FROM portal_users WHERE portal_user_id=$1`, [pu.portal_user_id])
+    const row = cur.rows[0]
+    if (!row || !_verifyPassword(oldPassword || '', row.password_hash).ok) {
+      return res.json({ ok: false, error: 'Current password incorrect' })
+    }
+    await pgPool.query(`UPDATE portal_users SET password_hash=$1, must_change_password=false WHERE portal_user_id=$2`,
+      [_hashPassword(newPassword), pu.portal_user_id])
+    req.session.portalUser.must_change_password = false
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Overview ────────────────────────────────────────────────────────────
+app.get('/api/portal/overview', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const clientId = req.session.portalUser.client_id
+  try {
+    const [pitches, briefs, licenses, messages, client] = await Promise.all([
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM pitches WHERE client_id=$1 AND status='pending'`, [clientId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM briefs WHERE client_id=$1 AND status='active'`, [clientId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM licenses WHERE client_id=$1 AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)`, [clientId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM portal_messages WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`, [clientId]),
+      pgPool.query(`SELECT name, haus_rep FROM clients WHERE id=$1`, [clientId])
+    ])
+    res.json({
+      ok: true,
+      client: client.rows[0] || null,
+      pendingPitches: pitches.rows[0].n,
+      activeBriefs: briefs.rows[0].n,
+      activeLicenses: licenses.rows[0].n,
+      unreadMessages: messages.rows[0].n
+    })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Briefs ───────────────────────────────────────────────────────────────
+app.get('/api/portal/briefs', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT brief_id, title, description, mood_tags, budget_type, due_date, status, created_at
+         FROM briefs WHERE client_id=$1 ORDER BY created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    res.json({ ok: true, briefs: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/briefs', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { title, description, mood_tags, budget_type, due_date } = req.body
+  if (!title || !String(title).trim()) return res.json({ ok: false, error: 'Title is required' })
+  try {
+    const result = await pgPool.query(
+      `INSERT INTO briefs (client_id, title, description, mood_tags, budget_type, due_date, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
+       RETURNING brief_id, title, description, mood_tags, budget_type, due_date, status, created_at`,
+      [req.session.portalUser.client_id, title, description || null,
+       Array.isArray(mood_tags) ? mood_tags : [], budget_type || null, due_date || null,
+       req.session.portalUser.portal_user_id]
+    )
+    res.json({ ok: true, brief: result.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Pitches ──────────────────────────────────────────────────────────────
+app.get('/api/portal/pitches', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT p.pitch_id, p.brief_id, p.rep_note, p.status, p.created_at, p.responded_at,
+              t.sku_root, t.title, t.key, t.bpm, t.mood,
+              pg.primary_genre_name
+         FROM pitches p
+         JOIN titles t ON t.sku_root = p.sku_root
+         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+        WHERE p.client_id=$1
+        ORDER BY p.created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    res.json({ ok: true, pitches: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/pitches/:id/respond', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { status } = req.body
+  if (!['approved', 'passed'].includes(status)) return res.json({ ok: false, error: 'status must be approved or passed' })
+  try {
+    const result = await pgPool.query(
+      `UPDATE pitches SET status=$1, responded_at=now()
+        WHERE pitch_id=$2 AND client_id=$3
+        RETURNING pitch_id, status, responded_at`,
+      [status, req.params.id, req.session.portalUser.client_id]
+    )
+    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Pitch not found' })
+    res.json({ ok: true, pitch: result.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Licenses ─────────────────────────────────────────────────────────────
+app.get('/api/portal/licenses', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT l.license_id, l.license_type, l.formats, l.expires_at, l.created_at,
+              t.sku_root, t.title, b.title AS brief_title
+         FROM licenses l
+         JOIN titles t ON t.sku_root = l.sku_root
+         LEFT JOIN briefs b ON b.brief_id = l.brief_id
+        WHERE l.client_id=$1
+        ORDER BY l.created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    res.json({ ok: true, licenses: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Playlists (read-only for the client; HAUS reps curate these) ─────────
+app.get('/api/portal/playlists', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const playlists = await pgPool.query(
+      `SELECT playlist_id, name, share_token, created_by, created_at
+         FROM portal_playlists WHERE client_id=$1 ORDER BY created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    const withTracks = await Promise.all(playlists.rows.map(async pl => {
+      const tracks = await pgPool.query(
+        `SELECT t.sku_root, t.title, t.key, t.bpm
+           FROM portal_playlist_tracks ppt
+           JOIN titles t ON t.sku_root = ppt.sku_root
+          WHERE ppt.playlist_id=$1
+          ORDER BY ppt.sort_order`,
+        [pl.playlist_id]
+      )
+      return { ...pl, tracks: tracks.rows }
+    }))
+    res.json({ ok: true, playlists: withTracks })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Messages ─────────────────────────────────────────────────────────────
+app.get('/api/portal/messages', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const clientId = req.session.portalUser.client_id
+    const result = await pgPool.query(
+      `SELECT message_id, sender_type, sender_name, body, created_at, read_at
+         FROM portal_messages WHERE client_id=$1 ORDER BY created_at ASC`,
+      [clientId]
+    )
+    pgPool.query(
+      `UPDATE portal_messages SET read_at=now() WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`,
+      [clientId]
+    ).catch(e => console.warn('[portal-messages] mark-read failed:', e.message))
+    res.json({ ok: true, messages: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/messages', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { body } = req.body
+  if (!body || !String(body).trim()) return res.json({ ok: false, error: 'Message body is required' })
+  try {
+    const pu = req.session.portalUser
+    const result = await pgPool.query(
+      `INSERT INTO portal_messages (client_id, sender_type, sender_id, sender_name, body)
+       VALUES ($1, 'portal_user', $2, $3, $4)
+       RETURNING message_id, sender_type, sender_name, body, created_at`,
+      [pu.client_id, pu.portal_user_id, pu.display_name, body]
+    )
+    res.json({ ok: true, message: result.rows[0] })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
