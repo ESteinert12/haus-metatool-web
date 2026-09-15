@@ -17,7 +17,6 @@ process.on('unhandledRejection', e => {
   console.error('unhandledRejection:', e && e.stack ? e.stack : e)
 })
 
-require('dotenv').config()
 const express    = require('express')
 const session    = require('express-session')
 const crypto     = require('crypto')
@@ -196,7 +195,10 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_VWPl7U3kYwJb@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+// The connection string used to be hardcoded here, in a public repository, and this
+// file was served over HTTP by express.static(__dirname). It comes from the
+// environment now; see .env.example.
+const DEFAULT_NEON = process.env.DATABASE_URL || null
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -422,14 +424,10 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-app.post('/api/pg/query', async (req, res) => {
-  const { sql, params } = req.body
-  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
-  try {
-    const result = await pgPool.query(sql, params || [])
-    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
+// DELETED: /api/pg/query endpoint
+// REASON: SQL injection vulnerability — no safe way to accept arbitrary SQL
+// REPLACEMENT: Client should call specific API routes for data access
+//   e.g., /api/composers/list, /api/tracks/search, etc.
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
