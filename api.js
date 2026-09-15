@@ -489,7 +489,6 @@ async function runServerMigrations(pool) {
   // scoped by clients.id via client_id, guarded IF NOT EXISTS so this is safe
   // to run against whatever the real `clients` table already looks like.
   try {
-    await pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS haus_rep TEXT`)
     await pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS portal_enabled BOOLEAN NOT NULL DEFAULT false`)
 
     await pool.query(`
@@ -727,6 +726,10 @@ app.post('/api/auth/change-password', async (req, res) => {
 })
 
 
+// HAUS is a two-person shop (Erik + Kyle) and Erik is the point of contact for
+// every client — there is no per-client rep assignment to manage.
+const HAUS_REP = 'Erik Steinert'
+
 // ─── Client Portal routes ───────────────────────────────────────────────────
 // Producers/clients (the `clients` table) log in here with their own email +
 // password, entirely separate from haus_users admin login. Every query below
@@ -739,7 +742,7 @@ app.post('/api/portal/auth/login', async (req, res) => {
     const result = await pgPool.query(
       `SELECT pu.portal_user_id, pu.client_id, pu.email, pu.display_name,
               pu.password_hash, pu.must_change_password,
-              c.name AS client_name, c.haus_rep
+              c.name AS client_name
          FROM portal_users pu
          JOIN clients c ON c.id = pu.client_id
         WHERE LOWER(pu.email) = LOWER($1)`,
@@ -759,7 +762,7 @@ app.post('/api/portal/auth/login', async (req, res) => {
       email: row.email,
       display_name: row.display_name,
       client_name: row.client_name,
-      haus_rep: row.haus_rep,
+      haus_rep: HAUS_REP,
       must_change_password: row.must_change_password === true
     }
     req.session.portalUser = portalUser
@@ -807,11 +810,11 @@ app.get('/api/portal/overview', async (req, res) => {
       pgPool.query(`SELECT COUNT(*)::int AS n FROM briefs WHERE client_id=$1 AND status='active'`, [clientId]),
       pgPool.query(`SELECT COUNT(*)::int AS n FROM licenses WHERE client_id=$1 AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)`, [clientId]),
       pgPool.query(`SELECT COUNT(*)::int AS n FROM portal_messages WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`, [clientId]),
-      pgPool.query(`SELECT name, haus_rep FROM clients WHERE id=$1`, [clientId])
+      pgPool.query(`SELECT name FROM clients WHERE id=$1`, [clientId])
     ])
     res.json({
       ok: true,
-      client: client.rows[0] || null,
+      client: client.rows[0] ? { ...client.rows[0], haus_rep: HAUS_REP } : null,
       pendingPitches: pitches.rows[0].n,
       activeBriefs: briefs.rows[0].n,
       activeLicenses: licenses.rows[0].n,
@@ -903,7 +906,52 @@ app.get('/api/portal/licenses', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// ── Playlists (read-only for the client; HAUS reps curate these) ─────────
+// ── Library (browse the full HAUS catalog to pull tracks into a playlist) ──
+// Not scoped by client_id — every logged-in client sees the same catalog.
+// facets:true also returns the distinct genre/mood lists for filter dropdowns,
+// asked for once by the client and cached client-side rather than on every search.
+app.get('/api/portal/library', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const q      = (req.query.q || '').trim()
+    const genre  = (req.query.genre || '').trim()
+    const mood   = (req.query.mood || '').trim()
+    const limit  = Math.min(parseInt(req.query.limit, 10) || 50, 200)
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0)
+
+    const where = []
+    const params = []
+    if (q) { params.push(`%${q}%`); where.push(`t.title ILIKE $${params.length}`) }
+    if (genre) { params.push(genre); where.push(`pg.primary_genre_name = $${params.length}`) }
+    if (mood) { params.push(`%${mood}%`); where.push(`t.mood ILIKE $${params.length}`) }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+    params.push(limit, offset)
+    const result = await pgPool.query(
+      `SELECT t.sku_root, t.title, t.key, t.bpm, t.mood, pg.primary_genre_name
+         FROM titles t
+         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+         ${whereSql}
+        ORDER BY t.title
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    let facets = undefined
+    if (req.query.facets === 'true') {
+      const [genres, moods] = await Promise.all([
+        pgPool.query(`SELECT DISTINCT primary_genre_name FROM primary_genres ORDER BY primary_genre_name`),
+        pgPool.query(`SELECT DISTINCT mood FROM titles WHERE mood IS NOT NULL AND mood <> '' ORDER BY mood LIMIT 200`)
+      ])
+      facets = { genres: genres.rows.map(r => r.primary_genre_name), moods: moods.rows.map(r => r.mood) }
+    }
+
+    res.json({ ok: true, tracks: result.rows, facets })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Playlists — clients build their own from the library; HAUS staff can
+// still create/curate these too once that admin UI exists (not built yet) ──
 app.get('/api/portal/playlists', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
@@ -924,6 +972,75 @@ app.get('/api/portal/playlists', async (req, res) => {
       return { ...pl, tracks: tracks.rows }
     }))
     res.json({ ok: true, playlists: withTracks })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/playlists', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { name } = req.body
+  if (!name || !String(name).trim()) return res.json({ ok: false, error: 'Playlist name is required' })
+  try {
+    const pu = req.session.portalUser
+    const result = await pgPool.query(
+      `INSERT INTO portal_playlists (client_id, name, created_by)
+       VALUES ($1, $2, $3)
+       RETURNING playlist_id, name, share_token, created_by, created_at`,
+      [pu.client_id, name, pu.display_name]
+    )
+    res.json({ ok: true, playlist: { ...result.rows[0], tracks: [] } })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.delete('/api/portal/playlists/:id', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `DELETE FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
+      [req.params.id, req.session.portalUser.client_id]
+    )
+    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/playlists/:id/tracks', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { sku_root } = req.body
+  if (!sku_root) return res.json({ ok: false, error: 'sku_root is required' })
+  try {
+    // Ownership check — the playlist must belong to this client.
+    const owns = await pgPool.query(
+      `SELECT 1 FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
+      [req.params.id, req.session.portalUser.client_id]
+    )
+    if (!owns.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
+
+    const pos = await pgPool.query(
+      `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM portal_playlist_tracks WHERE playlist_id=$1`,
+      [req.params.id]
+    )
+    await pgPool.query(
+      `INSERT INTO portal_playlist_tracks (playlist_id, sku_root, sort_order)
+       VALUES ($1, $2, $3) ON CONFLICT (playlist_id, sku_root) DO NOTHING`,
+      [req.params.id, sku_root, pos.rows[0].next]
+    )
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.delete('/api/portal/playlists/:id/tracks/:skuRoot', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const owns = await pgPool.query(
+      `SELECT 1 FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
+      [req.params.id, req.session.portalUser.client_id]
+    )
+    if (!owns.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
+    await pgPool.query(
+      `DELETE FROM portal_playlist_tracks WHERE playlist_id=$1 AND sku_root=$2`,
+      [req.params.id, req.params.skuRoot]
+    )
+    res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 

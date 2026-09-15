@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>HAUS — Client Portal</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
 <style>
 *{box-sizing:border-box;margin:0;padding:0}
@@ -11,17 +12,17 @@
   --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
   --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
   --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
-  --accent:#1a1a18;--radius:10px;--radius-sm:6px;
+  --radius:10px;--radius-sm:6px;
+  --navy:#0b2a5b;--teal:#C0C9CD;--green-accent:#6F927E;
   --blue:#1a6cf6;--blue-bg:#eef4fe;--blue-text:#1251c2;
   --green:#1a8a4a;--green-bg:#eaf6ef;--green-text:#156638;
   --amber:#b87500;--amber-bg:#fdf3e0;--amber-text:#8a5800;
   --red:#d63030;--red-bg:#fdeaea;--red-text:#a82020;
-  --purple:#7c3aed;--purple-bg:#f3f0ff;--purple-text:#5b21b6;
 }
-body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
+body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
 .btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;font-size:12px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;transition:background 0.1s;font-family:inherit;white-space:nowrap}
 .btn:hover{background:var(--bg2)}
-.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn.primary{background:var(--navy);color:#fff;border-color:var(--navy)}
 .btn.primary:hover{opacity:0.88}
 .btn:disabled{opacity:0.5;cursor:default}
 .btn i{font-size:14px}
@@ -33,33 +34,33 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
 .pill.gray{background:var(--bg2);color:var(--text2)}
 .form-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:5px;display:block}
 .form-input,textarea.form-input,select.form-input{padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);font-family:inherit;outline:none;width:100%}
-.form-input:focus{border-color:var(--accent)}
+.form-input:focus{border-color:var(--navy)}
 ::-webkit-scrollbar{width:5px;height:5px}
 ::-webkit-scrollbar-track{background:transparent}
 ::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
 
 /* ── Login ── */
-#login-screen{flex:1;display:flex;align-items:center;justify-content:center}
-.login-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:32px;width:360px;box-shadow:0 2px 16px rgba(0,0,0,0.07)}
-.login-logo{font-size:22px;font-weight:700;letter-spacing:0.04em;margin-bottom:6px}
+#login-screen{flex:1;display:flex;align-items:center;justify-content:center;background:var(--navy)}
+.login-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:32px;width:360px;box-shadow:0 8px 32px rgba(0,0,0,0.25)}
+.login-logo-img{width:180px;margin-bottom:18px}
 .login-sub{font-size:13px;color:var(--text3);margin-bottom:24px}
 #login-error{display:none;background:var(--red-bg);color:var(--red-text);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;margin-bottom:14px}
 
 /* ── Shell ── */
 #app-shell{flex:1;display:none;flex-direction:column;overflow:hidden}
 #app-shell.visible{display:flex}
-.topbar{display:flex;align-items:center;gap:0;padding:0 20px;height:52px;border-bottom:0.5px solid var(--border);background:var(--bg3);flex-shrink:0}
-.topbar-brand{font-size:14px;font-weight:700;letter-spacing:0.04em;margin-right:24px}
+.topbar{display:flex;align-items:center;gap:0;padding:0 20px;height:56px;border-bottom:none;background:var(--navy);flex-shrink:0}
+.topbar-brand img{height:22px;display:block;margin-right:26px}
 .nav-tabs{display:flex;gap:2px;flex:1}
-.nav-tab{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:13px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit;position:relative}
-.nav-tab:hover{color:var(--text)}
-.nav-tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.nav-tab{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:13px;font-weight:500;color:rgba(255,255,255,0.65);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit;position:relative;border-radius:var(--radius-sm)}
+.nav-tab:hover{color:#fff;background:rgba(255,255,255,0.08)}
+.nav-tab.active{color:#fff;background:rgba(255,255,255,0.12);font-weight:600}
 .nav-tab i{font-size:15px}
 .nav-badge{background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:8px;padding:1px 5px;margin-left:2px}
 .topbar-right{display:flex;align-items:center;gap:10px;position:relative}
-.user-chip{font-size:12px;color:var(--text2);display:flex;align-items:center;gap:8px;cursor:pointer;padding:5px 8px;border-radius:var(--radius-sm)}
-.user-chip:hover{background:var(--bg2)}
-.avatar-sm{width:26px;height:26px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
+.user-chip{font-size:12px;color:rgba(255,255,255,0.85);display:flex;align-items:center;gap:8px;cursor:pointer;padding:5px 8px;border-radius:var(--radius-sm)}
+.user-chip:hover{background:rgba(255,255,255,0.1)}
+.avatar-sm{width:26px;height:26px;border-radius:50%;background:var(--green-accent);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
 #user-menu{position:absolute;top:calc(100% + 6px);right:0;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);box-shadow:0 6px 20px rgba(0,0,0,0.16);padding:4px;z-index:200;min-width:160px}
 #user-menu .um-item{display:flex;align-items:center;gap:8px;padding:7px 9px;font-size:13px;color:var(--text);border-radius:var(--radius-sm);cursor:pointer}
 #user-menu .um-item:hover{background:var(--bg2)}
@@ -78,11 +79,12 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
 /* ── Overview ── */
 .stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
 .stat-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px}
-.stat-card .n{font-size:24px;font-weight:700}
+.stat-card .n{font-size:24px;font-weight:700;color:var(--navy)}
 .stat-card .lbl{font-size:11px;color:var(--text3);margin-top:3px}
 .rep-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;align-items:center;gap:12px;max-width:420px}
+.rep-card .avatar-sm{background:var(--navy)}
 
-/* ── List rows shared by Pitches/Briefs/Licenses ── */
+/* ── List rows shared by Pitches/Briefs/Licenses/Library ── */
 .item-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px}
 .item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
 .item-title{font-size:14px;font-weight:600}
@@ -93,12 +95,30 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
 .brief-form{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
 .brief-form .full{grid-column:1/-1}
 
+/* ── Library ── */
+.library-bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px}
+.library-bar > div{min-width:160px}
+.library-bar .full{flex:1;min-width:220px}
+.track-row{display:flex;align-items:center;gap:12px;padding:9px 12px;border-bottom:0.5px solid var(--border);font-size:13px}
+.track-row:hover{background:var(--bg2)}
+.track-row .tr-title{font-weight:500;flex:1;min-width:0}
+.track-row .tr-meta{color:var(--text3);font-size:11px}
+
+/* ── Playlists ── */
+.playlist-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
+.playlist-card-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:0.5px solid var(--border)}
+.playlist-card-head .name{font-size:14px;font-weight:600;flex:1}
+.playlist-track-row{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;font-size:12px;border-bottom:0.5px solid var(--border)}
+.playlist-track-row:last-child{border-bottom:none}
+.icon-btn{background:none;border:none;cursor:pointer;color:var(--text3);font-size:14px;padding:2px}
+.icon-btn:hover{color:var(--red-text)}
+
 /* ── Messages ── */
 #messages-scroll{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:12px}
 .msg-row{display:flex;flex-direction:column;max-width:70%}
 .msg-row.mine{align-self:flex-end;align-items:flex-end}
 .msg-bubble{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:9px 12px;font-size:13px}
-.msg-row.mine .msg-bubble{background:var(--accent);color:#fff;border-color:var(--accent)}
+.msg-row.mine .msg-bubble{background:var(--navy);color:#fff;border-color:var(--navy)}
 .msg-meta{font-size:10px;color:var(--text3);margin-top:3px}
 #message-compose{display:flex;gap:8px;border-top:0.5px solid var(--border);padding-top:12px;margin-top:12px}
 #message-input{flex:1;resize:none;min-height:38px;max-height:100px}
@@ -109,7 +129,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
 <!-- ─── Login ──────────────────────────────────────────────── -->
 <div id="login-screen">
   <div class="login-card">
-    <div class="login-logo">HAUS</div>
+    <img class="login-logo-img" src="/assets/atmosphere-logo.svg" alt="Atmosphere" style="filter:invert(1) brightness(0.3)">
     <div class="login-sub">Client Portal — sign in to review pitches, briefs, and licenses</div>
     <div id="login-error"></div>
     <label class="form-label">Email</label>
@@ -117,14 +137,14 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
     <label class="form-label">Password</label>
     <input id="login-password" type="password" class="form-input" placeholder="••••••••" style="margin-bottom:18px" autocomplete="current-password">
     <button id="login-btn" class="btn primary" style="width:100%;justify-content:center;padding:10px" onclick="doLogin()">Sign in</button>
-    <div id="login-status" style="text-align:center;font-size:11px;color:var(--text3);margin-top:14px">Don't have access? Ask your HAUS rep.</div>
+    <div id="login-status" style="text-align:center;font-size:11px;color:var(--text3);margin-top:14px">Don't have access? Ask HAUS.</div>
   </div>
 </div>
 
 <!-- ─── Change password (forced on first login) ───────────────── -->
-<div id="pw-screen" style="display:none;flex:1;align-items:center;justify-content:center">
+<div id="pw-screen" style="display:none;flex:1;align-items:center;justify-content:center;background:var(--navy)">
   <div class="login-card">
-    <div class="login-logo">Set your password</div>
+    <div style="font-size:18px;font-weight:700;margin-bottom:6px">Set your password</div>
     <div class="login-sub">This login was just created for you — pick a password only you know.</div>
     <div id="pw-error" style="display:none;background:var(--red-bg);color:var(--red-text);padding:9px 12px;border-radius:var(--radius-sm);font-size:12px;margin-bottom:14px"></div>
     <label class="form-label">Temporary password</label>
@@ -138,12 +158,13 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
 <!-- ─── App shell ──────────────────────────────────────────── -->
 <div id="app-shell">
   <div class="topbar">
-    <div class="topbar-brand">HAUS</div>
+    <div class="topbar-brand"><img src="/assets/atmosphere-logo.svg" alt="Atmosphere"></div>
     <div class="nav-tabs">
       <button class="nav-tab active" data-tab="overview" onclick="switchTab('overview',this)"><i class="ti ti-layout-dashboard"></i> Overview</button>
       <button class="nav-tab" data-tab="pitches" onclick="switchTab('pitches',this)"><i class="ti ti-send"></i> Pitches</button>
       <button class="nav-tab" data-tab="briefs" onclick="switchTab('briefs',this)"><i class="ti ti-clipboard-text"></i> Briefs</button>
       <button class="nav-tab" data-tab="licenses" onclick="switchTab('licenses',this)"><i class="ti ti-certificate"></i> My Licenses</button>
+      <button class="nav-tab" data-tab="library" onclick="switchTab('library',this)"><i class="ti ti-library"></i> Library</button>
       <button class="nav-tab" data-tab="playlists" onclick="switchTab('playlists',this)"><i class="ti ti-playlist"></i> Playlists</button>
       <button class="nav-tab" data-tab="messages" onclick="switchTab('messages',this)"><i class="ti ti-message-circle"></i> Messages <span id="msg-badge" class="nav-badge" style="display:none"></span></button>
     </div>
@@ -172,7 +193,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
       <div class="avatar-sm" style="width:36px;height:36px;font-size:13px" id="rep-avatar"></div>
       <div>
         <div style="font-size:13px;font-weight:600" id="rep-name"></div>
-        <div style="font-size:11px;color:var(--text3)">Your HAUS rep</div>
+        <div style="font-size:11px;color:var(--text3)">Your contact at HAUS</div>
       </div>
     </div>
   </div>
@@ -181,7 +202,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
   <div class="section" id="section-pitches">
     <div class="section-head">
       <h2>Pitches</h2>
-      <span class="section-sub">Tracks your rep has sent for consideration</span>
+      <span class="section-sub">Tracks HAUS has sent for consideration</span>
     </div>
     <div id="pitches-list"></div>
   </div>
@@ -190,7 +211,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
   <div class="section" id="section-briefs">
     <div class="section-head">
       <h2>Briefs</h2>
-      <span class="section-sub">Tell your rep what you're looking for</span>
+      <span class="section-sub">Tell HAUS what you're looking for</span>
     </div>
     <div class="brief-form">
       <div class="full"><label class="form-label">Title</label><input id="brief-title" class="form-input" placeholder="e.g. Season 4 opening credits"></div>
@@ -218,11 +239,32 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
     <div id="licenses-list"></div>
   </div>
 
+  <!-- Library -->
+  <div class="section" id="section-library">
+    <div class="section-head">
+      <h2>Library</h2>
+      <span class="section-sub">Browse the full HAUS catalog and add tracks to a playlist</span>
+    </div>
+    <div class="library-bar">
+      <div class="full"><label class="form-label">Search</label><input id="lib-q" class="form-input" placeholder="Track title…" oninput="debouncedLibrarySearch()"></div>
+      <div><label class="form-label">Genre</label><select id="lib-genre" class="form-input" onchange="searchLibrary()"><option value="">All genres</option></select></div>
+      <div><label class="form-label">Mood</label><select id="lib-mood" class="form-input" onchange="searchLibrary()"><option value="">All moods</option></select></div>
+      <div><label class="form-label">Adding to</label>
+        <select id="lib-target-playlist" class="form-input">
+          <option value="">Select a playlist…</option>
+          <option value="__new__">+ New playlist…</option>
+        </select>
+      </div>
+    </div>
+    <div id="library-results" style="border:0.5px solid var(--border);border-radius:var(--radius);background:var(--bg3);overflow:hidden"></div>
+  </div>
+
   <!-- Playlists -->
   <div class="section" id="section-playlists">
     <div class="section-head">
       <h2>Playlists</h2>
-      <span class="section-sub">Curated by your HAUS rep</span>
+      <span class="section-sub">Yours to build — add tracks from the Library tab</span>
+      <button class="btn primary" style="margin-left:auto" onclick="createPlaylistPrompt()"><i class="ti ti-plus"></i> New playlist</button>
     </div>
     <div id="playlists-list"></div>
   </div>
@@ -232,7 +274,7 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
     <div class="section-head"><h2>Messages</h2></div>
     <div id="messages-scroll"></div>
     <div id="message-compose">
-      <textarea id="message-input" class="form-input" placeholder="Message your HAUS rep…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
+      <textarea id="message-input" class="form-input" placeholder="Message HAUS…" onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage()}"></textarea>
       <button class="btn primary" onclick="sendMessage()"><i class="ti ti-send"></i></button>
     </div>
   </div>
@@ -240,9 +282,16 @@ body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;backg
 
 <script>
 let currentUser = null
+let PLAYLISTS_CACHE = []
+let libraryFacetsLoaded = false
+let libraryDebounceTimer = null
 
 async function _post(path, body) {
   const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{}), credentials:'include' })
+  return r.json()
+}
+async function _del(path) {
+  const r = await fetch(path, { method:'DELETE', credentials:'include' })
   return r.json()
 }
 async function _get(path) {
@@ -319,7 +368,7 @@ document.addEventListener('click', () => { document.getElementById('user-menu').
 })()
 
 // ── Tabs ───────────────────────────────────────────────────
-const LOADERS = { overview: loadOverview, pitches: loadPitches, briefs: loadBriefs, licenses: loadLicenses, playlists: loadPlaylists, messages: loadMessages }
+const LOADERS = { overview: loadOverview, pitches: loadPitches, briefs: loadBriefs, licenses: loadLicenses, library: loadLibrary, playlists: loadPlaylists, messages: loadMessages }
 function switchTab(name, btn) {
   document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'))
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'))
@@ -353,7 +402,7 @@ async function loadPitches() {
   const el = document.getElementById('pitches-list')
   const r = await _get('/api/portal/pitches')
   if (!r.ok || !r.pitches.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-send"></i><p>No pitches yet — your rep will send tracks here for review.</p></div>`
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-send"></i><p>No pitches yet — HAUS will send tracks here for review.</p></div>`
     return
   }
   const statusPill = s => s==='approved' ? '<span class="pill green">approved</span>' : s==='passed' ? '<span class="pill gray">passed</span>' : '<span class="pill amber">pending</span>'
@@ -437,25 +486,118 @@ async function loadLicenses() {
       <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
         ${(l.formats||[]).map(f=>`<span class="pill blue">${esc(f)}</span>`).join('')}
       </div>
-      <div style="font-size:11px;color:var(--text3);margin-top:8px">Contact your HAUS rep for download links.</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">Contact HAUS for download links.</div>
     </div>`).join('')
+}
+
+// ── Library ────────────────────────────────────────────────
+async function loadLibrary() {
+  if (!libraryFacetsLoaded) {
+    const r = await _get('/api/portal/library?facets=true&limit=0')
+    if (r.ok && r.facets) {
+      const gSel = document.getElementById('lib-genre')
+      const mSel = document.getElementById('lib-mood')
+      r.facets.genres.forEach(g => gSel.insertAdjacentHTML('beforeend', `<option value="${esc(g)}">${esc(g)}</option>`))
+      r.facets.moods.forEach(m => mSel.insertAdjacentHTML('beforeend', `<option value="${esc(m)}">${esc(m)}</option>`))
+      libraryFacetsLoaded = true
+    }
+  }
+  if (!PLAYLISTS_CACHE.length) await refreshPlaylistsCache()
+  populateTargetPlaylistSelect()
+  searchLibrary()
+}
+function debouncedLibrarySearch() {
+  clearTimeout(libraryDebounceTimer)
+  libraryDebounceTimer = setTimeout(searchLibrary, 300)
+}
+async function searchLibrary() {
+  const q = document.getElementById('lib-q').value.trim()
+  const genre = document.getElementById('lib-genre').value
+  const mood = document.getElementById('lib-mood').value
+  const params = new URLSearchParams({ q, genre, mood, limit: '60' })
+  const r = await _get('/api/portal/library?' + params.toString())
+  const el = document.getElementById('library-results')
+  if (!r.ok || !r.tracks.length) {
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-search"></i><p>No tracks match.</p></div>`
+    return
+  }
+  el.innerHTML = r.tracks.map(t => `
+    <div class="track-row">
+      <div class="tr-title">${esc(t.title)}</div>
+      <div class="tr-meta">${esc(t.primary_genre_name||'—')} · ${esc(t.key||'—')} · ${t.bpm?t.bpm+' BPM':'—'}</div>
+      <button class="btn" onclick="addToPlaylist('${esc(t.sku_root)}')"><i class="ti ti-plus"></i> Add</button>
+    </div>`).join('')
+}
+async function refreshPlaylistsCache() {
+  const r = await _get('/api/portal/playlists')
+  if (r.ok) PLAYLISTS_CACHE = r.playlists
+}
+function populateTargetPlaylistSelect() {
+  const sel = document.getElementById('lib-target-playlist')
+  const current = sel.value
+  sel.innerHTML = `<option value="">Select a playlist…</option>` +
+    PLAYLISTS_CACHE.map(p => `<option value="${p.playlist_id}">${esc(p.name)}</option>`).join('') +
+    `<option value="__new__">+ New playlist…</option>`
+  if (PLAYLISTS_CACHE.find(p => String(p.playlist_id) === current)) sel.value = current
+}
+async function addToPlaylist(skuRoot) {
+  let target = document.getElementById('lib-target-playlist').value
+  if (!target) { alert('Pick a playlist to add to first (top right of the filters).'); return }
+  if (target === '__new__') {
+    const name = prompt('New playlist name:')
+    if (!name || !name.trim()) return
+    const r = await _post('/api/portal/playlists', { name: name.trim() })
+    if (!r.ok) { alert(r.error || 'Could not create playlist.'); return }
+    await refreshPlaylistsCache()
+    populateTargetPlaylistSelect()
+    document.getElementById('lib-target-playlist').value = r.playlist.playlist_id
+    target = r.playlist.playlist_id
+  }
+  const r = await _post(`/api/portal/playlists/${target}/tracks`, { sku_root: skuRoot })
+  if (!r.ok) alert(r.error || 'Could not add track.')
 }
 
 // ── Playlists ──────────────────────────────────────────────
 async function loadPlaylists() {
+  await refreshPlaylistsCache()
+  renderPlaylists()
+}
+function renderPlaylists() {
   const el = document.getElementById('playlists-list')
-  const r = await _get('/api/portal/playlists')
-  if (!r.ok || !r.playlists.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-playlist"></i><p>No playlists yet — your rep can build one for you.</p></div>`
+  if (!PLAYLISTS_CACHE.length) {
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-playlist"></i><p>No playlists yet — build one from the Library tab.</p></div>`
     return
   }
-  el.innerHTML = r.playlists.map(pl => `
-    <div class="item-card">
-      <div class="item-title" style="margin-bottom:8px">${esc(pl.name)}</div>
-      ${pl.tracks.map(t => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border);font-size:12px">
-        <span>${esc(t.title)}</span><span style="color:var(--text3)">${esc(t.key||'—')} · ${t.bpm?t.bpm+' BPM':'—'}</span>
-      </div>`).join('') || '<div class="section-sub">No tracks yet</div>'}
+  el.innerHTML = PLAYLISTS_CACHE.map(pl => `
+    <div class="playlist-card">
+      <div class="playlist-card-head">
+        <div class="name">${esc(pl.name)}</div>
+        <span class="section-sub">${pl.tracks.length} track${pl.tracks.length!==1?'s':''} · by ${esc(pl.created_by||'—')}</span>
+        <button class="icon-btn" onclick="deletePlaylist(${pl.playlist_id})" title="Delete playlist"><i class="ti ti-trash"></i></button>
+      </div>
+      ${pl.tracks.map(t => `
+        <div class="playlist-track-row">
+          <span>${esc(t.title)} <span style="color:var(--text3)">— ${esc(t.key||'—')} · ${t.bpm?t.bpm+' BPM':'—'}</span></span>
+          <button class="icon-btn" onclick="removeFromPlaylist(${pl.playlist_id},'${esc(t.sku_root)}')" title="Remove"><i class="ti ti-x"></i></button>
+        </div>`).join('') || '<div class="playlist-track-row" style="color:var(--text3)">No tracks yet — add some from the Library tab.</div>'}
     </div>`).join('')
+}
+async function createPlaylistPrompt() {
+  const name = prompt('New playlist name:')
+  if (!name || !name.trim()) return
+  const r = await _post('/api/portal/playlists', { name: name.trim() })
+  if (!r.ok) { alert(r.error || 'Could not create playlist.'); return }
+  await refreshPlaylistsCache()
+  renderPlaylists()
+}
+async function deletePlaylist(id) {
+  if (!confirm('Delete this playlist?')) return
+  const r = await _del(`/api/portal/playlists/${id}`)
+  if (r.ok) { await refreshPlaylistsCache(); renderPlaylists() }
+}
+async function removeFromPlaylist(id, skuRoot) {
+  const r = await _del(`/api/portal/playlists/${id}/tracks/${encodeURIComponent(skuRoot)}`)
+  if (r.ok) { await refreshPlaylistsCache(); renderPlaylists() }
 }
 
 // ── Messages ───────────────────────────────────────────────
@@ -464,7 +606,7 @@ async function loadMessages() {
   const r = await _get('/api/portal/messages')
   if (!r.ok) return
   if (!r.messages.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-message-circle"></i><p>No messages yet — say hello to your rep.</p></div>`
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-message-circle"></i><p>No messages yet — say hello.</p></div>`
   } else {
     el.innerHTML = r.messages.map(m => `
       <div class="msg-row ${m.sender_type==='portal_user'?'mine':''}">
