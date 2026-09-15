@@ -3,7 +3,7 @@
 const { Pool } = require('pg')
 
 const pool = new Pool({
-  connectionString: 'postgresql://neondb_owner:npg_VWPl7U3kYwJb@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+  connectionString: process.env.DATABASE_URL
 })
 
 const MISSING_SONGS = [

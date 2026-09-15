@@ -7,7 +7,7 @@ const { Pool } = require('pg')
 const fs = require('fs')
 const path = require('path')
 
-const CONN = 'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+const CONN = process.env.DATABASE_URL
 const CSV  = path.join(__dirname, 'SOHO_LotAssign.csv')
 
 async function main() {

@@ -133,7 +133,7 @@ let pgPool    = null
 let b2Auth    = null
 const fmSessions = {}
 
-const DEFAULT_NEON = 'postgresql://neondb_owner:npg_hiXWAOZ3C0gL@ep-floral-grass-au3l9sen-pooler.c-10.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+const DEFAULT_NEON = process.env.DATABASE_URL
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
