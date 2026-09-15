@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HAUS — Client Portal (preview)</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
+  --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
+  --accent:#1a1a18;--radius:10px;--radius-sm:6px;
+  --blue:#1a6cf6;--blue-bg:#eef4fe;--blue-text:#1251c2;
+  --green:#1a8a4a;--green-bg:#eaf6ef;--green-text:#156638;
+  --amber:#b87500;--amber-bg:#fdf3e0;--amber-text:#8a5800;
+  --red:#d63030;--red-bg:#fdeaea;--red-text:#a82020;
+  --purple:#7c3aed;--purple-bg:#f3f0ff;--purple-text:#5b21b6;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;font-size:12px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;transition:background 0.1s;font-family:inherit;white-space:nowrap}
+.btn:hover{background:var(--bg2)}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn.primary:hover{opacity:0.88}
+.btn:disabled{opacity:0.5;cursor:default}
+.btn i{font-size:14px}
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;flex-shrink:0;text-transform:capitalize}
+.pill.blue{background:var(--blue-bg);color:var(--blue-text)}
+.pill.green{background:var(--green-bg);color:var(--green-text)}
+.pill.amber{background:var(--amber-bg);color:var(--amber-text)}
+.pill.red{background:var(--red-bg);color:var(--red-text)}
+.pill.gray{background:var(--bg2);color:var(--text2)}
+.form-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:5px;display:block}
+.form-input,textarea.form-input,select.form-input{padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);font-family:inherit;outline:none;width:100%}
+.form-input:focus{border-color:var(--accent)}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-track{background:transparent}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+#login-screen{flex:1;display:flex;align-items:center;justify-content:center}
+.login-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:32px;width:360px;box-shadow:0 2px 16px rgba(0,0,0,0.07)}
+.login-logo{font-size:22px;font-weight:700;letter-spacing:0.04em;margin-bottom:6px}
+.login-sub{font-size:13px;color:var(--text3);margin-bottom:24px}
+
+#app-shell{flex:1;display:none;flex-direction:column;overflow:hidden}
+#app-shell.visible{display:flex}
+.topbar{display:flex;align-items:center;gap:0;padding:0 20px;height:52px;border-bottom:0.5px solid var(--border);background:var(--bg3);flex-shrink:0}
+.topbar-brand{font-size:14px;font-weight:700;letter-spacing:0.04em;margin-right:24px}
+.nav-tabs{display:flex;gap:2px;flex:1}
+.nav-tab{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:13px;font-weight:500;color:var(--text2);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;border-top:none;border-left:none;border-right:none;font-family:inherit;position:relative}
+.nav-tab:hover{color:var(--text)}
+.nav-tab.active{color:var(--text);border-bottom-color:var(--accent)}
+.nav-tab i{font-size:15px}
+.nav-badge{background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:8px;padding:1px 5px;margin-left:2px}
+.topbar-right{display:flex;align-items:center;gap:10px;position:relative}
+.user-chip{font-size:12px;color:var(--text2);display:flex;align-items:center;gap:8px;cursor:pointer;padding:5px 8px;border-radius:var(--radius-sm)}
+.user-chip:hover{background:var(--bg2)}
+.avatar-sm{width:26px;height:26px;border-radius:50%;background:var(--accent);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
+#user-menu{position:absolute;top:calc(100% + 6px);right:0;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);box-shadow:0 6px 20px rgba(0,0,0,0.16);padding:4px;z-index:200;min-width:160px}
+#user-menu .um-item{display:flex;align-items:center;gap:8px;padding:7px 9px;font-size:13px;color:var(--text);border-radius:var(--radius-sm);cursor:pointer}
+#user-menu .um-item:hover{background:var(--bg2)}
+#user-menu .um-item.danger{color:var(--red-text)}
+
+.section{flex:1;overflow-y:auto;display:none;flex-direction:column;padding:22px 28px}
+.section.active{display:flex}
+.section-head{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}
+.section-head h2{font-size:16px;font-weight:700}
+.section-sub{font-size:12px;color:var(--text3)}
+
+.empty-state{display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;color:var(--text3);text-align:center;padding:50px}
+.empty-state i{font-size:26px}
+.empty-state p{font-size:13px}
+
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px}
+.stat-card .n{font-size:24px;font-weight:700}
+.stat-card .lbl{font-size:11px;color:var(--text3);margin-top:3px}
+.rep-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;align-items:center;gap:12px;max-width:420px}
+
+.item-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px}
+.item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
+.item-title{font-size:14px;font-weight:600}
+.item-meta{font-size:12px;color:var(--text3);margin-top:2px}
+.item-actions{display:flex;gap:8px;margin-top:10px}
+
+.brief-form{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.brief-form .full{grid-column:1/-1}
+
+#messages-scroll{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:12px}
+.msg-row{display:flex;flex-direction:column;max-width:70%}
+.msg-row.mine{align-self:flex-end;align-items:flex-end}
+.msg-bubble{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:9px 12px;font-size:13px}
+.msg-row.mine .msg-bubble{background:var(--accent);color:#fff;border-color:var(--accent)}
+.msg-meta{font-size:10px;color:var(--text3);margin-top:3px}
+#message-compose{display:flex;gap:8px;border-top:0.5px solid var(--border);padding-top:12px;margin-top:12px}
+#message-input{flex:1;resize:none;min-height:38px;max-height:100px}
+
+#preview-banner{background:#1a1a18;color:#fff;font-size:11px;text-align:center;padding:5px;letter-spacing:.03em}
+</style>
+</head>
+<body>
+<div id="preview-banner">PREVIEW — sample data, nothing here talks to a real server</div>
+
+<div id="app-shell" class="visible">
+  <div class="topbar">
+    <div class="topbar-brand">HAUS</div>
+    <div class="nav-tabs">
+      <button class="nav-tab active" data-tab="overview" onclick="switchTab('overview',this)"><i class="ti ti-layout-dashboard"></i> Overview</button>
+      <button class="nav-tab" data-tab="pitches" onclick="switchTab('pitches',this)"><i class="ti ti-send"></i> Pitches</button>
+      <button class="nav-tab" data-tab="briefs" onclick="switchTab('briefs',this)"><i class="ti ti-clipboard-text"></i> Briefs</button>
+      <button class="nav-tab" data-tab="licenses" onclick="switchTab('licenses',this)"><i class="ti ti-certificate"></i> My Licenses</button>
+      <button class="nav-tab" data-tab="playlists" onclick="switchTab('playlists',this)"><i class="ti ti-playlist"></i> Playlists</button>
+      <button class="nav-tab" data-tab="messages" onclick="switchTab('messages',this)"><i class="ti ti-message-circle"></i> Messages <span id="msg-badge" class="nav-badge">2</span></button>
+    </div>
+    <div class="topbar-right">
+      <div class="user-chip" onclick="toggleUserMenu(event)">
+        <div class="avatar-sm">LM</div>
+        <span>Liz Morgan</span>
+        <i class="ti ti-chevron-down" style="font-size:12px"></i>
+      </div>
+      <div id="user-menu" hidden>
+        <div class="um-item danger"><i class="ti ti-logout"></i> Sign out</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section active" id="section-overview">
+    <div class="section-head"><h2>Overview</h2></div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="n">3</div><div class="lbl">Pending pitches</div></div>
+      <div class="stat-card"><div class="n">2</div><div class="lbl">Active briefs</div></div>
+      <div class="stat-card"><div class="n">7</div><div class="lbl">Active licenses</div></div>
+      <div class="stat-card"><div class="n">2</div><div class="lbl">Unread messages</div></div>
+    </div>
+    <div class="rep-card">
+      <div class="avatar-sm" style="width:36px;height:36px;font-size:13px">JK</div>
+      <div>
+        <div style="font-size:13px;font-weight:600">Jordan Kassel</div>
+        <div style="font-size:11px;color:var(--text3)">Your HAUS rep</div>
+      </div>
+    </div>
+  </div>
+
+  <div class="section" id="section-pitches">
+    <div class="section-head"><h2>Pitches</h2><span class="section-sub">Tracks your rep has sent for consideration</span></div>
+    <div id="pitches-list"></div>
+  </div>
+
+  <div class="section" id="section-briefs">
+    <div class="section-head"><h2>Briefs</h2><span class="section-sub">Tell your rep what you're looking for</span></div>
+    <div class="brief-form">
+      <div class="full"><label class="form-label">Title</label><input class="form-input" placeholder="e.g. Season 4 opening credits"></div>
+      <div class="full"><label class="form-label">Description</label><textarea class="form-input" rows="3" placeholder="What's the scene, tone, use case?"></textarea></div>
+      <div><label class="form-label">Mood tags (comma-separated)</label><input class="form-input" placeholder="tense, driving, dark"></div>
+      <div><label class="form-label">Budget type</label><select class="form-input"><option value="">—</option><option>Sync+Master</option><option>Blanket</option></select></div>
+      <div><label class="form-label">Due date</label><input type="date" class="form-input"></div>
+      <div style="display:flex;align-items:flex-end"><button class="btn primary"><i class="ti ti-plus"></i> Send brief</button></div>
+    </div>
+    <div id="briefs-list"></div>
+  </div>
+
+  <div class="section" id="section-licenses">
+    <div class="section-head"><h2>My Licenses</h2><span class="section-sub">Tracks you've licensed, with formats and expiry</span></div>
+    <div id="licenses-list"></div>
+  </div>
+
+  <div class="section" id="section-playlists">
+    <div class="section-head"><h2>Playlists</h2><span class="section-sub">Curated by your HAUS rep</span></div>
+    <div id="playlists-list"></div>
+  </div>
+
+  <div class="section" id="section-messages" style="padding-bottom:0">
+    <div class="section-head"><h2>Messages</h2></div>
+    <div id="messages-scroll"></div>
+    <div id="message-compose">
+      <textarea id="message-input" class="form-input" placeholder="Message your HAUS rep…"></textarea>
+      <button class="btn primary"><i class="ti ti-send"></i></button>
+    </div>
+  </div>
+</div>
+
+<script>
+function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+
+function toggleUserMenu(e){ e.stopPropagation(); const m=document.getElementById('user-menu'); m.hidden=!m.hidden }
+document.addEventListener('click', () => { document.getElementById('user-menu').hidden = true })
+
+const LOADERS = { overview:()=>{}, pitches: renderPitches, briefs: renderBriefs, licenses: renderLicenses, playlists: renderPlaylists, messages: renderMessages }
+function switchTab(name, btn) {
+  document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'))
+  document.querySelectorAll('.section').forEach(s => s.classList.remove('active'))
+  btn.classList.add('active')
+  document.getElementById('section-' + name).classList.add('active')
+  LOADERS[name] && LOADERS[name]()
+}
+
+const PITCHES = [
+  { title:'Slow Burn', genre:'Dramatic Underscore', key:'Cm', bpm:78, status:'pending', note:'Editor loved this for the season finale reveal.' },
+  { title:'Neon Drift', genre:'Synthwave', key:'Am', bpm:112, status:'pending', note:null },
+  { title:'Quiet Static', genre:'Ambient', key:'F', bpm:64, status:'approved', note:'Cleared for the cold open.' },
+]
+function renderPitches(){
+  document.getElementById('pitches-list').innerHTML = PITCHES.map(p => `
+    <div class="item-card">
+      <div class="item-top">
+        <div><div class="item-title">${esc(p.title)}</div><div class="item-meta">${esc(p.genre)} · ${esc(p.key)} · ${p.bpm} BPM</div></div>
+        <span class="pill ${p.status==='approved'?'green':'amber'}">${p.status}</span>
+      </div>
+      ${p.note ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">"${esc(p.note)}"</div>` : ''}
+      ${p.status==='pending' ? `<div class="item-actions"><button class="btn primary"><i class="ti ti-check"></i> Approve</button><button class="btn"><i class="ti ti-x"></i> Pass</button></div>` : ''}
+    </div>`).join('')
+}
+
+const BRIEFS = [
+  { title:'Season 4 opening credits', desc:'Tense, driving, builds through :20', tags:['tense','driving','dark'], budget:'Sync+Master', due:'Oct 3, 2026', status:'active' },
+  { title:'Holiday campaign backing track', desc:'Warm, upbeat, 30s cutdown needed', tags:['warm','upbeat'], budget:'Blanket', due:'Nov 1, 2026', status:'active' },
+]
+function renderBriefs(){
+  document.getElementById('briefs-list').innerHTML = BRIEFS.map(b => `
+    <div class="item-card">
+      <div class="item-top">
+        <div><div class="item-title">${esc(b.title)}</div><div class="item-meta">${esc(b.budget)} · Due ${esc(b.due)}</div></div>
+        <span class="pill blue">${b.status}</span>
+      </div>
+      <div style="font-size:12px;color:var(--text2);margin-top:6px">${esc(b.desc)}</div>
+      <div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${b.tags.map(t=>`<span class="pill gray">${esc(t)}</span>`).join('')}</div>
+    </div>`).join('')
+}
+
+const LICENSES = [
+  { title:'Slow Burn', type:'Sync+Master', brief:'Season 4 opening credits', expires:'Sep 3, 2027', formats:['WAV','Stems'] },
+  { title:'Midnight Runner', type:'Blanket', brief:null, expires:'—', formats:['WAV','MP3'] },
+]
+function renderLicenses(){
+  document.getElementById('licenses-list').innerHTML = LICENSES.map(l => `
+    <div class="item-card">
+      <div class="item-top">
+        <div><div class="item-title">${esc(l.title)}</div><div class="item-meta">${esc(l.type)}${l.brief?' · '+esc(l.brief):''} · Expires ${esc(l.expires)}</div></div>
+      </div>
+      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${l.formats.map(f=>`<span class="pill blue">${esc(f)}</span>`).join('')}</div>
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">Contact your HAUS rep for download links.</div>
+    </div>`).join('')
+}
+
+const PLAYLISTS = [
+  { name:'For your consideration — Q4', tracks:[{title:'Slow Burn',key:'Cm',bpm:78},{title:'Neon Drift',key:'Am',bpm:112}] },
+]
+function renderPlaylists(){
+  document.getElementById('playlists-list').innerHTML = PLAYLISTS.map(pl => `
+    <div class="item-card">
+      <div class="item-title" style="margin-bottom:8px">${esc(pl.name)}</div>
+      ${pl.tracks.map(t => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-top:0.5px solid var(--border);font-size:12px"><span>${esc(t.title)}</span><span style="color:var(--text3)">${esc(t.key)} · ${t.bpm} BPM</span></div>`).join('')}
+    </div>`).join('')
+}
+
+const MESSAGES = [
+  { mine:false, name:'Jordan Kassel', body:'Sent over two new pitches for the finale — take a look when you get a sec.', time:'Sep 14, 2:10 PM' },
+  { mine:true, name:'Liz Morgan', body:'Great, will review today.', time:'Sep 14, 2:32 PM' },
+  { mine:false, name:'Jordan Kassel', body:'No rush — brief due date still looks like Oct 3 on our end, confirming.', time:'Sep 15, 9:05 AM' },
+]
+function renderMessages(){
+  document.getElementById('messages-scroll').innerHTML = MESSAGES.map(m => `
+    <div class="msg-row ${m.mine?'mine':''}">
+      <div class="msg-bubble">${esc(m.body)}</div>
+      <div class="msg-meta">${esc(m.name)} · ${esc(m.time)}</div>
+    </div>`).join('')
+}
+renderMessages()
+</script>
+</body>
+</html>

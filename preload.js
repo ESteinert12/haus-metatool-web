@@ -73,4 +73,10 @@ contextBridge.exposeInMainWorld('haus', {
     downloadFile: (url, destPath)                               => ipcRenderer.invoke('b2-download-file', url, destPath),
   },
 
+  // ─── EBR (MusicMark) export ────────────────────────────────
+  ebr: {
+    saveDialog: (defaultName)              => ipcRenderer.invoke('ebr-save-dialog', defaultName),
+    writeXlsx:  (filePath, headers, rows)  => ipcRenderer.invoke('ebr-write-xlsx', filePath, headers, rows),
+  },
+
 })

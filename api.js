@@ -17,6 +17,8 @@ process.on('unhandledRejection', e => {
   console.error('unhandledRejection:', e && e.stack ? e.stack : e)
 })
 
+require('dotenv').config()
+
 const express    = require('express')
 const session    = require('express-session')
 const crypto     = require('crypto')

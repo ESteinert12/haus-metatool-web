@@ -6,6 +6,7 @@ const fs     = require('fs')
 const path   = require('path')
 const crypto = require('crypto')
 const os     = require('os')
+const XLSX   = require('xlsx')
 
 function _hashPassword(pw) {
   return crypto.createHash('sha256').update('haus-workspace:' + pw).digest('hex')
@@ -126,6 +127,37 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
     fs.writeFileSync(filePath, content, 'utf8')
     return true
   } catch { return false }
+})
+
+// ── EBR (MusicMark Electronic Batch Registration) export ───────────
+ipcMain.handle('ebr-save-dialog', async (event, defaultName) => {
+  try {
+    const win = BrowserWindow.getFocusedWindow()
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Save EBR File',
+      defaultPath: path.join(app.getPath('desktop'), defaultName),
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }]
+    })
+    return result.canceled ? null : result.filePath
+  } catch (e) {
+    return null
+  }
+})
+
+// headers: array of column header strings (must match MusicMark's EBR
+// template exactly). rows: array of arrays, same column order as headers.
+ipcMain.handle('ebr-write-xlsx', async (event, filePath, headers, rows) => {
+  try {
+    const wsData = [headers, ...rows]
+    const ws = XLSX.utils.aoa_to_sheet(wsData)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Registrations')
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    XLSX.writeFile(wb, filePath)
+    return { ok: true, path: filePath }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
 })
 
 // Get folder size
