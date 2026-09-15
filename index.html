@@ -268,6 +268,31 @@ webview{flex:1;border:none}
 .setting-sub{font-size:11px;color:var(--text3);margin-top:1px}
 .setting-input{padding:6px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:12px;background:var(--bg);color:var(--text);font-family:monospace;width:320px;outline:none}
 .setting-input:focus{border-color:var(--accent)}
+
+/* ── Toasts ─────────────────────────────────────────────────────────────────
+   Non-blocking replacement for alert(). The app had 104 alert() calls; in
+   Electron every one of them freezes the renderer until it is dismissed, which
+   in a batch operation means clicking through them one at a time. */
+#toast-wrap{position:fixed;bottom:18px;right:18px;z-index:10000;display:flex;flex-direction:column;gap:8px;align-items:flex-end;pointer-events:none}
+.toast{pointer-events:auto;display:flex;align-items:flex-start;gap:9px;max-width:420px;padding:10px 13px;border-radius:var(--radius);background:var(--bg3);color:var(--text);border:1px solid var(--border2);box-shadow:0 4px 16px rgba(0,0,0,0.13);font-size:13px;line-height:1.45;opacity:0;transform:translateY(6px);transition:opacity .16s,transform .16s}
+.toast.in{opacity:1;transform:translateY(0)}
+.toast i{font-size:15px;flex-shrink:0;margin-top:1px}
+.toast .toast-msg{flex:1;word-break:break-word;white-space:pre-wrap}
+.toast .toast-x{flex-shrink:0;cursor:pointer;color:var(--text3);font-size:14px;margin-top:1px}
+.toast .toast-x:hover{color:var(--text)}
+.toast.success{background:var(--green-bg);border-color:var(--green);color:var(--green-text)}
+.toast.error{background:var(--red-bg);border-color:var(--red);color:var(--red-text)}
+.toast.info{background:var(--blue-bg);border-color:var(--blue);color:var(--blue-text)}
+
+/* ── User menu (sign out) ───────────────────────────────────────────────── */
+.user-row{position:relative;cursor:pointer;border-radius:var(--radius-sm);padding:4px;margin:-4px}
+.user-row:hover{background:rgba(255,255,255,0.08)}
+#user-menu{position:absolute;bottom:calc(100% + 6px);left:0;right:0;background:var(--bg3);border:1px solid var(--border2);border-radius:var(--radius-sm);box-shadow:0 6px 20px rgba(0,0,0,0.22);padding:4px;z-index:200}
+#user-menu .um-who{padding:7px 9px 6px;font-size:11px;color:var(--text3);border-bottom:1px solid var(--border);margin-bottom:4px;word-break:break-word}
+#user-menu .um-item{display:flex;align-items:center;gap:8px;padding:7px 9px;font-size:13px;color:var(--text);border-radius:var(--radius-sm);cursor:pointer}
+#user-menu .um-item:hover{background:var(--bg2)}
+#user-menu .um-item.danger{color:var(--red-text)}
+#user-menu .um-item.danger:hover{background:var(--red-bg)}
 </style>
 <!-- Web mode: load haus-api.js shim so window.haus works without Electron.
      When running inside Electron, preload.js sets window.haus before this
@@ -391,10 +416,15 @@ webview{flex:1;border:none}
       <span id="nav-pg-label" style="font-size:11px;color:rgba(255,255,255,0.4)">DB Offline</span>
       <span id="nav-pg-retry" style="font-size:10px;color:rgba(255,255,255,0.3);margin-left:auto;display:none">retrying…</span>
     </div>
-    <div class="user-row">
-      <div class="avatar" id="user-avatar">JB</div>
-      <span class="user-name" id="user-name">Boss</span>
-      <i class="ti ti-settings settings-btn" onclick="navigate('settings')" title="Settings"></i>
+    <div class="user-row" id="user-row" onclick="toggleUserMenu(event)">
+      <div class="avatar" id="user-avatar"></div>
+      <span class="user-name" id="user-name">Not signed in</span>
+      <i class="ti ti-settings settings-btn" onclick="event.stopPropagation();navigate('settings')" title="Settings"></i>
+      <div id="user-menu" hidden>
+        <div class="um-who" id="um-who"></div>
+        <div class="um-item" onclick="event.stopPropagation();closeUserMenu();navigate('settings')"><i class="ti ti-settings"></i> Settings</div>
+        <div class="um-item danger" onclick="event.stopPropagation();doLogout()"><i class="ti ti-logout"></i> Sign out</div>
+      </div>
     </div>
   </div>
 </nav>
@@ -1453,7 +1483,7 @@ function saveSettings() {
   localStorage.setItem('haus-cfg', JSON.stringify(cfg))
   applyName()
   loadLibraryStats()
-  alert('Settings saved.')
+  toast('Settings saved.', 'success')
   clearUnsavedChanges()
 }
 
@@ -1565,10 +1595,10 @@ function showChangePasswordModal() {
       if (newPw === null) return
       hausPrompt('Confirm new password:', async confirmPw => {
         if (confirmPw === null) return
-        if (newPw !== confirmPw) { alert('Passwords do not match.'); return }
+        if (newPw !== confirmPw) { toast('Passwords do not match.', 'error'); return }
         const r = await window.haus.auth.changePassword(currentUser.username, oldPw, newPw)
-        if (r.ok) alert('Password changed successfully.')
-        else alert('Error: ' + (r.error || 'Could not change password.'))
+        if (r.ok) toast('Password changed successfully.', 'info')
+        else toast('Error: ' + (r.error || 'Could not change password.'), 'error')
       }, pw)
     }, pw)
   }, pw)
@@ -2045,6 +2075,78 @@ async function b2UploadFile(localPath, b2Name) {
 // rows.map(...) unguarded. Instead failures return an EMPTY ARRAY CARRYING AN
 // `error` PROPERTY: `.length`, `.map` and `?.length` all behave exactly as before,
 // and callers that care can check `rows.error`. Use pgFailed(rows) to test.
+// ── Toasts ─────────────────────────────────────────────────────────────────
+// Non-blocking notification. Replaces alert() for anything that is a message
+// rather than a decision; confirm() is left alone where a real choice is made.
+// type: 'success' | 'error' | 'info'. Errors stay up longer and can be dismissed.
+function toast(message, type = 'info', ms) {
+  let wrap = document.getElementById('toast-wrap')
+  if (!wrap) {
+    wrap = document.createElement('div')
+    wrap.id = 'toast-wrap'
+    document.body.appendChild(wrap)
+  }
+  const icon = type === 'success' ? 'ti-circle-check' : type === 'error' ? 'ti-alert-triangle' : 'ti-info-circle'
+  const el = document.createElement('div')
+  el.className = 'toast ' + type
+  el.innerHTML = `<i class="ti ${icon}"></i><span class="toast-msg"></span><i class="ti ti-x toast-x"></i>`
+  el.querySelector('.toast-msg').textContent = String(message == null ? '' : message)
+  const close = () => {
+    el.classList.remove('in')
+    setTimeout(() => el.remove(), 200)
+  }
+  el.querySelector('.toast-x').onclick = close
+  wrap.appendChild(el)
+  requestAnimationFrame(() => el.classList.add('in'))
+  setTimeout(close, ms || (type === 'error' ? 8000 : 4000))
+  return el
+}
+
+// ── User menu / sign out ───────────────────────────────────────────────────
+function toggleUserMenu(e) {
+  if (e) e.stopPropagation()
+  const m = document.getElementById('user-menu')
+  if (!m) return
+  if (!currentUser) return toast('Not signed in.', 'info')
+  if (m.hidden) {
+    const who = document.getElementById('um-who')
+    if (who) who.textContent = 'Signed in as ' + (currentUser.username || currentUser.display_name || '')
+    m.hidden = false
+    setTimeout(() => document.addEventListener('click', _userMenuAway, { once: true }), 0)
+  } else {
+    m.hidden = true
+  }
+}
+function closeUserMenu() {
+  const m = document.getElementById('user-menu')
+  if (m) m.hidden = true
+}
+function _userMenuAway() { closeUserMenu() }
+
+async function doLogout() {
+  closeUserMenu()
+  try { await window.haus.auth.logout() } catch (e) { console.warn('[logout]', e && e.message) }
+  // Drop client-side session state so nothing keeps querying with a dead cookie.
+  currentUser  = null
+  pgConnected  = false
+  _pgAuthFailed = true
+  const nameEl   = document.getElementById('user-name')
+  const avatarEl = document.getElementById('user-avatar')
+  if (nameEl)   nameEl.textContent   = 'Not signed in'
+  if (avatarEl) avatarEl.textContent = ''
+  // The login screen's inline style is display:flex; doLogin() overwrites that
+  // property with 'none', so restoring it means setting 'flex' back explicitly —
+  // clearing it would fall through to the div default of 'block' and break the
+  // centred layout.
+  const login = document.getElementById('login-screen')
+  if (login) login.style.display = 'flex'
+  const pw = document.getElementById('login-password')
+  if (pw) pw.value = ''
+  const un = document.getElementById('login-username')
+  if (un) { un.value = ''; un.focus() }
+  toast('Signed out.', 'success')
+}
+
 function pgFail(message) {
   const arr = []
   arr.error = message || 'query failed'
@@ -2052,6 +2154,34 @@ function pgFail(message) {
 }
 // True when the query failed, as opposed to returning no rows.
 function pgFailed(rows) { return !!(rows && rows.error) }
+
+// Render a failed query AS a failure, instead of as "nothing found".
+//
+// pgQ() resolves to [] on every failure path — not connected, not logged in,
+// server error, retries exhausted — carrying a .error marker. So `!rows.length`
+// on its own cannot tell "nothing matched" from "the query never ran", and a
+// surface that only checks length tells the user there is no data when in fact
+// it has no idea. There are 363 pgQ call sites and, before this, 8 pgFailed
+// checks.
+//
+// Returns true when it handled the failure, so the caller reads:
+//     if (pgFailBox(el, rows, 'tasks')) return
+// `retry` is a JS expression string, matching the uiError convention.
+function pgFailBox(target, rows, what, retry) {
+  if (!pgFailed(rows)) return false
+  const el = typeof target === 'string' ? document.getElementById(target) : target
+  if (!el) return true
+  const detail = rows.error === 'not connected' ? 'Not connected to the database.'
+               : rows.error === 'not logged in' ? 'Your session has expired — sign in again.'
+               : 'The query failed.'
+  el.innerHTML = `<div style="padding:18px;text-align:center;font-size:12px;color:var(--red-text)">
+      <i class="ti ti-alert-triangle" style="font-size:18px;display:block;margin-bottom:6px"></i>
+      <div style="font-weight:600;margin-bottom:3px">Couldn't load ${esc(what || 'this')}</div>
+      <div style="color:var(--text3)">${esc(detail)}</div>
+      ${retry ? `<button class="btn" style="margin-top:9px" onclick="${esc(retry)}">Retry</button>` : ''}
+    </div>`
+  return true
+}
 
 // pgConnected means the SERVER reached Postgres — it says nothing about whether
 // this browser has a session. /api/pg/connect is public, so the app happily
@@ -2238,7 +2368,7 @@ async function commitLot() {
   closeLotPortal()
   await loadLotPortalPicker()
   loadCatalog()
-  alert(`Lot "${lotName}" committed. Tracks are now live in The Collection.`)
+  toast(`Lot "${lotName}" committed. Tracks are now live in The Collection.`, 'info')
 }
 
 async function deleteTrack(skuRoot, lotId) {
@@ -2479,7 +2609,7 @@ async function exportAvidComments(lotId, lotName) {
     ORDER BY t.title ASC
   `, [lotId])
 
-  if (!rows || !rows.length) { alert('No tracks found in this lot.'); return }
+  if (!rows || !rows.length) { toast('No tracks found in this lot.', 'info'); return }
 
   const csvRows = [['SKU', 'TITLE', 'COMMENTS']]
   for (const r of rows) {
@@ -2621,7 +2751,7 @@ async function submitCreateLot(linkToProjectId) {
   const clientName = document.getElementById('new-lot-client-input')?.value.trim()
   const name  = document.getElementById('new-lot-name-input')?.value.trim()
   const limit = parseInt(document.getElementById('new-lot-limit-input')?.value) || null
-  if (!clientName) { alert('Please select a client'); document.getElementById('new-lot-client-input')?.focus(); return }
+  if (!clientName) { toast('Please select a client', 'error'); document.getElementById('new-lot-client-input')?.focus(); return }
   if (!name) { document.getElementById('new-lot-name-input')?.focus(); return }
 
   // Replace modal content with confirmation screen
@@ -2671,7 +2801,7 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     console.log('[createLot] Create result:', result)
 
     if (!result.ok) {
-      alert('Error creating lot: ' + (result.error || 'Unknown error'))
+      toast('Error creating lot: ' + (result.error || 'Unknown error'), 'error')
       return
     }
 
@@ -2715,11 +2845,11 @@ async function confirmCreateLotSubmit(clientName, name, limit, linkToProjectId) 
     }
   } else {
     console.error('[createLot] Failed to create lot:', rows)
-    alert('Failed to create lot')
+    toast('Failed to create lot', 'error')
   }
   } catch (e) {
     console.error('[createLot] Error:', e)
-    alert('Error creating lot: ' + e.message)
+    toast('Error creating lot: ' + e.message, 'error')
   }
 }
 
@@ -2727,7 +2857,7 @@ async function showAddTrackToLotModal(lotId) {
   hausPrompt('Enter SKU root to add (e.g. GST0001A):', async sku => {
     if (!sku?.trim()) return
     const exists = await pgQ(`SELECT sku_root FROM titles WHERE sku_root=$1`, [sku.trim().toUpperCase()])
-    if (!exists?.length) { alert('Track not found: ' + sku.trim()); return }
+    if (!exists?.length) { toast('Track not found: ' + sku.trim(), 'error'); return }
     await pgQ(`INSERT INTO lot_titles (lot_id, sku_root) VALUES ($1,$2) ON CONFLICT DO NOTHING`,
       [lotId, sku.trim().toUpperCase()])
     selectLot(lotId)
@@ -2761,14 +2891,14 @@ async function downloadForAVID(lotId, lotName) {
       if (window.haus?.shell?.showInFinder) {
         window.haus.shell.showInFinder(result.folder)
       } else {
-        alert(`Downloaded ${result.count} WAV files to ${result.folder}`)
+        toast(`Downloaded ${result.count} WAV files to ${result.folder}`, 'info')
       }
     } else {
-      alert('Error: ' + (result.error || 'Failed to download files'))
+      toast('Error: ' + (result.error || 'Failed to download files'), 'error')
     }
   } catch (e) {
     console.error('AVID download error:', e)
-    alert('Error downloading files: ' + e.message)
+    toast('Error downloading files: ' + e.message, 'error')
   }
 }
 
@@ -3221,7 +3351,7 @@ async function peekTitle(skuRoot) {
       if (sgRows && sgRows.length) sgId = sgRows[0].secondary_genre_id
     }
 
-    if (!titleVal) { alert('Title cannot be empty.'); return }
+    if (!titleVal) { toast('Title cannot be empty.', 'error'); return }
 
     const saveBtn = document.querySelector('#peek-modal button[onclick*="peekSave"]')
     if (saveBtn) { saveBtn.textContent = 'Saving…'; saveBtn.disabled = true }
@@ -3257,7 +3387,7 @@ async function peekTitle(skuRoot) {
       editing = false
       render()
     } catch(e) {
-      alert('Save failed: ' + e.message)
+      toast('Save failed: ' + e.message, 'error')
       if (saveBtn) { saveBtn.textContent = 'Save'; saveBtn.disabled = false }
     }
   }
@@ -3690,6 +3820,7 @@ let currentClientId = null
 async function loadClientsSection() {
   try {
     _allClients = await pgQ('SELECT * FROM clients ORDER BY name')
+    if (pgFailBox('clients-sidebar-list', _allClients, 'clients', 'loadClientsSection()')) return
     renderClientsSection()
     // Clear the detail pane until a client is selected
     const detail = document.getElementById('clients-detail')
@@ -3868,7 +3999,7 @@ async function toggleClientActive(clientId) {
     renderClientsSection()
   } catch (e) {
     console.error('Error toggling client active status:', e)
-    alert('Error: ' + e.message)
+    toast('Error: ' + e.message, 'error')
   }
 }
 
@@ -3888,7 +4019,7 @@ async function toggleLotActive(lotId) {
     selectLot(lotId) // Refresh detail view
   } catch (e) {
     console.error('Error toggling lot active status:', e)
-    alert('Error: ' + e.message)
+    toast('Error: ' + e.message, 'error')
   }
 }
 
@@ -3917,7 +4048,7 @@ async function createPlaylistForProject(projectId) {
 
   modal.querySelector('#create-pl-create').addEventListener('click', async () => {
     const name = nameInput.value.trim()
-    if (!name) { alert('Enter a playlist name'); return }
+    if (!name) { toast('Enter a playlist name', 'info'); return }
 
     const btn = modal.querySelector('#create-pl-create')
     btn.disabled = true; btn.textContent = 'Creating…'
@@ -3930,7 +4061,7 @@ async function createPlaylistForProject(projectId) {
       }
     } catch (e) {
       console.error('Error creating playlist:', e)
-      alert('Error: ' + e.message)
+      toast('Error: ' + e.message, 'error')
       btn.disabled = false; btn.textContent = 'Create'
     }
   })
@@ -3966,7 +4097,7 @@ async function togglePlayTrack(skuRoot, buttonEl) {
     // Fetch B2 key from mix_stems — FULL stems only
     const result = await pgQ(`SELECT b2_key FROM mix_stems WHERE sku_root=$1 AND (upper(stem_name)='FULL' OR lower(filename) LIKE '%_full.%') AND b2_key IS NOT NULL ORDER BY upper(stem_name)='FULL' DESC LIMIT 1`, [skuRoot])
     if (!result || !result.length || !result[0].b2_key) {
-      alert('Audio not found for this track')
+      toast('Audio not found for this track', 'error')
       return
     }
 
@@ -4007,7 +4138,7 @@ async function togglePlayTrack(skuRoot, buttonEl) {
     }
   } catch (e) {
     console.error('Error playing track:', e)
-    alert('Error playing track: ' + e.message)
+    toast('Error playing track: ' + e.message, 'error')
   }
 }
 
@@ -4296,7 +4427,7 @@ async function selectClientProject(projectId, projectName) {
     })
   } catch (e) {
     console.error('Error loading project details:', e)
-    alert('Error: ' + e.message)
+    toast('Error: ' + e.message, 'error')
   }
 }
 
@@ -4357,7 +4488,7 @@ async function assignItem(type, itemId, clientId) {
     await pgQ(`UPDATE ${table} SET client_id = $1 WHERE ${idField} = $2`, [clientId, itemId])
     selectClient(clientId)
   } catch (e) {
-    alert('Error: ' + e.message)
+    toast('Error: ' + e.message, 'error')
   }
 }
 
@@ -4368,7 +4499,7 @@ async function unassignItem(type, itemId, clientId) {
     await pgQ(`UPDATE ${table} SET client_id = NULL WHERE ${idField} = $1`, [itemId])
     selectClient(clientId)
   } catch (e) {
-    alert('Error: ' + e.message)
+    toast('Error: ' + e.message, 'error')
   }
 }
 
@@ -4387,14 +4518,14 @@ async function importClientsCSV(inputEl) {
     const result = await res.json()
 
     if (result.ok) {
-      alert(`✓ Imported ${result.count} clients`)
+      toast(`✓ Imported ${result.count} clients`, 'success')
       loadClientsSection()
       inputEl.value = ''
     } else {
-      alert('Error: ' + result.error)
+      toast('Error: ' + result.error, 'error')
     }
   } catch (e) {
-    alert('Import failed: ' + e.message)
+    toast('Import failed: ' + e.message, 'error')
   }
 }
 
@@ -4853,7 +4984,7 @@ async function saveNewTeam(composerId) {
 
     // Auto-generate next TM number
     const maxR = await pgQ(`SELECT MAX(CAST(SUBSTRING(team_id FROM 3) AS INTEGER)) AS mx FROM teams WHERE team_id ~ '^TM[0-9]+$'`)
-    if (!Array.isArray(maxR)) { console.error('[saveNewTeam] failed to fetch max team ID'); alert('Error saving team'); return }
+    if (!Array.isArray(maxR)) { console.error('[saveNewTeam] failed to fetch max team ID'); toast('Error saving team', 'error'); return }
     const nextNum = ((maxR[0]?.mx) || 0) + 1
     const teamId = 'TM' + String(nextNum).padStart(4, '0')
 
@@ -4862,7 +4993,7 @@ async function saveNewTeam(composerId) {
        VALUES ($1, $2, $3, 'COMPLETE', $4, $5, false, $6)`,
       [teamId, composerId, fullId, date || null, isJup, dealId]
     )
-    if (!Array.isArray(r)) { console.error('[saveNewTeam] team INSERT failed'); alert('Error saving team'); return }
+    if (!Array.isArray(r)) { console.error('[saveNewTeam] team INSERT failed'); toast('Error saving team', 'error'); return }
 
     // Auto-add primary composer as first writer
     const cR = await pgQ(
@@ -4884,7 +5015,7 @@ async function saveNewTeam(composerId) {
     await refreshTeamsPanel(composerId)
   } catch (e) {
     console.error(`[saveNewTeam] exception: ${e.message}`)
-    alert(`Error saving team: ${e.message}`)
+    toast(`Error saving team: ${e.message}`, 'error')
   }
 }
 
@@ -4896,13 +5027,13 @@ async function saveTeamWriter(teamId, composerId) {
     const isJup = document.getElementById(`wf-jup-${teamId}`).checked
     const ipi   = document.getElementById(`wf-ipi-${teamId}`)?.value.trim() || null
 
-    if (!name) { alert('Writer name is required.'); return }
+    if (!name) { toast('Writer name is required.', 'error'); return }
 
     const r = await pgQ(
       `INSERT INTO team_writers (team_id, writer_name, pro, split_pct, is_jup, ipi) VALUES ($1, $2, $3, $4, $5, $6)`,
       [teamId, name, pro || null, split ? parseFloat(split) : null, isJup, ipi]
     )
-    if (!Array.isArray(r)) { console.error(`[saveTeamWriter] team_writers INSERT failed for ${teamId}`); alert('Error adding cowriter'); return }
+    if (!Array.isArray(r)) { console.error(`[saveTeamWriter] team_writers INSERT failed for ${teamId}`); toast('Error adding cowriter', 'error'); return }
 
     // Upsert into cowriters table so they appear in the co-writers roster
     const cR = await pgQ(
@@ -4922,7 +5053,7 @@ async function saveTeamWriter(teamId, composerId) {
     await refreshTeamsPanel(composerId)
   } catch (e) {
     console.error(`[saveTeamWriter] exception: ${e.message}`)
-    alert(`Error adding cowriter: ${e.message}`)
+    toast(`Error adding cowriter: ${e.message}`, 'error')
   }
 }
 
@@ -4938,12 +5069,12 @@ async function editTeamWriter(writerId, composerId, currentSplit, currentPro, cu
       `UPDATE team_writers SET split_pct=$1, pro=$2, ipi=$3 WHERE id=$4`,
       [split !== '' ? parseFloat(split) : null, pro || null, ipi || null, writerId]
     )
-    if (!Array.isArray(r)) { console.error(`[editTeamWriter] UPDATE failed for writer ${writerId}`); alert('Error updating cowriter'); return }
+    if (!Array.isArray(r)) { console.error(`[editTeamWriter] UPDATE failed for writer ${writerId}`); toast('Error updating cowriter', 'error'); return }
     console.log(`[editTeamWriter] updated writer ${writerId}`)
     await refreshTeamsPanel(composerId)
   } catch (e) {
     console.error(`[editTeamWriter] exception: ${e.message}`)
-    alert(`Error updating cowriter: ${e.message}`)
+    toast(`Error updating cowriter: ${e.message}`, 'error')
   }
 }
 
@@ -4951,12 +5082,12 @@ async function removeTeamWriter(writerId, composerId) {
   try {
     if (!confirm('Remove this cowriter?')) return
     const r = await pgQ(`DELETE FROM team_writers WHERE id = $1`, [writerId])
-    if (!Array.isArray(r)) { console.error(`[removeTeamWriter] DELETE failed for writer ${writerId}`); alert('Error removing cowriter'); return }
+    if (!Array.isArray(r)) { console.error(`[removeTeamWriter] DELETE failed for writer ${writerId}`); toast('Error removing cowriter', 'error'); return }
     console.log(`[removeTeamWriter] removed writer ${writerId}`)
     await refreshTeamsPanel(composerId)
   } catch (e) {
     console.error(`[removeTeamWriter] exception: ${e.message}`)
-    alert(`Error removing cowriter: ${e.message}`)
+    toast(`Error removing cowriter: ${e.message}`, 'error')
   }
 }
 
@@ -5083,6 +5214,7 @@ async function loadDealPublishers(dealId) {
   const wrap = document.getElementById(`deal-pubs-${dealId}`)
   if (!wrap) return
   const pubs = await pgQ(`SELECT * FROM deal_publishers WHERE deal_id=$1 ORDER BY id`, [dealId])
+  if (pgFailBox(wrap, pubs, 'publishers', `loadDealPublishers(${dealId})`)) return
   if (!pubs || !pubs.length) { setHTML(wrap, '<div style="font-size:12px;color:var(--text3);padding:4px 0">No publishers added yet.</div>'); return }
   // Group by PRO for clean display
   const byPro = {}
@@ -5143,7 +5275,7 @@ function addDealPublisherRow(data) {
 
 async function saveDeal() {
   const name = document.getElementById('dm-name').value.trim()
-  if (!name) { alert('Deal name is required.'); return }
+  if (!name) { toast('Deal name is required.', 'error'); return }
   const notes = document.getElementById('dm-notes').value.trim()
 
   // Collect publisher rows
@@ -5164,7 +5296,7 @@ async function saveDeal() {
     await pgQ(`DELETE FROM deal_publishers WHERE deal_id=$1`, [dealId])
   } else {
     const r = await pgQ(`INSERT INTO deals (name, notes) VALUES ($1,$2) RETURNING deal_id`, [name, notes||null])
-    if (!r || !r.length) { alert('Error creating deal.'); return }
+    if (!r || !r.length) { toast('Error creating deal.', 'error'); return }
     dealId = r[0].deal_id
   }
   for (const p of publishers) {
@@ -5214,9 +5346,10 @@ async function _loadIPTeams(composerFilter, wrap) {
     LEFT JOIN composers c ON c.composer_id = t.composer_prefix
     ORDER BY c.last_name, c.first_name, t.team_id
   `)
-  if (!teamsRes) {
-    wrap.innerHTML = '<span style="color:#e05;font-size:13px">DB error or not connected — check console.</span>'; return
-  }
+  // Was `if (!teamsRes)`: dead code. pgQ() never resolves falsy — it returns []
+  // with a .error marker on failure — so this branch never ran and a failed
+  // query fell through to "No teams found".
+  if (pgFailBox(wrap, teamsRes, 'teams', '_loadIPTeams()')) return
   if (!teamsRes.length) {
     wrap.innerHTML = '<span style="color:var(--text3);font-size:13px">No teams found. Add teams via the Composers tab first.</span>'; return
   }
@@ -5312,12 +5445,12 @@ async function _loadIPTeams(composerFilter, wrap) {
 
 async function saveIPTeamPubGroup(teamId, group) {
   const r = await pgQ(`UPDATE teams SET publisher_group=$1 WHERE team_id=$2`, [group, teamId])
-  if (r?.error) alert('Save failed: ' + r.error)
+  if (r?.error) toast('Save failed: ' + r.error, 'error')
 }
 
 async function saveIPWriterSplit(writerId, teamId, pct) {
   const val = parseFloat(pct)
-  if (isNaN(val) || val < 0 || val > 100) { alert('Invalid split %'); return }
+  if (isNaN(val) || val < 0 || val > 100) { toast('Invalid split %', 'error'); return }
   await pgQ(`UPDATE team_writers SET split_pct=$1 WHERE id=$2`, [val, writerId])
   // Recalculate primary %
   const writers = await pgQ(`SELECT split_pct FROM team_writers WHERE team_id=$1`, [teamId])
@@ -5393,11 +5526,11 @@ async function confirmIPAddWriter(teamId) {
   const pctEl= document.getElementById('ip-cw-pct-' + teamId)
   if (!sel || !pctEl) return
   const cwId = parseInt(sel.value)
-  if (!cwId) { alert('Please select a co-writer'); return }
+  if (!cwId) { toast('Please select a co-writer', 'info'); return }
   const pct  = parseFloat(pctEl.value)
-  if (isNaN(pct) || pct <= 0 || pct > 100) { alert('Enter a valid split %'); return }
+  if (isNaN(pct) || pct <= 0 || pct > 100) { toast('Enter a valid split %', 'info'); return }
   const cwRows = await pgQ(`SELECT cowriter_name, first_name, last_name FROM cowriters WHERE cowriter_id=$1`, [cwId])
-  if (!cwRows?.length) { alert('Co-writer not found'); return }
+  if (!cwRows?.length) { toast('Co-writer not found', 'error'); return }
   const writerName = ((cwRows[0].first_name||cwRows[0].last_name)
     ? ((cwRows[0].first_name||'')+' '+(cwRows[0].last_name||'')).trim()
     : cwRows[0].cowriter_name||'')
@@ -5407,7 +5540,7 @@ async function confirmIPAddWriter(teamId) {
      ON CONFLICT (team_id, writer_name) DO UPDATE SET split_pct=$3, cowriter_id=$4`,
     [teamId, writerName, pct, cwId]
   )
-  if (r?.error) { alert('Error: ' + r.error); return }
+  if (r?.error) { toast('Error: ' + r.error, 'error'); return }
   const filterSel = document.querySelector('#ip-teams-content select')
   await loadIPTeams(filterSel?.value || '')
 }
@@ -5533,7 +5666,7 @@ async function saveIPCowriter(cwId) {
   const last  = document.getElementById('ip-cwf-last')?.value?.trim()
   const pro   = document.getElementById('ip-cwf-pro')?.value?.trim()
   const ipi   = document.getElementById('ip-cwf-ipi')?.value?.trim()
-  if (!first && !last) { alert('Enter at least a first or last name'); return }
+  if (!first && !last) { toast('Enter at least a first or last name', 'info'); return }
   const fullName = (first+' '+last).trim()
   if (cwId && cwId !== 'null') {
     await pgQ(`UPDATE cowriters SET first_name=$1, last_name=$2, pro=$3, ipi=$4, cowriter_name=$5 WHERE cowriter_id=$6`,
@@ -5845,7 +5978,7 @@ async function playMetadataTrack(sku) {
   try {
     const result = await pgQ(`SELECT b2_key FROM mix_stems WHERE sku_root=$1 AND (upper(stem_name)='FULL' OR lower(filename) LIKE '%_full.%') AND b2_key IS NOT NULL ORDER BY upper(stem_name)='FULL' DESC LIMIT 1`, [sku])
     if (!result || !result.length || !result[0].b2_key) {
-      alert('Audio not available for this track (only FULL stems are supported)')
+      toast('Audio not available for this track (only FULL stems are supported)', 'info')
       return
     }
 
@@ -5878,7 +6011,7 @@ async function playMetadataTrack(sku) {
     }
   } catch (e) {
     console.error('Error playing track:', e)
-    alert('Error playing track: ' + e.message)
+    toast('Error playing track: ' + e.message, 'error')
   }
 }
 
@@ -6298,7 +6431,7 @@ function populateProductionFilter() {
 }
 
 async function showImportDescriptionsModal() {
-  if (!pgConnected) { alert('Not connected to database.'); return }
+  if (!pgConnected) { toast('Not connected to database.', 'error'); return }
 
   // Count missing immediately
   const countRes = await pgQ(`SELECT COUNT(*) AS n FROM titles WHERE description IS NULL OR description = ''`)
@@ -6452,7 +6585,7 @@ async function showImportDescriptionsModal() {
 
 async function exportCatalogCSV() {
   const tracks = allTracks
-  if (!tracks.length) { alert('No tracks to export — load the catalog first.'); return }
+  if (!tracks.length) { toast('No tracks to export — load the catalog first.', 'info'); return }
   const headers = ['SKU','Title','Key','Genre','KSL','MMW','Composer ID','Lot','JUP','Date Added']
   const rows = tracks.map(t => [
     t.sku, t.title, t.key, t.genre, t.ksl, t.mmw, t.composerID, t.lot,
@@ -7070,7 +7203,7 @@ async function loadTrackLotHistory(skuRoot) {
 async function showMoveLotModal(skuRoot, fromLotId, fromLotName) {
   // Load all lots for picker
   const lots = await pgQ(`SELECT lot_id, lot_name, client FROM lots ORDER BY lot_name DESC LIMIT 200`)
-  if (!lots) { alert('Could not load lots'); return }
+  if (!lots) { toast('Could not load lots', 'error'); return }
 
   const isMove = !!fromLotId
   const title = isMove ? `Move <b>${esc(skuRoot)}</b> from <b>${esc(fromLotName)}</b>` : `Add <b>${esc(skuRoot)}</b> to a lot`
@@ -7134,7 +7267,7 @@ async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
             const checkConflict = await window.haus.shell.exec(`test -f "${destFile}" && echo "exists" || echo "ok"`)
             if (checkConflict?.stdout?.trim() === 'exists') {
               console.warn(`[confirmMoveLot] conflict detected: ${destFile} already exists`)
-              alert(`File conflict: ${fname} already exists in ${toLotName}. Move cancelled.`)
+              toast(`File conflict: ${fname} already exists in ${toLotName}. Move cancelled.`, 'error')
               return
             }
           }
@@ -7167,7 +7300,7 @@ async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
     loadTrackLotHistory(skuRoot)
   } catch (e) {
     console.error(`[confirmMoveLot] failed: ${e.message}`)
-    alert(`Error moving track: ${e.message}`)
+    toast(`Error moving track: ${e.message}`, 'error')
   }
 }
 
@@ -8299,8 +8432,8 @@ async function renderIntakeBrowserClients() {
 
 async function cleanupStagingDupes() {
   const staging = cfg.staging || cfg.intake
-  if (!staging) { alert('No staging folder configured.'); return }
-  if (!cfg.hausjup) { alert('No shipping folder configured.'); return }
+  if (!staging) { toast('No staging folder configured.', 'info'); return }
+  if (!cfg.hausjup) { toast('No shipping folder configured.', 'info'); return }
 
   const panel = document.getElementById('intake-form-panel')
   if (panel) panel.innerHTML = `<div style="padding:24px;font-size:13px;color:var(--text3)"><i class="ti ti-loader-2"></i> Scanning staging…</div>`
@@ -8620,7 +8753,7 @@ async function executeRecopyStagingDupe(idx) {
   } catch (e) {
     console.error('[executeRecopyStagingDupe]', e)
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-alert-triangle"></i> Retry' }
-    alert('Copy failed: ' + e.message)
+    toast('Copy failed: ' + e.message, 'error')
   }
 }
 
@@ -8652,7 +8785,7 @@ async function executeCleanupStagingDupes(results) {
     const chk = document.getElementById(`cleanup-chk-${idx}`)
     return chk && chk.checked
   })
-  if (!toDelete.length) { alert('Nothing selected.'); return }
+  if (!toDelete.length) { toast('Nothing selected.', 'error'); return }
   if (!confirm(`Move ${toDelete.length} staging folder${toDelete.length !== 1 ? 's' : ''} out of staging?\n\nThey go to _deleted/ inside the staging folder, so you can drag them back if this is wrong. Nothing is erased.`)) return
 
   const panel = document.getElementById('intake-form-panel')
@@ -8817,11 +8950,11 @@ async function downloadDrop(i) {
     const pcode = (pout.match(/EXIT:(\d+)\s*$/) || [])[1]
     let   perr  = pout.replace(/EXIT:\d+\s*$/, '').trim()
     if (pcode === '142' || pcode === '14') {
-      alert(`Dropbox is not responding for "${d.name}".\n\nThe file did not begin downloading within 8 seconds — Dropbox is most likely stuck. Check the menu bar: if it says "Syncing…" but nothing is moving, quit Dropbox and relaunch it, and restart the Mac if that does not clear it.\n\nNothing was changed here.`)
+      toast(`Dropbox is not responding for "${d.name}".\n\nThe file did not begin downloading within 8 seconds — Dropbox is most likely stuck. Check the menu bar: if it says "Syncing…" but nothing is moving, quit Dropbox and relaunch it, and restart the Mac if that does not clear it.\n\nNothing was changed here.`, 'error')
       return
     }
     if (pcode && pcode !== '0') {
-      alert(`Dropbox will not download "${d.name}" on request.\n\n${perr || 'The read was refused.'}\n\nThis is a Dropbox limitation rather than a fault in the app: files can only be fetched through Dropbox itself.\n\nIn Finder, right-click the folder and choose "Make Available Offline" — then check the badge here to confirm it actually worked.`)
+      toast(`Dropbox will not download "${d.name}" on request.\n\n${perr || 'The read was refused.'}\n\nThis is a Dropbox limitation rather than a fault in the app: files can only be fetched through Dropbox itself.\n\nIn Finder, right-click the folder and choose "Make Available Offline" — then check the badge here to confirm it actually worked.`, 'error')
       return
     }
 
@@ -8837,11 +8970,11 @@ async function downloadDrop(i) {
     d._cloudOnly = still.length
     renderIntakeBrowserTracks()
     if (still.length) {
-      alert(`${still.length} of ${hollow.length} file(s) are still not on disk.\n\n${errText ? errText.split('\n').slice(0, 3).join('\n') + '\n\n' : ''}Finish it in Finder: right-click the folder and choose "Make Available Offline".`)
+      toast(`${still.length} of ${hollow.length} file(s) are still not on disk.\n\n${errText ? errText.split('\n').slice(0, 3).join('\n') + '\n\n' : ''}Finish it in Finder: right-click the folder and choose "Make Available Offline".`, 'info')
     }
   } catch (e) {
     console.error('[intake] download failed:', e.message)
-    alert(`Could not download "${d.name}".\n\n${e.message}`)
+    toast(`Could not download "${d.name}".\n\n${e.message}`, 'error')
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = 'Download' }
   }
@@ -9187,10 +9320,10 @@ async function saveDraftToDatabase(i) {
       body: JSON.stringify(draft)
     })
     if (!response.ok) throw new Error(`Server error: ${response.status}`)
-    alert('Draft saved!')
+    toast('Draft saved!', 'success')
   } catch (e) {
     console.error('Error saving draft:', e)
-    alert('Error saving draft: ' + e.message)
+    toast('Error saving draft: ' + e.message, 'error')
   }
 }
 
@@ -9634,7 +9767,7 @@ async function importMetadataAndShip(indexStr, folderPath) {
       stagedRecord = filesData.files?.find(f => f.filename === folderName)
     }
     if (!stagedRecord) {
-      alert('Could not find staged file: ' + folderName)
+      toast('Could not find staged file: ' + folderName, 'error')
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-download"></i> Import & Ship' }
       return
     }
@@ -9644,7 +9777,7 @@ async function importMetadataAndShip(indexStr, folderPath) {
     const result = await res.json()
 
     if (!result.ok) {
-      alert('Error: ' + (result.error || 'Import failed'))
+      toast('Error: ' + (result.error || 'Import failed'), 'error')
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-download"></i> Import & Ship' }
       return
     }
@@ -9668,7 +9801,7 @@ async function importMetadataAndShip(indexStr, folderPath) {
     // Auto-advance to next track after a moment
     setTimeout(() => { if (intakeIndex < intakeDrops.length - 1) loadIntakeTrackForm(intakeIndex + 1) }, 2000)
   } catch (e) {
-    alert('Error importing metadata: ' + e.message)
+    toast('Error importing metadata: ' + e.message, 'error')
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-download"></i> Import & Ship' }
   }
 }
@@ -9799,7 +9932,7 @@ async function clearLotB2Keys(lotName) {
     )
     RETURNING mix_stem_id
   `, [lotName + '%'])
-  alert(`Cleared ${rows?.length || 0} b2_key entries. Run backfill now.`)
+  toast(`Cleared ${rows?.length || 0} b2_key entries. Run backfill now.`, 'info')
 }
 
 async function clearSKUb2Keys(sku) {
@@ -9810,7 +9943,7 @@ async function clearSKUb2Keys(sku) {
     WHERE sku_root = $1
     RETURNING mix_stem_id
   `, [sku])
-  alert(`Cleared ${rows?.length || 0} b2_key entries for ${sku}. Run backfill now.`)
+  toast(`Cleared ${rows?.length || 0} b2_key entries for ${sku}. Run backfill now.`, 'info')
 }
 
 async function addB2Key(sku, filename, b2Key) {
@@ -9821,7 +9954,7 @@ async function addB2Key(sku, filename, b2Key) {
     ON CONFLICT (sku_root, filename) DO UPDATE SET b2_key = EXCLUDED.b2_key
     RETURNING mix_stem_id
   `, [sku, 'FULL', filename, b2Key])
-  alert(`Added b2_key. Try playing the song now.`)
+  toast(`Added b2_key. Try playing the song now.`, 'success')
 }
 
 async function opsMigrateB2() {
@@ -10717,10 +10850,10 @@ async function b2Backfill(statusElId = 'b2-connect-result') {
   // RETIRED 2026-09-04 -- reads the Dropbox shipping folder, which holds
   // cloud-only placeholders. Uploading from it produces stubs. Use the API
   // route (/api/b2/recover-broken) instead.
-  alert('This backfill is retired: it reads Dropbox placeholder files and would upload empty audio. Use the API recovery route instead.')
+  toast('This backfill is retired: it reads Dropbox placeholder files and would upload empty audio. Use the API recovery route instead.', 'info')
   return
-  if (!b2Connected || !b2BucketId) { alert('B2 not connected'); return }
-  if (!cfg.hausjup) { alert('Shipping folder not configured'); return }
+  if (!b2Connected || !b2BucketId) { toast('B2 not connected', 'error'); return }
+  if (!cfg.hausjup) { toast('Shipping folder not configured', 'error'); return }
 
   const status = document.getElementById(statusElId)
   const log = msg => { console.log('[b2-backfill]', msg); if (status) status.textContent = msg }
@@ -10806,7 +10939,7 @@ function opsIndexB2Cancel() {
 async function opsIndexB2() {
   _b2IndexCancelled = false
   if (!b2Connected) await b2AutoConnect()
-  if (!b2Connected || !b2BucketId) { alert('B2 not connected — connect B2 in Settings first'); return }
+  if (!b2Connected || !b2BucketId) { toast('B2 not connected — connect B2 in Settings first', 'error'); return }
 
   const btn    = document.getElementById('ops-index-btn')
   const cancel = document.getElementById('ops-index-cancel')
@@ -10912,10 +11045,10 @@ async function b2BackfillMigrate(statusElId = 'ops-migrate-status') {
   // RETIRED 2026-09-04 -- reads the Dropbox shipping folder, which holds
   // cloud-only placeholders. Uploading from it produces stubs. Use the API
   // route (/api/b2/recover-broken) instead.
-  alert('This backfill is retired: it reads Dropbox placeholder files and would upload empty audio. Use the API recovery route instead.')
+  toast('This backfill is retired: it reads Dropbox placeholder files and would upload empty audio. Use the API recovery route instead.', 'info')
   return
-  if (!b2Connected || !b2BucketId) { alert('B2 not connected'); return }
-  if (!cfg.hausjup) { alert('Shipping folder not configured'); return }
+  if (!b2Connected || !b2BucketId) { toast('B2 not connected', 'error'); return }
+  if (!cfg.hausjup) { toast('Shipping folder not configured', 'error'); return }
 
   const status = document.getElementById(statusElId)
   const log = msg => { console.log('[b2-migrate]', msg); if (status) status.textContent = msg }
@@ -10983,7 +11116,7 @@ async function b2BackfillMigrate(statusElId = 'ops-migrate-status') {
 // Scans each album folder, sets b2_key = full path, matches mix_stems.filename
 // by the HAUS_ filename at the end of the path.
 async function b2RebuildStemKeys(statusElId = 'b2-connect-result') {
-  if (!b2Connected || !b2BucketId) { alert('B2 not connected'); return }
+  if (!b2Connected || !b2BucketId) { toast('B2 not connected', 'error'); return }
   const status = document.getElementById(statusElId)
   const log = msg => { console.log('[b2-rebuild]', msg); if (status) status.textContent = msg }
 
@@ -11161,7 +11294,7 @@ async function createAndPickLot() {
 
   const clientArg = (!intakeClient || intakeClient === '__loose__') ? null : intakeClient
   const lotId = await getOrCreateLot(name, type, clientArg)
-  if (!lotId) { alert('Failed to create lot'); return }
+  if (!lotId) { toast('Failed to create lot', 'error'); return }
 
   // Create the physical folder in ATMOS_Shipping
   const hausjup = cfg.hausjup
@@ -11237,7 +11370,7 @@ async function showIntakeLotPicker() {
 function confirmLotSelection() {
   const select = document.getElementById('lot-picker-select')
   if (!select.value) {
-    alert('Please select a lot')
+    toast('Please select a lot', 'info')
     return
   }
   const lotId = parseInt(select.value)
@@ -11316,7 +11449,7 @@ async function showLotTrackDetail(skuRoot) {
 
 function startIntake() {
   if (intakeIndex === null || intakeIndex < 0) {
-    alert('Pick a track first')
+    toast('Pick a track first', 'info')
     return
   }
   setIntakeStep(1)
@@ -11873,7 +12006,7 @@ async function executeIntake(snapshot = null) {
         d = byPath
       } else {
         console.error(`[intake] ABORT — "${info._dropName}" is no longer in staging at ${info._dropPath}`)
-        alert(`Intake stopped.\n\n"${info._dropName}" is no longer where it was when you filled the form, so the audio cannot be matched to the metadata safely.\n\nNothing was uploaded. Re-scan staging and try again.`)
+        toast(`Intake stopped.\n\n"${info._dropName}" is no longer where it was when you filled the form, so the audio cannot be matched to the metadata safely.\n\nNothing was uploaded. Re-scan staging and try again.`, 'success')
         return
       }
     }
@@ -11983,7 +12116,7 @@ async function executeIntake(snapshot = null) {
         if (collision && collision.length) {
           const msg = `SKU COLLISION: ${fullSku} already exists in titles (composer: ${collision[0].composer_id}). Intake halted — check sku_sequences integrity with node sku-audit.js`
           console.error('[intake]', msg)
-          if (!bgMode) alert(msg)
+          if (!bgMode) toast(msg, 'info')
           throw new Error(msg)
         }
       }
@@ -12002,7 +12135,7 @@ async function executeIntake(snapshot = null) {
     const destDir = `${cfg.hausjup}/${lotFolder}/${folderName}`
     console.log('[executeIntake] destDir:', destDir)
     console.log('[executeIntake] files to rename:', d.files)
-    if (!cfg.hausjup) { alert('Shipping folder (cfg.hausjup) is not configured — check Settings'); throw new Error('hausjup not configured') }
+    if (!cfg.hausjup) { toast('Shipping folder (cfg.hausjup) is not configured — check Settings', 'error'); throw new Error('hausjup not configured') }
     _intakeProgress('Creating folder…', destDir.split('/').pop())
     const mkdirR = await window.haus.shell.exec(`mkdir -p "${destDir}"`)
     if (mkdirR?.err) console.error('[executeIntake] mkdir error:', mkdirR.err)
@@ -12248,7 +12381,7 @@ async function executeIntake(snapshot = null) {
   }
   } catch(e) {
     console.error('[executeIntake] ERROR:', e)
-    if (!bgMode) { alert('Intake error: ' + (e.message || e)) }
+    if (!bgMode) { toast('Intake error: ' + (e.message || e), 'error') }
     else {
       snapshot.batchIndices.forEach(bi => { if (intakeDrops[bi]) intakeDrops[bi]._bgStatus = 'error' })
       const job = _bgJobs.find(j => j.snapshotId === snapshot.id)
@@ -12696,7 +12829,7 @@ function closeNewAssignmentModal() {
 }
 function createAssignment() {
   const title = document.getElementById('na-title').value.trim()
-  if (!title) { alert('Title is required'); return }
+  if (!title) { toast('Title is required', 'error'); return }
   const id = 'A' + String(ASSIGNMENTS.length + 1).padStart(3, '0')
   ASSIGNMENTS.unshift({
     id, title,
@@ -12853,7 +12986,7 @@ function showPlaylistMenu(e, id, name, projectId) {
   menu.querySelector('[data-action="move"]').addEventListener('click', async () => {
     _dismissMenu()
     const projects = await pgQ('SELECT id, name FROM projects WHERE id != $1 ORDER BY name', [projectId])
-    if (!projects?.length) { alert('No other projects to move to.'); return }
+    if (!projects?.length) { toast('No other projects to move to.', 'info'); return }
     const modal = document.createElement('div')
     modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;display:flex;align-items:center;justify-content:center'
     modal.innerHTML = `<div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;padding:20px;width:280px;display:flex;flex-direction:column;gap:12px">
@@ -12897,6 +13030,7 @@ async function loadTodayPlaylists() {
     JOIN projects pr ON pr.id = p.project_id
     ORDER BY pr.name, p.name
   `)
+  if (pgFailBox(panel, rows, 'playlists', 'loadTodayPlaylists()')) return
   if (!rows || !rows.length) {
     panel.innerHTML = '<div style="padding:14px;font-size:12px;color:var(--text3)">No playlists yet</div>'
     return
@@ -13096,7 +13230,9 @@ async function showAddLotToProjectModal(projectId) {
         <input id="lot-search-input" placeholder="Search lots…" style="width:100%;height:30px;padding:0 10px;border:1px solid var(--border2);border-radius:var(--radius);background:var(--bg3);color:var(--text);font-size:12px;box-sizing:border-box">
       </div>
       <div id="lot-pick-list" style="overflow-y:auto;flex:1;padding:6px 0">
-        ${(unassigned||[]).length === 0
+        ${pgFailed(unassigned)
+          ? '<div style="padding:20px;text-align:center;font-size:12px;color:var(--red-text)">Couldn\'t load lots — the query failed.</div>'
+          : (unassigned||[]).length === 0
           ? '<div style="padding:20px;text-align:center;font-size:12px;color:var(--text3)">No unassigned lots found</div>'
           : (unassigned||[]).map(l => `
             <div class="lot-pick-row" data-lotid="${l.lot_id}" data-name="${(l.lot_name||'').toLowerCase()}"
@@ -13156,14 +13292,14 @@ async function createPlaylist(projectId) {
       const r = await pgQ('INSERT INTO playlists (project_id, name) VALUES ($1,$2)', [projectId, name.trim()])
       if (!Array.isArray(r)) {
         console.error('[createPlaylist] INSERT failed')
-        alert('Error creating playlist')
+        toast('Error creating playlist', 'error')
         return
       }
       console.log(`[createPlaylist] created playlist "${name.trim()}" in project ${projectId}`)
       loadPlaylistsForProject(projectId)
     } catch (e) {
       console.error(`[createPlaylist] exception: ${e.message}`)
-      alert(`Error creating playlist: ${e.message}`)
+      toast(`Error creating playlist: ${e.message}`, 'error')
     }
   })
 }
@@ -13174,7 +13310,7 @@ async function deletePlaylist(id) {
       const r = await pgQ('DELETE FROM playlists WHERE id=$1', [id])
       if (!Array.isArray(r)) {
         console.error(`[deletePlaylist] DELETE failed for playlist ${id}`)
-        alert('Error deleting playlist')
+        toast('Error deleting playlist', 'error')
         return
       }
       console.log(`[deletePlaylist] deleted playlist ${id}`)
@@ -13182,7 +13318,7 @@ async function deletePlaylist(id) {
       if (currentProjectId) loadPlaylistsForProject(currentProjectId)
     } catch (e) {
       console.error(`[deletePlaylist] exception: ${e.message}`)
-      alert(`Error deleting playlist: ${e.message}`)
+      toast(`Error deleting playlist: ${e.message}`, 'error')
     }
   })
 }
@@ -13226,7 +13362,7 @@ async function selectProjectLot(lotId) {
 
     if (!Array.isArray(lotRows) || !Array.isArray(trackRows)) {
       console.error(`[selectProjectLot] failed to load lot ${lotId}: lotRows=${Array.isArray(lotRows)}, trackRows=${Array.isArray(trackRows)}`)
-      alert('Error loading lot tracks')
+      toast('Error loading lot tracks', 'error')
       return
     }
 
@@ -13246,7 +13382,7 @@ async function selectProjectLot(lotId) {
     renderPlaylistTrackList()
   } catch (e) {
     console.error(`[selectProjectLot] exception: ${e.message}`)
-    alert(`Error loading lot: ${e.message}`)
+    toast(`Error loading lot: ${e.message}`, 'error')
   }
 }
 
@@ -13286,7 +13422,7 @@ async function selectPlaylist(id) {
     `, [id])
     if (!Array.isArray(rows)) {
       console.error(`[selectPlaylist] failed to load tracks for playlist ${id}`)
-      alert('Error loading playlist tracks')
+      toast('Error loading playlist tracks', 'error')
       return
     }
     playlistTracks = rows
@@ -13295,7 +13431,7 @@ async function selectPlaylist(id) {
     renderPlaylistTrackList()
   } catch (e) {
     console.error(`[selectPlaylist] exception: ${e.message}`)
-    alert(`Error loading playlist: ${e.message}`)
+    toast(`Error loading playlist: ${e.message}`, 'error')
   }
 }
 
@@ -13382,6 +13518,7 @@ async function selectPlaylistTrack(idx) {
 
 async function removeFromPlaylist(skuRoot) {
   if (!currentPlaylistId) return
+  if (!(await hausConfirm(`Remove ${skuRoot} from this playlist?`, { okLabel: 'Remove' }))) return
   await pgQ('DELETE FROM playlist_tracks WHERE playlist_id=$1 AND sku_root=$2', [currentPlaylistId, skuRoot])
 
   // If we're in collection view building, refresh sidebar; otherwise navigate
@@ -13633,7 +13770,7 @@ async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
     const maxRes = await pgQ('SELECT COALESCE(MAX(position),0)+1 as next FROM playlist_tracks WHERE playlist_id=$1', [currentPlaylistId])
     if (!Array.isArray(maxRes)) {
       console.error(`[addTrackToCurrentPlaylist] failed to fetch max position for playlist ${currentPlaylistId}`)
-      alert('Error adding track')
+      toast('Error adding track', 'error')
       return
     }
     const pos = maxRes?.[0]?.next || 1
@@ -13642,7 +13779,7 @@ async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
     const insertRes = await pgQ('INSERT INTO playlist_tracks (playlist_id, sku_root, position) VALUES ($1,$2,$3) ON CONFLICT (playlist_id,sku_root) DO NOTHING', [currentPlaylistId, skuRoot, pos])
     if (!Array.isArray(insertRes)) {
       console.error(`[addTrackToCurrentPlaylist] INSERT failed for ${skuRoot} in playlist ${currentPlaylistId}`)
-      alert('Error adding track to playlist')
+      toast('Error adding track to playlist', 'error')
       return
     }
 
@@ -13680,7 +13817,7 @@ async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
     console.log(`[addTrackToCurrentPlaylist] added ${skuRoot} to playlist ${currentPlaylistId}`)
   } catch (e) {
     console.error(`[addTrackToCurrentPlaylist] exception: ${e.message}`)
-    alert(`Error adding track: ${e.message}`)
+    toast(`Error adding track: ${e.message}`, 'error')
   }
 }
 
@@ -13688,7 +13825,7 @@ async function addTrackToCurrentPlaylist(skuRoot, rowEl) {
 
 // ─── Add to Playlist from Collection ──────────────────────────────────────
 async function showAddToPlaylistModal(skuRoot) {
-  if (!pgConnected) { alert('Not connected to database.'); return }
+  if (!pgConnected) { toast('Not connected to database.', 'error'); return }
 
   // Fast-add: if we already have an active playlist context, skip the dialog entirely
   if (activePlaylistName && currentPlaylistId) {
@@ -13775,7 +13912,7 @@ async function showAddToPlaylistModal(skuRoot) {
   }
 
   const projects = await pgQ('SELECT id, name FROM projects ORDER BY name')
-  if (!Array.isArray(projects) || !projects.length) { alert('No projects yet — create one in the Projects section first.'); return }
+  if (!Array.isArray(projects) || !projects.length) { toast('No projects yet — create one in the Projects section first.', 'info'); return }
 
   const modal = document.createElement('div')
   modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:99999;display:flex;align-items:center;justify-content:center'
@@ -13884,18 +14021,55 @@ function hausPrompt(message, cb, opts = {}) {
   input.addEventListener('keydown', e => { if(e.key==='Enter') submit(); if(e.key==='Escape') modal.remove() })
 }
 
-function hausConfirm(message, cb) {
-  const modal = document.createElement('div')
-  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center'
-  modal.innerHTML = `<div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;padding:20px;width:300px">
-    <div style="font-size:13px;margin-bottom:16px">${message}</div>
-    <div style="display:flex;gap:8px;justify-content:flex-end">
-      <button class="btn" onclick="this.closest('[style*=fixed]').remove()">Cancel</button>
-      <button class="btn" style="background:var(--red,#e5484d);color:#fff" id="haus-confirm-ok">Delete</button>
-    </div>
-  </div>`
-  document.body.appendChild(modal)
-  modal.querySelector('#haus-confirm-ok').addEventListener('click', () => { modal.remove(); cb() })
+// Confirmation dialog. Returns a Promise<boolean>, and still accepts the
+// callback form the three original call sites use.
+//
+// Changes from the original: the message was interpolated into innerHTML
+// unescaped (it now goes in via textContent — these strings carry playlist and
+// project names); the OK button was hardcoded to "Delete" for every prompt; and
+// there was no way to dismiss with the keyboard or by clicking the backdrop.
+//
+//   if (!(await hausConfirm('Delete this?', { okLabel: 'Delete' }))) return
+//   hausConfirm('Delete this?', () => { ... })            // legacy form
+function hausConfirm(message, optsOrCb, maybeCb) {
+  const cb   = typeof optsOrCb === 'function' ? optsOrCb : maybeCb
+  const opts = typeof optsOrCb === 'function' ? {} : (optsOrCb || {})
+  const okLabel = opts.okLabel || 'Delete'
+  const danger  = opts.danger !== false
+
+  return new Promise(resolve => {
+    const modal = document.createElement('div')
+    modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.5);z-index:99999;display:flex;align-items:center;justify-content:center'
+    modal.innerHTML = `<div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;padding:20px;width:320px">
+      <div class="hc-msg" style="font-size:13px;margin-bottom:16px;line-height:1.5;white-space:pre-wrap"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn" id="haus-confirm-cancel">Cancel</button>
+        <button class="btn" id="haus-confirm-ok"${danger ? ' style="background:var(--red,#e5484d);color:#fff"' : ''}></button>
+      </div>
+    </div>`
+    modal.querySelector('.hc-msg').textContent = String(message == null ? '' : message)
+    modal.querySelector('#haus-confirm-ok').textContent = okLabel
+
+    let settled = false
+    const done = (ok) => {
+      if (settled) return
+      settled = true
+      document.removeEventListener('keydown', onKey, true)
+      modal.remove()
+      if (ok && cb) cb()
+      resolve(ok)
+    }
+    const onKey = (e) => {
+      if (e.key === 'Escape') { e.preventDefault(); done(false) }
+      else if (e.key === 'Enter') { e.preventDefault(); done(true) }
+    }
+    modal.querySelector('#haus-confirm-ok').addEventListener('click', () => done(true))
+    modal.querySelector('#haus-confirm-cancel').addEventListener('click', () => done(false))
+    modal.addEventListener('click', e => { if (e.target === modal) done(false) })
+    document.addEventListener('keydown', onKey, true)
+    document.body.appendChild(modal)
+    modal.querySelector('#haus-confirm-ok').focus()
+  })
 }
 
 // ─── Playlist Export ───────────────────────────────────────────────────────
@@ -13939,7 +14113,7 @@ async function exportPlaylistAvidComments() {
      ORDER BY pt.position, pt.id`,
     [currentPlaylistId]
   )
-  if (!rows || !rows.length) { alert('No tracks in this playlist.'); return }
+  if (!rows || !rows.length) { toast('No tracks in this playlist.', 'info'); return }
 
   const q = v => '"' + String(v ?? '').replace(/"/g, '""') + '"'
   const lines = [['SKU','TITLE','COMMENTS'].map(q).join(',')]
@@ -14084,7 +14258,7 @@ async function runExport() {
   const stemsOpt = document.querySelector('input[name="exp-stems"]:checked')?.value || 'full'
   const ipOpt    = document.querySelector('input[name="exp-ip"]:checked')?.value || 'none'
 
-  if (!_exportFolder) { alert('Please select a destination folder.'); return }
+  if (!_exportFolder) { toast('Please select a destination folder.', 'info'); return }
 
   const goBtn     = document.getElementById('exp-go-btn')
   const cancelBtn = document.getElementById('exp-cancel-btn')
@@ -14348,6 +14522,7 @@ async function loadTodos() {
     `)
 
     const container = document.getElementById('todos-container')
+    if (pgFailBox(container, todos, 'tasks', 'loadTodos()')) return
     if (!todos || todos.length === 0) {
       container.innerHTML = '<div style="font-size:12px;color:var(--text3);text-align:center;padding:20px 10px">No tasks</div>'
       return
@@ -14385,6 +14560,7 @@ async function toggleTodo(id, done) {
 }
 
 async function deleteTodo(id) {
+  if (!(await hausConfirm('Delete this task?'))) return
   await pgQ('DELETE FROM todos WHERE id=$1', [id])
   await loadTodos()
 }
@@ -14424,7 +14600,7 @@ function stopTodayRefresh() {
 async function handleCheckB2Click() {
   const tracks = currentDisplayTracks || []
   if (!tracks.length) {
-    alert('No tracks to check. Load the collection first.')
+    toast('No tracks to check. Load the collection first.', 'info')
     return
   }
 
@@ -14453,7 +14629,7 @@ function handleRefreshB2Cache() {
       statusEl.style.display = 'none'
     }, 3000)
   } else {
-    alert('B2 cache cleared')
+    toast('B2 cache cleared', 'info')
   }
   window.b2Checker?.clearCache()
 }

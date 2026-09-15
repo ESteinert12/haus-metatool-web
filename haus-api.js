@@ -66,6 +66,8 @@
   const auth = {
     login:          (username, password)            => _post('/api/auth/login',           { username, password }),
     changePassword: (username, oldPw, newPw)        => _post('/api/auth/change-password', { username, oldPassword: oldPw, newPassword: newPw }),
+    logout:         ()                              => _post('/api/auth/logout',          {}),
+    me:             ()                              => _get('/api/auth/me'),
   }
 
   // ── Backblaze B2 ────────────────────────────────────────────────────────
