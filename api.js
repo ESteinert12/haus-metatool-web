@@ -33,7 +33,10 @@ const multer     = require('multer')
 
 const app    = express()
 const PORT   = process.env.PORT || 9999 
-const upload = multer({ dest: os.tmpdir() })
+// 2GB cap -- generous for uncompressed WAV masters/stems, but bounded so a
+// mistaken or malicious upload can't run the server out of memory (every
+// route below reads the whole file into a Buffer before forwarding it to B2).
+const upload = multer({ dest: os.tmpdir(), limits: { fileSize: 2 * 1024 * 1024 * 1024 } })
 
 // ─── Middleware ────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '50mb' }))
@@ -1334,7 +1337,7 @@ app.post('/api/artist/submissions', upload.single('file'), async (req, res) => {
     }
   }
   try {
-    const fileBuffer = fs.readFileSync(tempPath)
+    const fileBuffer = await fs.promises.readFile(tempPath)
     if (fileBuffer.length < 1024) {
       try { fs.unlinkSync(tempPath) } catch {}
       return res.json({ ok: false, error: `refusing to upload a ${fileBuffer.length}-byte file — looks empty` })
@@ -1650,22 +1653,26 @@ app.post('/api/fs/write-file', (req, res) => {
   } catch { res.json(false) }
 })
 
-app.post('/api/fs/folder-stats', (req, res) => {
+app.post('/api/fs/folder-stats', async (req, res) => {
   const dirPath = _safeRead(req.body.dirPath)
   if (!dirPath) return res.json({ audioCount: 0, totalCount: 0, folderCount: 0 })
   try {
     const audioExts = ['.wav', '.mp3', '.aiff', '.aif']
     let audioCount = 0, totalCount = 0, folderCount = 0
-    const walk = (dir) => {
-      const items = fs.readdirSync(dir, { withFileTypes: true })
+    // Async walk -- this folder can live on Dropbox's virtual filesystem, where
+    // readdir latency is unpredictable. A synchronous walk blocks Node's single
+    // event loop for however long that takes, freezing every other request on
+    // the server for the duration. fs.promises yields the loop between calls.
+    const walk = async (dir) => {
+      const items = await fs.promises.readdir(dir, { withFileTypes: true })
       for (const item of items) {
         if (item.name.startsWith('.')) continue
         const full = path.join(dir, item.name)
-        if (item.isDirectory()) { folderCount++; walk(full) }
+        if (item.isDirectory()) { folderCount++; await walk(full) }
         else { totalCount++; if (audioExts.includes(path.extname(item.name).toLowerCase())) audioCount++ }
       }
     }
-    walk(dirPath)
+    await walk(dirPath)
     res.json({ audioCount, totalCount, folderCount })
   } catch { res.json({ audioCount: 0, totalCount: 0, folderCount: 0 }) }
 })
@@ -3167,7 +3174,7 @@ app.post('/api/b2/upload-file', upload.single('file'), async (req, res) => {
   }
   if (!sourcePath) return res.json({ ok: false, error: 'No file received' })
   try {
-    const fileBuffer = fs.readFileSync(sourcePath)
+    const fileBuffer = await fs.promises.readFile(sourcePath)
     // Refuse implausibly small audio. This is the check that would have caught
     // the path-as-payload bug on the first upload instead of after the fact.
     if (/\.(wav|mp3|aif|aiff)$/i.test(b2FileName || '') && fileBuffer.length < 1024) {
@@ -5197,6 +5204,20 @@ app.delete('/api/intake/draft/:key', (req, res) => {
   const { key } = req.params
   delete intakeDrafts[key]
   res.json({ ok: true })
+})
+
+// ─── Error handler ───────────────────────────────────────────────────────
+// Registered after every route. Multer calls next(err) when upload.single()
+// rejects a file over the size limit set above; without this handler that
+// error -- and any other uncaught one -- falls through to Express's default
+// HTML error page instead of the { ok: false, error } JSON shape every route
+// here returns.
+app.use((err, req, res, next) => {
+  if (err && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({ ok: false, error: 'File is too large (2GB limit)' })
+  }
+  console.error('[unhandled]', err)
+  res.status(500).json({ ok: false, error: err?.message || 'Server error' })
 })
 
 // ─── Start ─────────────────────────────────────────────────────────────────
