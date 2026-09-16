@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>HAUS — Client Portal</title>
+<title>HAUS — Artist Portal</title>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap">
 <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
 <style>
@@ -52,7 +52,7 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 #app-shell{flex:1;display:none;overflow:hidden}
 #app-shell.visible{display:flex}
 
-/* Sidebar (mirrors index.html's admin sidebar) */
+/* Sidebar (mirrors client-portal.html / index.html's admin sidebar) */
 #sidebar{width:210px;min-width:210px;background:var(--navy);display:flex;flex-direction:column;height:100%;overflow-y:auto}
 .sidebar-logo{display:block;padding:16px 14px 10px;opacity:0.9}
 .sidebar-logo img{width:100%;max-width:150px}
@@ -73,7 +73,7 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 #user-menu .um-item:hover{background:var(--bg2)}
 #user-menu .um-item.danger{color:var(--red-text)}
 
-/* Main + topbar (mirrors index.html's #main/.topbar) */
+/* Main + topbar */
 #main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg)}
 .topbar{display:flex;align-items:center;gap:10px;padding:0 20px;height:48px;border-bottom:0.5px solid var(--border);background:var(--teal);flex-shrink:0}
 .topbar h1{font-size:15px;font-weight:600;color:var(--navy)}
@@ -96,34 +96,29 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 .rep-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;align-items:center;gap:12px;max-width:420px}
 .rep-card .avatar-sm{background:var(--navy)}
 
-/* ── List rows shared by Pitches/Briefs/Licenses/Library ── */
+/* ── List rows shared by Assignments/Submissions/Catalog ── */
 .item-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px}
 .item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
 .item-title{font-size:14px;font-weight:600}
 .item-meta{font-size:12px;color:var(--text3);margin-top:2px}
-.item-actions{display:flex;gap:8px;margin-top:10px}
 
-/* ── Briefs form ── */
-.brief-form{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
-.brief-form .full{grid-column:1/-1}
+/* ── Submission form ── */
+.submit-form{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;margin-bottom:20px;display:grid;grid-template-columns:1fr 1fr;gap:12px}
+.submit-form .full{grid-column:1/-1}
+.stem-check-grid{display:flex;flex-wrap:wrap;gap:10px}
+.stem-check{display:flex;align-items:center;gap:5px;font-size:12px;color:var(--text2);background:var(--bg);border:0.5px solid var(--border2);border-radius:var(--radius-sm);padding:5px 9px;cursor:pointer}
+.stem-check input{margin:0}
+#submit-status{font-size:12px;margin-top:8px}
 
-/* ── Library ── */
-.library-bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px}
-.library-bar > div{min-width:160px}
-.library-bar .full{flex:1;min-width:220px}
+/* ── Catalog / Payouts ── */
 .track-row{display:flex;align-items:center;gap:12px;padding:9px 12px;border-bottom:0.5px solid var(--border);font-size:13px}
 .track-row:hover{background:var(--bg2)}
 .track-row .tr-title{font-weight:500;flex:1;min-width:0}
 .track-row .tr-meta{color:var(--text3);font-size:11px}
-
-/* ── Playlists ── */
-.playlist-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
-.playlist-card-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:0.5px solid var(--border)}
-.playlist-card-head .name{font-size:14px;font-weight:600;flex:1}
-.playlist-track-row{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;font-size:12px;border-bottom:0.5px solid var(--border)}
-.playlist-track-row:last-child{border-bottom:none}
-.icon-btn{background:none;border:none;cursor:pointer;color:var(--text3);font-size:14px;padding:2px}
-.icon-btn:hover{color:var(--red-text)}
+.split-bar{display:flex;height:8px;border-radius:4px;overflow:hidden;margin:6px 0 8px;max-width:280px}
+.split-bar span{height:100%}
+.split-legend{display:flex;gap:12px;font-size:11px;color:var(--text3);flex-wrap:wrap}
+.split-legend .sw{display:inline-block;width:8px;height:8px;border-radius:2px;margin-right:4px;vertical-align:middle}
 
 /* ── Messages ── */
 #messages-scroll{flex:1;overflow-y:auto;display:flex;flex-direction:column;gap:10px;padding-bottom:12px}
@@ -138,16 +133,16 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 </head>
 <body>
 
-<div id="drag"><span id="drag-title">HAUS Client Portal</span></div>
+<div id="drag"><span id="drag-title">HAUS Artist Portal</span></div>
 
 <!-- ─── Login ──────────────────────────────────────────────── -->
 <div id="login-screen">
   <div class="login-card">
     <img class="login-logo-img" src="/assets/atmosphere-logo.svg" alt="Atmosphere" style="filter:invert(1) brightness(0.3)">
-    <div class="login-sub">Client Portal — sign in to review pitches, briefs, and licenses</div>
+    <div class="login-sub">Artist Portal — sign in to see assignments, submit tracks, and check status</div>
     <div id="login-error"></div>
     <label class="form-label">Email</label>
-    <input id="login-email" type="email" class="form-input" placeholder="you@company.com" style="margin-bottom:12px" autocomplete="username">
+    <input id="login-email" type="email" class="form-input" placeholder="you@example.com" style="margin-bottom:12px" autocomplete="username">
     <label class="form-label">Password</label>
     <input id="login-password" type="password" class="form-input" placeholder="••••••••" style="margin-bottom:18px" autocomplete="current-password">
     <button id="login-btn" class="btn primary" style="width:100%;justify-content:center;padding:10px" onclick="doLogin()">Sign in</button>
@@ -173,13 +168,12 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 <div id="app-shell">
   <div id="sidebar">
     <a class="sidebar-logo"><img src="/assets/atmosphere-logo.svg" alt="Atmosphere"></a>
-    <div class="nav-section">Client Portal</div>
+    <div class="nav-section">Artist Portal</div>
     <div class="nav-item active" data-tab="overview" onclick="switchTab('overview',this)"><i class="ti ti-layout-dashboard"></i> Overview</div>
-    <div class="nav-item" data-tab="pitches" onclick="switchTab('pitches',this)"><i class="ti ti-send"></i> Pitches</div>
-    <div class="nav-item" data-tab="briefs" onclick="switchTab('briefs',this)"><i class="ti ti-clipboard-text"></i> Briefs</div>
-    <div class="nav-item" data-tab="licenses" onclick="switchTab('licenses',this)"><i class="ti ti-certificate"></i> My Licenses</div>
-    <div class="nav-item" data-tab="library" onclick="switchTab('library',this)"><i class="ti ti-library"></i> Library</div>
-    <div class="nav-item" data-tab="playlists" onclick="switchTab('playlists',this)"><i class="ti ti-playlist"></i> Playlists</div>
+    <div class="nav-item" data-tab="assignments" onclick="switchTab('assignments',this)"><i class="ti ti-clipboard-text"></i> Assignments</div>
+    <div class="nav-item" data-tab="submissions" onclick="switchTab('submissions',this)"><i class="ti ti-upload"></i> My Submissions</div>
+    <div class="nav-item" data-tab="catalog" onclick="switchTab('catalog',this)"><i class="ti ti-library"></i> My Catalog</div>
+    <div class="nav-item" data-tab="payouts" onclick="switchTab('payouts',this)"><i class="ti ti-receipt"></i> Payouts</div>
     <div class="nav-item" data-tab="messages" onclick="switchTab('messages',this)"><i class="ti ti-message-circle"></i> Messages <span id="msg-badge" class="nav-badge" style="display:none"></span></div>
     <div class="sidebar-bottom">
       <div class="user-row" onclick="toggleUserMenu(event)">
@@ -202,12 +196,11 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
   <div class="section active" id="section-overview">
     <div class="section-head"><h2>Overview</h2></div>
     <div class="stat-grid">
-      <div class="stat-card"><div class="n" id="stat-pitches">—</div><div class="lbl">Pending pitches</div></div>
-      <div class="stat-card"><div class="n" id="stat-briefs">—</div><div class="lbl">Active briefs</div></div>
-      <div class="stat-card"><div class="n" id="stat-licenses">—</div><div class="lbl">Active licenses</div></div>
+      <div class="stat-card"><div class="n" id="stat-assignments">—</div><div class="lbl">Open assignments</div></div>
+      <div class="stat-card"><div class="n" id="stat-submissions">—</div><div class="lbl">Submissions in review</div></div>
       <div class="stat-card"><div class="n" id="stat-messages">—</div><div class="lbl">Unread messages</div></div>
     </div>
-    <div class="rep-card" id="rep-card" style="display:none">
+    <div class="rep-card">
       <div class="avatar-sm" style="width:36px;height:36px;font-size:13px" id="rep-avatar"></div>
       <div>
         <div style="font-size:13px;font-weight:600" id="rep-name"></div>
@@ -216,75 +209,60 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
     </div>
   </div>
 
-  <!-- Pitches -->
-  <div class="section" id="section-pitches">
+  <!-- Assignments -->
+  <div class="section" id="section-assignments">
     <div class="section-head">
-      <h2>Pitches</h2>
-      <span class="section-sub">Tracks HAUS has sent for consideration</span>
+      <h2>Assignments</h2>
+      <span class="section-sub">Briefs HAUS has sent you to write for</span>
     </div>
-    <div id="pitches-list"></div>
+    <div id="assignments-list"></div>
   </div>
 
-  <!-- Briefs -->
-  <div class="section" id="section-briefs">
+  <!-- Submissions -->
+  <div class="section" id="section-submissions">
     <div class="section-head">
-      <h2>Briefs</h2>
-      <span class="section-sub">Tell HAUS what you're looking for</span>
+      <h2>My Submissions</h2>
+      <span class="section-sub">Confirm title, key, and stems before a track goes any further — this doesn't touch the catalog by itself</span>
     </div>
-    <div class="brief-form">
-      <div class="full"><label class="form-label">Title</label><input id="brief-title" class="form-input" placeholder="e.g. Season 4 opening credits"></div>
-      <div class="full"><label class="form-label">Description</label><textarea id="brief-description" class="form-input" rows="3" placeholder="What's the scene, tone, use case?"></textarea></div>
-      <div><label class="form-label">Mood tags (comma-separated)</label><input id="brief-moods" class="form-input" placeholder="tense, driving, dark"></div>
-      <div><label class="form-label">Budget type</label>
-        <select id="brief-budget" class="form-input">
-          <option value="">—</option>
-          <option>Sync+Master</option>
-          <option>Blanket</option>
-        </select>
+    <form class="submit-form" id="submit-form" onsubmit="return submitTrack(event)">
+      <div class="full">
+        <label class="form-label">Audio file</label>
+        <input id="sub-file" type="file" class="form-input" accept="audio/*,.wav,.mp3,.aif,.aiff" required>
       </div>
-      <div><label class="form-label">Due date</label><input id="brief-due" type="date" class="form-input"></div>
-      <div style="display:flex;align-items:flex-end"><button class="btn primary" onclick="submitBrief()"><i class="ti ti-plus"></i> Send brief</button></div>
-    </div>
-    <div id="briefs-list"></div>
-  </div>
-
-  <!-- Licenses -->
-  <div class="section" id="section-licenses">
-    <div class="section-head">
-      <h2>My Licenses</h2>
-      <span class="section-sub">Tracks you've licensed, with formats and expiry</span>
-    </div>
-    <div id="licenses-list"></div>
-  </div>
-
-  <!-- Library -->
-  <div class="section" id="section-library">
-    <div class="section-head">
-      <h2>Library</h2>
-      <span class="section-sub">Browse the full HAUS catalog and add tracks to a playlist</span>
-    </div>
-    <div class="library-bar">
-      <div class="full"><label class="form-label">Search</label><input id="lib-q" class="form-input" placeholder="Track title…" oninput="debouncedLibrarySearch()"></div>
-      <div><label class="form-label">Genre</label><select id="lib-genre" class="form-input" onchange="searchLibrary()"><option value="">All genres</option></select></div>
-      <div><label class="form-label">Mood</label><select id="lib-mood" class="form-input" onchange="searchLibrary()"><option value="">All moods</option></select></div>
-      <div><label class="form-label">Adding to</label>
-        <select id="lib-target-playlist" class="form-input">
-          <option value="">Select a playlist…</option>
-          <option value="__new__">+ New playlist…</option>
-        </select>
+      <div><label class="form-label">Title</label><input id="sub-title" class="form-input" placeholder="Track title" required></div>
+      <div><label class="form-label">Key</label><input id="sub-key" class="form-input" placeholder="e.g. Cm, E"></div>
+      <div><label class="form-label">BPM</label><input id="sub-bpm" type="number" class="form-input" placeholder="e.g. 120"></div>
+      <div><label class="form-label">Assignment (optional)</label>
+        <select id="sub-assignment" class="form-input"><option value="">Not tied to an assignment</option></select>
       </div>
-    </div>
-    <div id="library-results" style="border:0.5px solid var(--border);border-radius:var(--radius);background:var(--bg3);overflow:hidden"></div>
+      <div class="full">
+        <label class="form-label">Stems included</label>
+        <div class="stem-check-grid" id="stem-checks"></div>
+      </div>
+      <div class="full" style="display:flex;align-items:center;gap:10px">
+        <button type="submit" class="btn primary" id="submit-btn"><i class="ti ti-upload"></i> Confirm &amp; submit</button>
+        <span id="submit-status"></span>
+      </div>
+    </form>
+    <div id="submissions-list"></div>
   </div>
 
-  <!-- Playlists -->
-  <div class="section" id="section-playlists">
+  <!-- My Catalog -->
+  <div class="section" id="section-catalog">
     <div class="section-head">
-      <h2>Playlists</h2>
-      <span class="section-sub">Yours to build — add tracks from the Library tab</span>
-      <button class="btn primary" style="margin-left:auto" onclick="createPlaylistPrompt()"><i class="ti ti-plus"></i> New playlist</button>
+      <h2>My Catalog</h2>
+      <span class="section-sub">Your tracks already live in the HAUS catalog</span>
     </div>
-    <div id="playlists-list"></div>
+    <div id="catalog-results" style="border:0.5px solid var(--border);border-radius:var(--radius);background:var(--bg3);overflow:hidden"></div>
+  </div>
+
+  <!-- Payouts -->
+  <div class="section" id="section-payouts">
+    <div class="section-head">
+      <h2>Payouts</h2>
+      <span class="section-sub">PRO registration status per track, and JUP splits where they apply</span>
+    </div>
+    <div id="payouts-list"></div>
   </div>
 
   <!-- Messages -->
@@ -301,16 +279,22 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 
 <script>
 let currentUser = null
-let PLAYLISTS_CACHE = []
-let libraryFacetsLoaded = false
-let libraryDebounceTimer = null
+// Per the Composer Guide (confirmed by Kyle 2026-09-16): STING, BUMPER, and
+// ALT each go up to 4 variants — base, a, b, c. NOTE: detectStemName() in
+// index.html currently only special-cases STINGa and collapses BUMPERa/b/c
+// and ALTa/b/c into the bare BUMPER/ALT stem name on intake — that's a real
+// gap in the admin intake code relative to this list, not something fixed
+// here (out of scope for the portal). Flagged separately for Kyle.
+const STEM_NAMES = [
+  'FULL','DNB','NoDNB','NoDrums','NoVox','NoLead','PIANO','GUITARS',
+  'STING','STINGa','STINGb','STINGc',
+  'BUMPER','BUMPERa','BUMPERb','BUMPERc',
+  'ALT','ALTa','ALTb','ALTc'
+]
+let ASSIGNMENTS_CACHE = []
 
 async function _post(path, body) {
   const r = await fetch(path, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(body||{}), credentials:'include' })
-  return r.json()
-}
-async function _del(path) {
-  const r = await fetch(path, { method:'DELETE', credentials:'include' })
   return r.json()
 }
 async function _get(path) {
@@ -321,6 +305,11 @@ function initials(name){ return (name||'?').split(/[\s.]+/).filter(Boolean).map(
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
 function fmtDate(s){ if(!s) return '—'; const d=new Date(s); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) }
 
+// Build stem checkboxes once
+document.getElementById('stem-checks').innerHTML = STEM_NAMES.map(s =>
+  `<label class="stem-check"><input type="checkbox" value="${s}"> ${s}</label>`
+).join('')
+
 // ── Login ──────────────────────────────────────────────────
 async function doLogin() {
   const btn   = document.getElementById('login-btn')
@@ -330,7 +319,7 @@ async function doLogin() {
   errEl.style.display = 'none'
   if (!email || !pw) { errEl.textContent = 'Email and password required.'; errEl.style.display = 'block'; return }
   btn.disabled = true; btn.textContent = 'Signing in…'
-  const r = await _post('/api/portal/auth/login', { email, password: pw })
+  const r = await _post('/api/artist/auth/login', { email, password: pw })
   btn.disabled = false; btn.textContent = 'Sign in'
   if (!r.ok) { errEl.textContent = r.error || 'Login failed.'; errEl.style.display = 'block'; return }
   onLoggedIn(r.user)
@@ -354,7 +343,7 @@ async function doChangePassword() {
   const oldPw = document.getElementById('pw-old').value
   const newPw = document.getElementById('pw-new').value
   errEl.style.display = 'none'
-  const r = await _post('/api/portal/auth/change-password', { oldPassword: oldPw, newPassword: newPw })
+  const r = await _post('/api/artist/auth/change-password', { oldPassword: oldPw, newPassword: newPw })
   if (!r.ok) { errEl.textContent = r.error || 'Could not set password.'; errEl.style.display = 'block'; return }
   currentUser.must_change_password = false
   document.getElementById('pw-screen').style.display = 'none'
@@ -365,11 +354,13 @@ function enterApp() {
   document.getElementById('app-shell').classList.add('visible')
   document.getElementById('user-avatar').textContent = initials(currentUser.display_name)
   document.getElementById('user-label').textContent = currentUser.display_name
+  document.getElementById('rep-avatar').textContent = initials(currentUser.haus_rep)
+  document.getElementById('rep-name').textContent = currentUser.haus_rep
   loadOverview()
 }
 
 async function doLogout() {
-  await _post('/api/portal/auth/logout')
+  await _post('/api/artist/auth/logout')
   location.reload()
 }
 
@@ -382,13 +373,13 @@ document.addEventListener('click', () => { document.getElementById('user-menu').
 
 // ── Session restore on refresh ────────────────────────────────
 ;(async () => {
-  const r = await _get('/api/portal/auth/me')
+  const r = await _get('/api/artist/auth/me')
   if (r.user) onLoggedIn(r.user)
 })()
 
 // ── Tabs ───────────────────────────────────────────────────
-const LOADERS = { overview: loadOverview, pitches: loadPitches, briefs: loadBriefs, licenses: loadLicenses, library: loadLibrary, playlists: loadPlaylists, messages: loadMessages }
-const TAB_TITLES = { overview: 'Overview', pitches: 'Pitches', briefs: 'Briefs', licenses: 'My Licenses', library: 'Library', playlists: 'Playlists', messages: 'Messages' }
+const LOADERS = { overview: loadOverview, assignments: loadAssignments, submissions: loadSubmissions, catalog: loadCatalog, payouts: loadPayouts, messages: loadMessages }
+const TAB_TITLES = { overview: 'Overview', assignments: 'Assignments', submissions: 'My Submissions', catalog: 'My Catalog', payouts: 'Payouts', messages: 'Messages' }
 function switchTab(name, btn) {
   document.querySelectorAll('.nav-item').forEach(t => t.classList.remove('active'))
   document.querySelectorAll('.section').forEach(s => s.classList.remove('active'))
@@ -400,237 +391,177 @@ function switchTab(name, btn) {
 
 // ── Overview ───────────────────────────────────────────────
 async function loadOverview() {
-  const r = await _get('/api/portal/overview')
+  const r = await _get('/api/artist/overview')
   if (!r.ok) return
-  document.getElementById('stat-pitches').textContent  = r.pendingPitches
-  document.getElementById('stat-briefs').textContent   = r.activeBriefs
-  document.getElementById('stat-licenses').textContent = r.activeLicenses
+  document.getElementById('stat-assignments').textContent = r.openAssignments
+  document.getElementById('stat-submissions').textContent = r.pendingSubmissions
   document.getElementById('stat-messages').textContent = r.unreadMessages
   if (r.unreadMessages > 0) {
     const b = document.getElementById('msg-badge'); b.textContent = r.unreadMessages; b.style.display = 'inline-block'
   } else {
     document.getElementById('msg-badge').style.display = 'none'
   }
-  if (r.client && r.client.haus_rep) {
-    document.getElementById('rep-card').style.display = 'flex'
-    document.getElementById('rep-avatar').textContent = initials(r.client.haus_rep)
-    document.getElementById('rep-name').textContent = r.client.haus_rep
-  }
 }
 
-// ── Pitches ────────────────────────────────────────────────
-async function loadPitches() {
-  const el = document.getElementById('pitches-list')
-  const r = await _get('/api/portal/pitches')
-  if (!r.ok || !r.pitches.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-send"></i><p>No pitches yet — HAUS will send tracks here for review.</p></div>`
+// ── Assignments ────────────────────────────────────────────
+async function loadAssignments() {
+  const el = document.getElementById('assignments-list')
+  const r = await _get('/api/artist/assignments')
+  if (!r.ok || !r.assignments.length) {
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-clipboard-text"></i><p>No assignments yet — HAUS will send briefs here.</p></div>`
+    ASSIGNMENTS_CACHE = []
+    populateAssignmentSelect()
     return
   }
-  const statusPill = s => s==='approved' ? '<span class="pill green">approved</span>' : s==='passed' ? '<span class="pill gray">passed</span>' : '<span class="pill amber">pending</span>'
-  el.innerHTML = r.pitches.map(p => `
+  ASSIGNMENTS_CACHE = r.assignments
+  populateAssignmentSelect()
+  const statusPill = s => s==='completed' ? '<span class="pill green">completed</span>' : s==='submitted' ? '<span class="pill blue">submitted</span>' : s==='cancelled' ? '<span class="pill gray">cancelled</span>' : '<span class="pill amber">open</span>'
+  el.innerHTML = r.assignments.map(a => `
     <div class="item-card">
       <div class="item-top">
         <div>
-          <div class="item-title">${esc(p.title)}</div>
-          <div class="item-meta">${esc(p.primary_genre_name||'—')} · ${esc(p.key||'—')} · ${p.bpm?p.bpm+' BPM':'—'}</div>
+          <div class="item-title">${esc(a.title)}</div>
+          <div class="item-meta">Due ${fmtDate(a.due_date)}</div>
         </div>
-        ${statusPill(p.status)}
+        ${statusPill(a.status)}
       </div>
-      ${p.rep_note ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">"${esc(p.rep_note)}"</div>` : ''}
-      ${p.status==='pending' ? `
-        <div class="item-actions">
-          <button class="btn primary" onclick="respondPitch(${p.pitch_id},'approved')"><i class="ti ti-check"></i> Approve</button>
-          <button class="btn" onclick="respondPitch(${p.pitch_id},'passed')"><i class="ti ti-x"></i> Pass</button>
-        </div>` : ''}
+      ${a.description ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">${esc(a.description)}</div>` : ''}
+      ${(a.mood_tags&&a.mood_tags.length) ? `<div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${a.mood_tags.map(t=>`<span class="pill gray">${esc(t)}</span>`).join('')}</div>` : ''}
     </div>`).join('')
 }
-async function respondPitch(id, status) {
-  const r = await _post(`/api/portal/pitches/${id}/respond`, { status })
-  if (r.ok) loadPitches()
+function populateAssignmentSelect() {
+  const sel = document.getElementById('sub-assignment')
+  const current = sel.value
+  sel.innerHTML = `<option value="">Not tied to an assignment</option>` +
+    ASSIGNMENTS_CACHE.filter(a => a.status === 'open').map(a => `<option value="${a.assignment_id}">${esc(a.title)}</option>`).join('')
+  if ([...sel.options].some(o => o.value === current)) sel.value = current
 }
 
-// ── Briefs ─────────────────────────────────────────────────
-async function loadBriefs() {
-  const el = document.getElementById('briefs-list')
-  const r = await _get('/api/portal/briefs')
-  if (!r.ok || !r.briefs.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-clipboard-text"></i><p>No briefs yet — send one above.</p></div>`
+// ── Submissions ────────────────────────────────────────────
+async function loadSubmissions() {
+  if (!ASSIGNMENTS_CACHE.length) await loadAssignments()
+  const el = document.getElementById('submissions-list')
+  const r = await _get('/api/artist/submissions')
+  if (!r.ok || !r.submissions.length) {
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-upload"></i><p>Nothing submitted yet — use the form above.</p></div>`
     return
   }
-  const statusPill = s => s==='delivered' ? '<span class="pill green">delivered</span>' : s==='active' ? '<span class="pill blue">active</span>' : '<span class="pill gray">draft</span>'
-  el.innerHTML = r.briefs.map(b => `
+  const statusPill = s => s==='accepted' ? '<span class="pill green">accepted</span>' : s==='rejected' ? '<span class="pill red">rejected</span>' : '<span class="pill amber">pending review</span>'
+  el.innerHTML = r.submissions.map(s => `
     <div class="item-card">
       <div class="item-top">
         <div>
-          <div class="item-title">${esc(b.title)}</div>
-          <div class="item-meta">${b.budget_type?esc(b.budget_type)+' · ':''}Due ${fmtDate(b.due_date)}</div>
+          <div class="item-title">${esc(s.title)}</div>
+          <div class="item-meta">${esc(s.key||'—')} · ${s.bpm?s.bpm+' BPM':'—'} · ${esc(s.original_filename||'')}</div>
         </div>
-        ${statusPill(b.status)}
+        ${statusPill(s.status)}
       </div>
-      ${b.description ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">${esc(b.description)}</div>` : ''}
-      ${(b.mood_tags&&b.mood_tags.length) ? `<div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${b.mood_tags.map(t=>`<span class="pill gray">${esc(t)}</span>`).join('')}</div>` : ''}
+      ${(s.stems&&s.stems.length) ? `<div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${s.stems.map(t=>`<span class="pill gray">${esc(t)}</span>`).join('')}</div>` : ''}
+      ${s.feedback_note ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">"${esc(s.feedback_note)}"</div>` : ''}
+      <div style="font-size:11px;color:var(--text3);margin-top:8px">Submitted ${fmtDate(s.created_at)}</div>
     </div>`).join('')
 }
-async function submitBrief() {
-  const title = document.getElementById('brief-title').value.trim()
-  if (!title) { alert('Title is required.'); return }
-  const description = document.getElementById('brief-description').value.trim()
-  const mood_tags = document.getElementById('brief-moods').value.split(',').map(s=>s.trim()).filter(Boolean)
-  const budget_type = document.getElementById('brief-budget').value
-  const due_date = document.getElementById('brief-due').value
-  const r = await _post('/api/portal/briefs', { title, description, mood_tags, budget_type, due_date: due_date || null })
-  if (!r.ok) { alert(r.error || 'Could not send brief.'); return }
-  document.getElementById('brief-title').value = ''
-  document.getElementById('brief-description').value = ''
-  document.getElementById('brief-moods').value = ''
-  document.getElementById('brief-budget').value = ''
-  document.getElementById('brief-due').value = ''
-  loadBriefs()
+async function submitTrack(e) {
+  e.preventDefault()
+  const fileInput = document.getElementById('sub-file')
+  const title = document.getElementById('sub-title').value.trim()
+  const statusEl = document.getElementById('submit-status')
+  const btn = document.getElementById('submit-btn')
+  if (!fileInput.files[0]) { statusEl.textContent = 'Choose a file first.'; statusEl.style.color = 'var(--red-text)'; return false }
+  if (!title) { statusEl.textContent = 'Title is required.'; statusEl.style.color = 'var(--red-text)'; return false }
+  const stems = [...document.querySelectorAll('#stem-checks input:checked')].map(c => c.value)
+
+  const fd = new FormData()
+  fd.append('file', fileInput.files[0])
+  fd.append('title', title)
+  fd.append('key', document.getElementById('sub-key').value.trim())
+  fd.append('bpm', document.getElementById('sub-bpm').value.trim())
+  fd.append('assignment_id', document.getElementById('sub-assignment').value)
+  fd.append('stems', JSON.stringify(stems))
+
+  btn.disabled = true; statusEl.style.color = 'var(--text3)'; statusEl.textContent = 'Uploading…'
+  try {
+    const r = await fetch('/api/artist/submissions', { method:'POST', body: fd, credentials:'include' })
+    const data = await r.json()
+    btn.disabled = false
+    if (!data.ok) { statusEl.textContent = data.error || 'Could not submit.'; statusEl.style.color = 'var(--red-text)'; return false }
+    statusEl.textContent = 'Submitted — HAUS will review it.'
+    statusEl.style.color = 'var(--green-text)'
+    document.getElementById('submit-form').reset()
+    loadSubmissions()
+    loadAssignments()
+    loadOverview()
+  } catch (err) {
+    btn.disabled = false
+    statusEl.textContent = 'Upload failed — check your connection and try again.'
+    statusEl.style.color = 'var(--red-text)'
+  }
+  return false
 }
 
-// ── Licenses ───────────────────────────────────────────────
-async function loadLicenses() {
-  const el = document.getElementById('licenses-list')
-  const r = await _get('/api/portal/licenses')
-  if (!r.ok || !r.licenses.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-certificate"></i><p>No licenses yet.</p></div>`
-    return
-  }
-  el.innerHTML = r.licenses.map(l => `
-    <div class="item-card">
-      <div class="item-top">
-        <div>
-          <div class="item-title">${esc(l.title)}</div>
-          <div class="item-meta">${esc(l.license_type)}${l.brief_title?' · '+esc(l.brief_title):''} · Expires ${fmtDate(l.expires_at)}</div>
-        </div>
-      </div>
-      <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">
-        ${(l.formats||[]).map(f=>`<span class="pill blue">${esc(f)}</span>`).join('')}
-      </div>
-      <div style="font-size:11px;color:var(--text3);margin-top:8px">Contact HAUS for download links.</div>
-    </div>`).join('')
-}
-
-// ── Library ────────────────────────────────────────────────
-async function loadLibrary() {
-  if (!libraryFacetsLoaded) {
-    const r = await _get('/api/portal/library?facets=true&limit=0')
-    if (r.ok && r.facets) {
-      const gSel = document.getElementById('lib-genre')
-      const mSel = document.getElementById('lib-mood')
-      r.facets.genres.forEach(g => gSel.insertAdjacentHTML('beforeend', `<option value="${esc(g)}">${esc(g)}</option>`))
-      r.facets.moods.forEach(m => mSel.insertAdjacentHTML('beforeend', `<option value="${esc(m)}">${esc(m)}</option>`))
-      libraryFacetsLoaded = true
-    }
-  }
-  if (!PLAYLISTS_CACHE.length) await refreshPlaylistsCache()
-  populateTargetPlaylistSelect()
-  searchLibrary()
-}
-function debouncedLibrarySearch() {
-  clearTimeout(libraryDebounceTimer)
-  libraryDebounceTimer = setTimeout(searchLibrary, 300)
-}
-async function searchLibrary() {
-  const q = document.getElementById('lib-q').value.trim()
-  const genre = document.getElementById('lib-genre').value
-  const mood = document.getElementById('lib-mood').value
-  const params = new URLSearchParams({ q, genre, mood, limit: '60' })
-  const r = await _get('/api/portal/library?' + params.toString())
-  const el = document.getElementById('library-results')
+// ── My Catalog ─────────────────────────────────────────────
+async function loadCatalog() {
+  const el = document.getElementById('catalog-results')
+  const r = await _get('/api/artist/catalog')
   if (!r.ok || !r.tracks.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-search"></i><p>No tracks match.</p></div>`
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-library"></i><p>Nothing in the catalog under your composer ID yet.</p></div>`
     return
   }
   el.innerHTML = r.tracks.map(t => `
     <div class="track-row">
-      <div class="tr-title">${esc(t.title)}</div>
+      <div class="tr-title">${esc(t.title)} ${t.is_jup ? '<span class="pill blue">JUP</span>' : ''}</div>
       <div class="tr-meta">${esc(t.primary_genre_name||'—')} · ${esc(t.key||'—')} · ${t.bpm?t.bpm+' BPM':'—'}</div>
-      <button class="btn" onclick="addToPlaylist('${esc(t.sku_root)}')"><i class="ti ti-plus"></i> Add</button>
+      <div class="tr-meta">${(t.stems||[]).map(esc).join(', ') || '—'}</div>
     </div>`).join('')
-}
-async function refreshPlaylistsCache() {
-  const r = await _get('/api/portal/playlists')
-  if (r.ok) PLAYLISTS_CACHE = r.playlists
-}
-function populateTargetPlaylistSelect() {
-  const sel = document.getElementById('lib-target-playlist')
-  const current = sel.value
-  sel.innerHTML = `<option value="">Select a playlist…</option>` +
-    PLAYLISTS_CACHE.map(p => `<option value="${p.playlist_id}">${esc(p.name)}</option>`).join('') +
-    `<option value="__new__">+ New playlist…</option>`
-  if (PLAYLISTS_CACHE.find(p => String(p.playlist_id) === current)) sel.value = current
-}
-async function addToPlaylist(skuRoot) {
-  let target = document.getElementById('lib-target-playlist').value
-  if (!target) { alert('Pick a playlist to add to first (top right of the filters).'); return }
-  if (target === '__new__') {
-    const name = prompt('New playlist name:')
-    if (!name || !name.trim()) return
-    const r = await _post('/api/portal/playlists', { name: name.trim() })
-    if (!r.ok) { alert(r.error || 'Could not create playlist.'); return }
-    await refreshPlaylistsCache()
-    populateTargetPlaylistSelect()
-    document.getElementById('lib-target-playlist').value = r.playlist.playlist_id
-    target = r.playlist.playlist_id
-  }
-  const r = await _post(`/api/portal/playlists/${target}/tracks`, { sku_root: skuRoot })
-  if (!r.ok) alert(r.error || 'Could not add track.')
 }
 
-// ── Playlists ──────────────────────────────────────────────
-async function loadPlaylists() {
-  await refreshPlaylistsCache()
-  renderPlaylists()
-}
-function renderPlaylists() {
-  const el = document.getElementById('playlists-list')
-  if (!PLAYLISTS_CACHE.length) {
-    el.innerHTML = `<div class="empty-state"><i class="ti ti-playlist"></i><p>No playlists yet — build one from the Library tab.</p></div>`
+// ── Payouts ────────────────────────────────────────────────
+async function loadPayouts() {
+  const el = document.getElementById('payouts-list')
+  const r = await _get('/api/artist/payouts')
+  if (!r.ok || !r.rows.length) {
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-receipt"></i><p>Nothing to show yet.</p></div>`
     return
   }
-  el.innerHTML = PLAYLISTS_CACHE.map(pl => `
-    <div class="playlist-card">
-      <div class="playlist-card-head">
-        <div class="name">${esc(pl.name)}</div>
-        <span class="section-sub">${pl.tracks.length} track${pl.tracks.length!==1?'s':''} · by ${esc(pl.created_by||'—')}</span>
-        <button class="icon-btn" onclick="deletePlaylist(${pl.playlist_id})" title="Delete playlist"><i class="ti ti-trash"></i></button>
+  const byTrack = {}
+  for (const row of r.rows) {
+    if (!byTrack[row.sku_root]) byTrack[row.sku_root] = { title: row.title, is_jup: row.is_jup, stems: [] }
+    byTrack[row.sku_root].stems.push(row)
+  }
+  const split = r.jupSplit
+  el.innerHTML = Object.values(byTrack).map(t => `
+    <div class="item-card">
+      <div class="item-top">
+        <div class="item-title">${esc(t.title)}</div>
+        ${t.is_jup ? '<span class="pill blue">JUP</span>' : '<span class="pill gray">standard</span>'}
       </div>
-      ${pl.tracks.map(t => `
-        <div class="playlist-track-row">
-          <span>${esc(t.title)} <span style="color:var(--text3)">— ${esc(t.key||'—')} · ${t.bpm?t.bpm+' BPM':'—'}</span></span>
-          <button class="icon-btn" onclick="removeFromPlaylist(${pl.playlist_id},'${esc(t.sku_root)}')" title="Remove"><i class="ti ti-x"></i></button>
-        </div>`).join('') || '<div class="playlist-track-row" style="color:var(--text3)">No tracks yet — add some from the Library tab.</div>'}
+      ${t.is_jup ? `
+        <div class="split-bar">
+          <span style="width:${split.haus}%;background:var(--navy)"></span>
+          <span style="width:${split.production_company}%;background:var(--green-accent)"></span>
+          <span style="width:${split.writer}%;background:var(--teal)"></span>
+        </div>
+        <div class="split-legend">
+          <span><span class="sw" style="background:var(--navy)"></span>HAUS ${split.haus}%</span>
+          <span><span class="sw" style="background:var(--green-accent)"></span>Production Co ${split.production_company}%</span>
+          <span><span class="sw" style="background:var(--teal)"></span>Writer ${split.writer}%</span>
+        </div>` : `<div style="font-size:11px;color:var(--text3);margin:4px 0 8px">Standard catalog track — contact HAUS for split details.</div>`}
+      <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">
+        ${t.stems.map(s => `<div style="font-size:12px;color:var(--text2);display:flex;justify-content:space-between"><span>${esc(s.stem_name)}</span><span>${s.pro_name ? esc(s.pro_name)+' — '+esc(s.pro_status||'—') : 'not registered'}</span></div>`).join('')}
+      </div>
     </div>`).join('')
-}
-async function createPlaylistPrompt() {
-  const name = prompt('New playlist name:')
-  if (!name || !name.trim()) return
-  const r = await _post('/api/portal/playlists', { name: name.trim() })
-  if (!r.ok) { alert(r.error || 'Could not create playlist.'); return }
-  await refreshPlaylistsCache()
-  renderPlaylists()
-}
-async function deletePlaylist(id) {
-  if (!confirm('Delete this playlist?')) return
-  const r = await _del(`/api/portal/playlists/${id}`)
-  if (r.ok) { await refreshPlaylistsCache(); renderPlaylists() }
-}
-async function removeFromPlaylist(id, skuRoot) {
-  const r = await _del(`/api/portal/playlists/${id}/tracks/${encodeURIComponent(skuRoot)}`)
-  if (r.ok) { await refreshPlaylistsCache(); renderPlaylists() }
 }
 
 // ── Messages ───────────────────────────────────────────────
 async function loadMessages() {
   const el = document.getElementById('messages-scroll')
-  const r = await _get('/api/portal/messages')
+  const r = await _get('/api/artist/messages')
   if (!r.ok) return
   if (!r.messages.length) {
     el.innerHTML = `<div class="empty-state"><i class="ti ti-message-circle"></i><p>No messages yet — say hello.</p></div>`
   } else {
     el.innerHTML = r.messages.map(m => `
-      <div class="msg-row ${m.sender_type==='portal_user'?'mine':''}">
+      <div class="msg-row ${m.sender_type==='artist_user'?'mine':''}">
         <div class="msg-bubble">${esc(m.body)}</div>
         <div class="msg-meta">${esc(m.sender_name)} · ${new Date(m.created_at).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'})}</div>
       </div>`).join('')
@@ -642,7 +573,7 @@ async function sendMessage() {
   const input = document.getElementById('message-input')
   const body = input.value.trim()
   if (!body) return
-  const r = await _post('/api/portal/messages', { body })
+  const r = await _post('/api/artist/messages', { body })
   if (r.ok) { input.value = ''; loadMessages() }
 }
 </script>

@@ -1,0 +1,189 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>EBR Preview</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
+  --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
+  --accent:#1a1a18;--radius:10px;--radius-sm:6px;
+}
+body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:5px 11px;font-size:12px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;font-family:inherit}
+.btn:hover{background:var(--bg2)}
+.btn-primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.btn-primary:hover{background:#333}
+.form-input{padding:7px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);font-family:inherit;outline:none}
+.wrap{max-width:960px;margin:24px auto;background:var(--bg3);border-radius:var(--radius);border:0.5px solid var(--border);overflow:hidden}
+.banner{font-size:11px;color:#8a6d00;background:#fff7dd;border-bottom:1px solid #f0e0a0;padding:8px 14px}
+.ebr-tab-row{display:flex;align-items:center;gap:8px;padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);transition:background .1s,color .1s}
+.ebr-tab-row:hover:not(.active-ebr-tab){background:#6F927E;color:#fff}
+.active-ebr-tab{background:#E7F0EA;color:#1a1a1a}
+</style>
+</head>
+<body>
+<div class="wrap">
+<div class="banner">Static preview of the EBR section's current UI — not connected to real data. This is only to show layout.</div>
+
+<!-- EBR -->
+  <div class="section" id="section-ebr" style="height:600px;overflow:hidden;padding:0">
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:#C0C9CD">
+      <span style="font-size:15px;font-weight:600;color:#1a2226">EBR</span>
+      <span style="font-size:11px;color:#4b5a5e">MusicMark batch registration (ASCAP / BMI / SOCAN). SESAC titles are flagged and excluded — handle those separately.</span>
+    </div>
+    <div style="display:flex;flex:1;overflow:hidden;min-height:0;height:calc(600px - 49px)">
+      <!-- Sidebar: Export / Acknowledgments -->
+      <div style="width:220px;flex-shrink:0;border-right:0.5px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:#C0C9CD">
+        <div class="ebr-tab-row active-ebr-tab" onclick="ebrPreviewSwitch('export', this)">
+          <i class="ti ti-file-spreadsheet" style="font-size:15px"></i>
+          <span style="font-size:13px;font-weight:500;flex:1">Export</span>
+          <span style="display:none;width:8px;height:8px;border-radius:50%;background:#c0392b;flex-shrink:0"></span>
+        </div>
+        <div class="ebr-tab-row" onclick="ebrPreviewSwitch('ack', this)">
+          <i class="ti ti-tools" style="font-size:15px"></i>
+          <span style="font-size:13px;font-weight:500;flex:1">Acknowledgments &amp; Fix-It</span>
+          <span style="width:8px;height:8px;border-radius:50%;background:#c0392b;flex-shrink:0" title="2 rejected titles need review"></span>
+        </div>
+      </div>
+
+      <!-- Detail panel -->
+      <div style="flex:1;overflow-y:auto;padding:20px 24px">
+
+        <!-- Export panel -->
+        <div id="ebr-preview-export">
+          <div style="display:flex;gap:14px;align-items:flex-end;flex-wrap:wrap;margin-bottom:14px;padding:12px;background:var(--bg2);border-radius:8px">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#6F9276;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Lot(s)</div>
+              <select multiple size="5" style="min-width:220px;border:1px solid var(--border);border-radius:var(--radius);background:var(--bg);color:var(--text);font-size:12px;padding:4px">
+                <option selected>Lot 47 — Sept batch</option>
+                <option>Lot 48 — Sept batch B</option>
+                <option>Lot 49 — Oct batch</option>
+              </select>
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#6F9276;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Added from</div>
+              <input type="date" class="form-input" value="2026-08-01">
+            </div>
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#6F9276;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">Added to</div>
+              <input type="date" class="form-input" value="2026-09-15">
+            </div>
+            <label style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--text3);padding-bottom:6px">
+              <input type="checkbox"> include already-accepted titles
+            </label>
+            <button class="btn btn-primary"><i class="ti ti-search"></i> Load Titles</button>
+          </div>
+
+          <div style="border:1px solid var(--border);border-radius:8px;max-height:300px;overflow-y:auto">
+            <label style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px">
+              <input type="checkbox" checked>
+              <div style="flex:1">
+                <div style="font-weight:600">Neon Skyline <span style="font-weight:400;color:var(--text3)">R13a15444 · Lot 47</span></div>
+                <div style="color:var(--text3);margin-top:2px">Jordan Cole (ASCAP 60%), Maya Torres (ASCAP 40%)</div>
+              </div>
+            </label>
+            <label style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px">
+              <input type="checkbox" checked>
+              <div style="flex:1">
+                <div style="font-weight:600">Midnight Drive <span style="font-weight:400;color:var(--text3)">R13a15501 · Lot 47</span></div>
+                <div style="color:var(--text3);margin-top:2px">Alex Reyes (BMI 100%)</div>
+              </div>
+            </label>
+            <label style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;opacity:.55">
+              <input type="checkbox" disabled>
+              <div style="flex:1">
+                <div style="font-weight:600">Harbor Lights <span style="font-weight:400;color:var(--text3)">R13a15522 · Lot 47</span></div>
+                <div style="color:var(--text3);margin-top:2px">Sam Fields (SESAC 100%)</div>
+                <div style="margin-top:2px"><span style="color:#c0392b;font-weight:600">SESAC writer — export separately, not part of this MusicMark batch</span></div>
+              </div>
+            </label>
+          </div>
+
+          <div>
+            <div style="font-size:11px;font-weight:600;color:#6F9276;text-transform:uppercase;letter-spacing:.05em;margin:14px 0 6px">Writer Names — review before export</div>
+            <div style="font-size:11px;color:var(--text3);margin-bottom:8px">Split automatically from the name on file (last word = last name). Fix any that split wrong before generating.</div>
+            <div style="display:flex;align-items:center;gap:8px;padding:4px 0;font-size:12px">
+              <span style="flex:1;color:var(--text3)">Neon Skyline — Jordan Cole</span>
+              <input class="form-input" style="width:130px" value="Jordan" placeholder="First">
+              <input class="form-input" style="width:130px" value="Cole" placeholder="Last">
+            </div>
+          </div>
+
+          <div style="display:flex;align-items:center;gap:14px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);flex-wrap:wrap">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#6F9276;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">MusicMark submitter code</div>
+              <input class="form-input" style="width:80px" value="H03" maxlength="3">
+            </div>
+            <div style="font-size:11px;color:var(--text3);max-width:280px">3-char code MusicMark assigned HAUS. "H03" is what your last real submission used — confirm it's still correct before sending a new file.</div>
+            <div style="flex:1"></div>
+            <button class="btn btn-primary"><i class="ti ti-download"></i> Generate EBR File</button>
+          </div>
+        </div>
+
+        <!-- Acknowledgments panel -->
+        <div id="ebr-preview-ack" style="display:none">
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+            <span style="font-size:11px;color:var(--text3)">Import MusicMark's response file, review rejections, fix writer shares, mark for re-registration.</span>
+            <div style="flex:1"></div>
+            <button class="btn"><i class="ti ti-upload"></i> Import Acknowledgment File</button>
+          </div>
+          <div style="border:1px solid var(--border);border-radius:8px;max-height:420px;overflow-y:auto">
+            <div style="border-bottom:1px solid var(--border);padding:10px;font-size:12px">
+              <div style="font-weight:600">Heart Break <span style="font-weight:400;color:var(--text3)">R89C0014</span></div>
+              <div style="color:#c0392b;margin-top:2px">MusicMark: writer share total does not equal 100% — resubmit with corrected splits</div>
+              <div style="margin-top:4px"><span style="color:#c0392b;font-weight:600">writer shares total 90% (should be 100%)</span></div>
+              <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="flex:1;color:var(--text3)">Devon Hale (ASCAP)</span>
+                  <input class="form-input" style="width:70px" type="number" step="0.01" value="60">
+                  <span style="color:var(--text3)">%</span>
+                </div>
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="flex:1;color:var(--text3)">Priya Shah (ASCAP)</span>
+                  <input class="form-input" style="width:70px" type="number" step="0.01" value="30">
+                  <span style="color:var(--text3)">%</span>
+                </div>
+              </div>
+              <div style="margin-top:6px">
+                <button class="btn" style="font-size:11px;padding:4px 10px">Mark for re-registration</button>
+              </div>
+            </div>
+            <div style="border-bottom:1px solid var(--border);padding:10px;font-size:12px">
+              <div style="font-weight:600">Static Lines <span style="font-weight:400;color:var(--text3)">R91B0022</span></div>
+              <div style="color:#c0392b;margin-top:2px">MusicMark: duplicate ISWC on file — verify against existing registration</div>
+              <div style="margin-top:4px"><span style="color:#2d6a4f">writer shares total 100%</span></div>
+              <div style="margin-top:6px;display:flex;flex-direction:column;gap:4px">
+                <div style="display:flex;align-items:center;gap:6px">
+                  <span style="flex:1;color:var(--text3)">Rae Kim (BMI)</span>
+                  <input class="form-input" style="width:70px" type="number" step="0.01" value="100">
+                  <span style="color:var(--text3)">%</span>
+                </div>
+              </div>
+              <div style="margin-top:6px">
+                <button class="btn" style="font-size:11px;padding:4px 10px">Mark for re-registration</button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+function ebrPreviewSwitch(tab, row) {
+  document.querySelectorAll('.ebr-tab-row').forEach(el => el.classList.remove('active-ebr-tab'))
+  row.classList.add('active-ebr-tab')
+  document.getElementById('ebr-preview-export').style.display = tab === 'export' ? '' : 'none'
+  document.getElementById('ebr-preview-ack').style.display = tab === 'ack' ? '' : 'none'
+}
+</script>
+</body>
+</html>

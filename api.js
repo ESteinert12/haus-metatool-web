@@ -93,7 +93,7 @@ app.get('/haus-api.js', (req, res) => {
 // backup and GET /api.js returned this file, connection string and all. Serve only
 // the handful of things the browser actually asks for.
 app.use('/assets', express.static(path.join(__dirname, 'assets')))
-for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html', 'client-portal.html']) {
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html', 'client-portal.html', 'artist-portal.html']) {
   app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
 }
 
@@ -144,12 +144,25 @@ const PORTAL_PUBLIC_ROUTES = [
   'GET /portal/auth/me'
 ]
 
+// Artist Portal logins (composers) are a third, separate identity —
+// req.session.artistUser, never req.session.user or req.session.portalUser.
+const ARTIST_PUBLIC_ROUTES = [
+  'POST /artist/auth/login',
+  'GET /artist/auth/me'
+]
+
 app.use('/api', (req, res, next) => {
   const sig = `${req.method} ${req.path}`
 
   if (req.path.startsWith('/portal/')) {
     if (PORTAL_PUBLIC_ROUTES.includes(sig)) return next()
     if (!req.session?.portalUser) return res.status(401).json({ ok: false, error: 'Not logged in' })
+    return next()
+  }
+
+  if (req.path.startsWith('/artist/')) {
+    if (ARTIST_PUBLIC_ROUTES.includes(sig)) return next()
+    if (!req.session?.artistUser) return res.status(401).json({ ok: false, error: 'Not logged in' })
     return next()
   }
 
@@ -586,6 +599,88 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_client ON portal_messages(client_id)`)
     console.log('✅ client portal tables ready')
   } catch (e) { console.warn('[schema] client portal tables:', e.message) }
+
+  // ── Artist Portal: composers (reuses the existing `composers` table —
+  // FK'd to composers.composer_id, the VARCHAR PK like "R13a" — rather than a
+  // parallel table). Mirrors the client portal's shape: portal login,
+  // assignments (HAUS -> composer, analogous to briefs), submissions (new
+  // tracks a composer confirms title/key/stems on before anything touches
+  // titles/mix_stems), messages. Everything scoped by composer_id.
+  //
+  // NOTE: composers.composer_id is not a serial int like clients.id — it is
+  // itself the short code (e.g. "R13a"), so every FK below references it
+  // directly as VARCHAR(10), matching titles.composer_id's existing type.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS artist_portal_users (
+        artist_portal_user_id  SERIAL PRIMARY KEY,
+        composer_id             VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        email                   TEXT UNIQUE NOT NULL,
+        display_name            TEXT NOT NULL,
+        password_hash           TEXT NOT NULL,
+        must_change_password    BOOLEAN NOT NULL DEFAULT true,
+        created_at               TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assignments (
+        assignment_id  SERIAL PRIMARY KEY,
+        composer_id    VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        title          TEXT NOT NULL,
+        description    TEXT,
+        mood_tags      TEXT[] NOT NULL DEFAULT '{}',
+        due_date       DATE,
+        status         TEXT NOT NULL DEFAULT 'open',
+        created_at     TIMESTAMPTZ DEFAULT now(),
+        updated_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    // Deliberately NOT touching titles/mix_stems/the Dropbox staging flow.
+    // A row here is a composer's own claim about a file they are about to
+    // (or already did) drop into the shared Dropbox staging folder —
+    // b2_file_name/b2_download_url are set only when they used the portal's
+    // own upload widget; either way, nothing here writes to titles or
+    // mix_stems. Intake still happens the existing way, off this table.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS artist_submissions (
+        submission_id     SERIAL PRIMARY KEY,
+        composer_id        VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        assignment_id      INTEGER REFERENCES assignments(assignment_id) ON DELETE SET NULL,
+        title              TEXT NOT NULL,
+        key                TEXT,
+        bpm                INTEGER,
+        stems              TEXT[] NOT NULL DEFAULT '{}',
+        original_filename  TEXT,
+        b2_file_name       TEXT,
+        b2_download_url    TEXT,
+        file_size          BIGINT,
+        status             TEXT NOT NULL DEFAULT 'pending_review',
+        feedback_note      TEXT,
+        created_at         TIMESTAMPTZ DEFAULT now(),
+        updated_at         TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS artist_messages (
+        message_id     SERIAL PRIMARY KEY,
+        composer_id    VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        sender_type    TEXT NOT NULL CHECK (sender_type IN ('artist_user','haus_rep')),
+        sender_id      INTEGER,
+        sender_name    TEXT NOT NULL,
+        body           TEXT NOT NULL,
+        read_at        TIMESTAMPTZ,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_assignments_composer ON assignments(composer_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_submissions_composer ON artist_submissions(composer_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_artist_messages_composer ON artist_messages(composer_id)`)
+    console.log('✅ artist portal tables ready')
+  } catch (e) { console.warn('[schema] artist portal tables:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -1075,6 +1170,321 @@ app.post('/api/portal/messages', async (req, res) => {
        VALUES ($1, 'portal_user', $2, $3, $4)
        RETURNING message_id, sender_type, sender_name, body, created_at`,
       [pu.client_id, pu.portal_user_id, pu.display_name, body]
+    )
+    res.json({ ok: true, message: result.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ─── Artist Portal routes ───────────────────────────────────────────────────
+// Composers log in here with their own email + password, entirely separate
+// from haus_users admin login and from the client portal's portalUser.
+// Every query below is scoped by req.session.artistUser.composer_id so one
+// composer can never see another's assignments, submissions, or messages.
+//
+// Dropbox stays hard-wired exactly as it is today for admin intake (cfg.staging,
+// scanStaging() in index.html, reading the local filesystem via window.haus.fs) —
+// nothing here touches that path. A submission uploaded from this portal goes
+// straight to B2 under composer-submissions/<composer_id>/... and sits in
+// artist_submissions as 'pending_review'; it never writes to titles or
+// mix_stems. Pulling a reviewed submission into the real catalog is still a
+// manual step on the admin side (not built in this pass).
+app.post('/api/artist/auth/login', async (req, res) => {
+  const { email, password } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT au.artist_portal_user_id, au.composer_id, au.email, au.display_name,
+              au.password_hash, au.must_change_password,
+              c.full_name AS composer_name, c.is_jup
+         FROM artist_portal_users au
+         JOIN composers c ON c.composer_id = au.composer_id
+        WHERE LOWER(au.email) = LOWER($1)`,
+      [email]
+    )
+    const row = result.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Invalid email or password' })
+    const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
+    if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (needsUpgrade) {
+      await pgPool.query(`UPDATE artist_portal_users SET password_hash=$1 WHERE artist_portal_user_id=$2`,
+        [_hashPassword(password), row.artist_portal_user_id]).catch(e => console.warn('[artist-auth] rehash failed:', e.message))
+    }
+    const artistUser = {
+      artist_portal_user_id: row.artist_portal_user_id,
+      composer_id: row.composer_id,
+      email: row.email,
+      display_name: row.display_name,
+      composer_name: row.composer_name,
+      is_jup: row.is_jup === true,
+      haus_rep: HAUS_REP,
+      must_change_password: row.must_change_password === true
+    }
+    req.session.artistUser = artistUser
+    res.json({ ok: true, user: artistUser })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/artist/auth/logout', (req, res) => {
+  req.session.destroy()
+  res.json({ ok: true })
+})
+
+app.get('/api/artist/auth/me', (req, res) => {
+  res.json({ user: req.session?.artistUser || null })
+})
+
+app.post('/api/artist/auth/change-password', async (req, res) => {
+  const { oldPassword, newPassword } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const au = req.session?.artistUser
+  if (!au) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    if (!newPassword || String(newPassword).length < 12) {
+      return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+    }
+    const cur = await pgPool.query(`SELECT password_hash FROM artist_portal_users WHERE artist_portal_user_id=$1`, [au.artist_portal_user_id])
+    const row = cur.rows[0]
+    if (!row || !_verifyPassword(oldPassword || '', row.password_hash).ok) {
+      return res.json({ ok: false, error: 'Current password incorrect' })
+    }
+    await pgPool.query(`UPDATE artist_portal_users SET password_hash=$1, must_change_password=false WHERE artist_portal_user_id=$2`,
+      [_hashPassword(newPassword), au.artist_portal_user_id])
+    req.session.artistUser.must_change_password = false
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Overview ────────────────────────────────────────────────────────────
+app.get('/api/artist/overview', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session.artistUser.composer_id
+  try {
+    const [assignments, submissions, messages] = await Promise.all([
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM assignments WHERE composer_id=$1 AND status='open'`, [composerId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM artist_submissions WHERE composer_id=$1 AND status='pending_review'`, [composerId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM artist_messages WHERE composer_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`, [composerId])
+    ])
+    res.json({
+      ok: true,
+      openAssignments: assignments.rows[0].n,
+      pendingSubmissions: submissions.rows[0].n,
+      unreadMessages: messages.rows[0].n
+    })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Assignments — created by HAUS staff (no admin UI for this yet; rows are
+// inserted directly for now, same as the client portal's briefs started) ──
+app.get('/api/artist/assignments', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT assignment_id, title, description, mood_tags, due_date, status, created_at
+         FROM assignments WHERE composer_id=$1 ORDER BY
+           CASE status WHEN 'open' THEN 0 ELSE 1 END, due_date NULLS LAST, created_at DESC`,
+      [req.session.artistUser.composer_id]
+    )
+    res.json({ ok: true, assignments: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Submissions ────────────────────────────────────────────────────────
+// New tracks the composer confirms title/key/stems on. Upload goes straight
+// to B2 (composer-submissions/<composer_id>/...); nothing here writes to
+// titles or mix_stems — pulling an accepted submission into the real catalog
+// is still a manual admin step, same as any other Dropbox drop today.
+app.get('/api/artist/submissions', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT submission_id, assignment_id, title, key, bpm, stems, original_filename,
+              status, feedback_note, created_at, updated_at
+         FROM artist_submissions WHERE composer_id=$1 ORDER BY created_at DESC`,
+      [req.session.artistUser.composer_id]
+    )
+    res.json({ ok: true, submissions: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/artist/submissions', upload.single('file'), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session.artistUser.composer_id
+  const { title, key, bpm, assignment_id } = req.body
+  let stems = req.body.stems
+  if (typeof stems === 'string') { try { stems = JSON.parse(stems) } catch { stems = stems ? [stems] : [] } }
+  if (!Array.isArray(stems)) stems = []
+  const tempPath = req.file?.path
+  if (!title || !String(title).trim()) {
+    if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
+    return res.json({ ok: false, error: 'Title is required' })
+  }
+  if (!tempPath) return res.json({ ok: false, error: 'No file received' })
+  if (!b2Auth) {
+    try { fs.unlinkSync(tempPath) } catch {}
+    return res.json({ ok: false, error: 'Storage not authorized — try again shortly' })
+  }
+  if (assignment_id) {
+    const owns = await pgPool.query(
+      `SELECT 1 FROM assignments WHERE assignment_id=$1 AND composer_id=$2`,
+      [assignment_id, composerId]
+    ).catch(() => null)
+    if (!owns || !owns.rowCount) {
+      try { fs.unlinkSync(tempPath) } catch {}
+      return res.json({ ok: false, error: 'Assignment not found' })
+    }
+  }
+  try {
+    const fileBuffer = fs.readFileSync(tempPath)
+    if (fileBuffer.length < 1024) {
+      try { fs.unlinkSync(tempPath) } catch {}
+      return res.json({ ok: false, error: `refusing to upload a ${fileBuffer.length}-byte file — looks empty` })
+    }
+    const apiHost = b2Auth.apiUrl.replace(/^https?:\/\//, '')
+    const bucketsResult = await _b2Request({
+      method: 'GET', hostname: apiHost,
+      urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+      headers: { 'Authorization': b2Auth.authorizationToken }
+    })
+    const bucketId = (bucketsResult.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+    if (!bucketId) { try { fs.unlinkSync(tempPath) } catch {}; return res.json({ ok: false, error: 'bucket haus-music not found' }) }
+
+    const urlResult = await _b2Request({
+      method: 'POST', hostname: apiHost, urlPath: '/b2api/v3/b2_get_upload_url',
+      headers: { 'Authorization': b2Auth.authorizationToken, 'Content-Type': 'application/json' },
+      body: { bucketId }
+    })
+    if (urlResult.status !== 200) {
+      try { fs.unlinkSync(tempPath) } catch {}
+      return res.json({ ok: false, error: urlResult.body?.message || `HTTP ${urlResult.status}` })
+    }
+
+    const originalName = req.file.originalname || 'upload'
+    const safeName = originalName.replace(/[^a-zA-Z0-9._-]/g, '_')
+    const b2FileName = `composer-submissions/${composerId}/${Date.now()}_${safeName}`
+    const sha1 = crypto.createHash('sha1').update(fileBuffer).digest('hex')
+    const uploadHost = urlResult.body.uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1')
+    const uploadPath = urlResult.body.uploadUrl.replace(/^https?:\/\/[^/]+/, '')
+    const uploadResult = await _b2Request({
+      method: 'POST', hostname: uploadHost, urlPath: uploadPath, isBuffer: true,
+      body: fileBuffer,
+      headers: {
+        'Authorization': urlResult.body.authorizationToken,
+        'X-Bz-File-Name': encodeURIComponent(b2FileName).replace(/%2F/g, '/'),
+        'Content-Type': req.file.mimetype || 'application/octet-stream',
+        'X-Bz-Content-Sha1': sha1
+      }
+    })
+    try { fs.unlinkSync(tempPath) } catch {}
+    const parsed = JSON.parse(uploadResult.body.toString())
+    if (uploadResult.status !== 200) {
+      return res.json({ ok: false, error: parsed?.message || `HTTP ${uploadResult.status}` })
+    }
+    const downloadUrl = `${b2Auth.downloadUrl}/file/${parsed.bucketName}/${parsed.fileName}`
+
+    const insertResult = await pgPool.query(
+      `INSERT INTO artist_submissions
+         (composer_id, assignment_id, title, key, bpm, stems, original_filename,
+          b2_file_name, b2_download_url, file_size, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'pending_review')
+       RETURNING submission_id, assignment_id, title, key, bpm, stems, original_filename,
+                 status, feedback_note, created_at, updated_at`,
+      [composerId, assignment_id || null, title, key || null,
+       bpm ? parseInt(bpm, 10) : null, stems, originalName,
+       parsed.fileName, downloadUrl, fileBuffer.length]
+    )
+
+    if (assignment_id) {
+      await pgPool.query(
+        `UPDATE assignments SET status='submitted', updated_at=now() WHERE assignment_id=$1 AND composer_id=$2`,
+        [assignment_id, composerId]
+      ).catch(e => console.warn('[artist-submissions] assignment status update failed:', e.message))
+    }
+
+    res.json({ ok: true, submission: insertResult.rows[0] })
+  } catch (e) {
+    if (tempPath) { try { fs.unlinkSync(tempPath) } catch {} }
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// ── My Catalog — read-only view of this composer's own tracks already in
+// the real catalog (titles/mix_stems), same tables the admin Catalog uses ──
+app.get('/api/artist/catalog', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT t.sku_root, t.title, t.key, t.bpm, t.is_jup, pg.primary_genre_name,
+              COALESCE(
+                (SELECT array_agg(ms.stem_name ORDER BY ms.stem_name)
+                   FROM mix_stems ms WHERE ms.sku_root = t.sku_root),
+                '{}'
+              ) AS stems
+         FROM titles t
+         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+        WHERE t.composer_id = $1
+        ORDER BY t.title`,
+      [req.session.artistUser.composer_id]
+    )
+    res.json({ ok: true, tracks: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Payouts / splits ───────────────────────────────────────────────────
+// Only surfaces facts this codebase actually knows: PRO registration status
+// per stem, and the fixed JUP split (HAUS 25 / Production Co 25 / Writer 50)
+// when is_jup is true. There is no documented non-JUP split anywhere in this
+// system, so a non-JUP track shows PRO status only rather than a guessed split.
+app.get('/api/artist/payouts', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const composerId = req.session.artistUser.composer_id
+    const result = await pgPool.query(
+      `SELECT t.sku_root, t.title, t.is_jup,
+              ms.stem_name, pr.pro_name, pr.status AS pro_status
+         FROM titles t
+         JOIN mix_stems ms ON ms.sku_root = t.sku_root
+         LEFT JOIN pro_registrations pr ON pr.mix_stem_id = ms.mix_stem_id
+        WHERE t.composer_id = $1
+        ORDER BY t.title, ms.stem_name`,
+      [composerId]
+    )
+    res.json({
+      ok: true,
+      rows: result.rows,
+      jupSplit: { haus: 25, production_company: 25, writer: 50 }
+    })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Messages ─────────────────────────────────────────────────────────────
+app.get('/api/artist/messages', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const composerId = req.session.artistUser.composer_id
+    const result = await pgPool.query(
+      `SELECT message_id, sender_type, sender_name, body, created_at, read_at
+         FROM artist_messages WHERE composer_id=$1 ORDER BY created_at ASC`,
+      [composerId]
+    )
+    pgPool.query(
+      `UPDATE artist_messages SET read_at=now() WHERE composer_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`,
+      [composerId]
+    ).catch(e => console.warn('[artist-messages] mark-read failed:', e.message))
+    res.json({ ok: true, messages: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/artist/messages', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { body } = req.body
+  if (!body || !String(body).trim()) return res.json({ ok: false, error: 'Message body is required' })
+  try {
+    const au = req.session.artistUser
+    const result = await pgPool.query(
+      `INSERT INTO artist_messages (composer_id, sender_type, sender_id, sender_name, body)
+       VALUES ($1, 'artist_user', $2, $3, $4)
+       RETURNING message_id, sender_type, sender_name, body, created_at`,
+      [au.composer_id, au.artist_portal_user_id, au.display_name, body]
     )
     res.json({ ok: true, message: result.rows[0] })
   } catch (e) { res.json({ ok: false, error: e.message }) }
