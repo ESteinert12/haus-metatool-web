@@ -116,6 +116,7 @@ const PUBLIC_ROUTES = [
 // Routes that can do damage no amount of SQL could reproduce: host side effects,
 // bucket mutations, and config the whole team shares. Admin only.
 const ADMIN_ROUTES = [
+  'POST /pg/query',
   'POST /shell/exec',
   'POST /applescript',
   'POST /fs/write-file',
@@ -1137,10 +1138,32 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// DELETED: /api/pg/query endpoint
-// REASON: SQL injection vulnerability — no safe way to accept arbitrary SQL
-// REPLACEMENT: Client should call specific API routes for data access
-//   e.g., /api/composers/list, /api/tracks/search, etc.
+// Restored 2026-09-22 (was deleted 2026-08-12 as a SQL-injection risk, but
+// the promised replacement -- specific per-feature routes like
+// /api/composers/list -- was never built, and pgQ() in index.html calls
+// this directly at 370+ call sites, so deleting it without a replacement
+// silently broke Catalog and most other DB-backed admin features.
+//
+// Restored behind ADMIN_ROUTES (see above) rather than left on the plain
+// logged-in-user check it had before: only a haus_users row with
+// role='admin' can reach it now. This does not make arbitrary SQL safe --
+// an admin session can still run a destructive query by mistake -- but it
+// closes off the Client Portal and Artist Portal identities entirely
+// (req.session.portalUser / req.session.artistUser never satisfy
+// req.session.user, so they can never match this route at all) and matches
+// how PUBLIC_ROUTES/ADMIN_ROUTES already gate every other route with
+// host-level or bucket-level power. Replacing this with purpose-built
+// per-feature routes (the original intent) remains open work -- see
+// engineering_notes.md, 2026-09-22 -- tracked separately, not blocking this
+// restore, which exists to stop the app being broken today.
+app.post('/api/pg/query', async (req, res) => {
+  const { sql, params } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  try {
+    const result = await pgPool.query(sql, params || [])
+    res.json({ ok: true, rows: result.rows, rowCount: result.rowCount })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
