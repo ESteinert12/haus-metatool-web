@@ -54,6 +54,9 @@ const PUBLIC_ROUTES = [
   '/b2/full-audit',
   '/b2/recovery-from-dropbox',
 
+  // Debug (read-only pool diagnostics -- added 2026-09-17)
+  '/debug/pool-stats',
+
   // Config
   '/cfg/server-paths'
 ]

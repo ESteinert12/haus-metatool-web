@@ -270,10 +270,15 @@
 ---
 
 ## Session notes index (newest first)
+- `B2_NEON_LOT_MIGRATION_BRIEFING_2026_09_15.md` - trimmed briefing for a chat
+  scoped to finishing the Dropbox -> B2 -> Neon lot upload.
 - `SESSION_2026_09_12.md` - **START HERE for 12 Sep.** Intake ergonomics: the
   _SOURCE confusion settled by measurement, the vocals bug (every song saved
   no_vocals), the AVID shipping-path fix (needs a server restart), one ACTIVE-lot
-  rule for both lot pickers, explicit Add vs Move. Ends with what is still open.
+  rule for both lot pickers, explicit Add vs Move. ALSO the silent-save glitch:
+  two songs shipped with no DB row at all (cause still unknown -- catch
+  `[writeTrackToDB] INSERT returned nothing` in the console). Ends with what is
+  still open.
 - `DESIGN_COLORS.md` - the palette and the button hover/click states. #6F9276 is
   deliberate, not a typo.
 - `UI_LOTS_CLIENTS_2026_09_11.md` - new lots now carry a project (rollover

@@ -4322,7 +4322,7 @@ async function selectClientProject(projectId, projectName) {
             <h3 style="font-size:13px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Playlists (${playlists.length})</h3>
             <button id="create-playlist-btn" style="font-size:11px;padding:4px 10px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer">+ New</button>
           </div>
-          <div style="display:flex;flex-direction:column;gap:6px" id="project-playlists">
+          <div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto;padding-right:4px" id="project-playlists">
             ${playlists.length > 0 ? playlists.map(pl => `
               <div data-pl-id="${pl.id}" data-pl-name="${pl.name}"
                    style="cursor:pointer;font-size:13px;padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);transition:all 0.15s"
@@ -4339,7 +4339,7 @@ async function selectClientProject(projectId, projectName) {
             <h3 style="font-size:13px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin:0">Lots (${lots.length})</h3>
             <button id="create-lot-btn" style="font-size:11px;padding:4px 10px;background:#8FAF9B;color:#fff;border:none;border-radius:4px;cursor:pointer">+ New</button>
           </div>
-          <div style="display:flex;flex-direction:column;gap:6px" id="project-lots">
+          <div style="display:flex;flex-direction:column;gap:6px;max-height:260px;overflow-y:auto;padding-right:4px" id="project-lots">
             ${lots.length > 0 ? lots.map(l => `
               <div data-lot-id="${l.lot_id}" data-lot-name="${l.lot_name}"
                    style="cursor:pointer;font-size:13px;padding:10px 12px;background:var(--bg2);border-radius:6px;border:0.5px solid var(--border);transition:all 0.15s"
@@ -6163,15 +6163,36 @@ async function saveMetadataEditor(sku) {
     const isPublic    = document.getElementById('me-ispublic')?.checked !== false
     const vocals      = document.getElementById('me-vocals')?.value || 'no_vocals'
 
-    // Resolve genre IDs
+    // Resolve genre / mood names to ids.
+    // 2026-09-12: these three lookups used to fail SILENTLY -- a genre, subgenre
+    // or mood the vocabulary does not contain was written as NULL and the save
+    // reported success, so a song looked tagged and exported blank. In The Sand
+    // Country was tagged this way and came back with genre null. Now an
+    // unmatched name STOPS the save and names what did not match, offering the
+    // closest options, so nothing is quietly dropped.
+    const unmatched = []
     let primaryGenreId = null, secondaryGenreId = null
     if (genreName) {
       const gRow = await pgQ('SELECT primary_genre_id FROM primary_genres WHERE lower(primary_genre_name)=lower($1) LIMIT 1', [genreName])
       if (gRow?.[0]) primaryGenreId = gRow[0].primary_genre_id
+      else {
+        const near = await pgQ(
+          `SELECT primary_genre_name FROM primary_genres
+            WHERE lower(primary_genre_name) LIKE '%' || lower($1) || '%'
+               OR lower($1) LIKE '%' || lower(primary_genre_name) || '%'
+            ORDER BY primary_genre_name LIMIT 6`, [genreName]).catch(() => [])
+        unmatched.push(`Genre "${genreName}" is not in the list.${near?.length ? `\n   Did you mean: ${near.map(r => r.primary_genre_name).join(', ')}` : ''}`)
+      }
     }
     if (subGenreName && primaryGenreId) {
       const sgRow = await pgQ('SELECT secondary_genre_id FROM secondary_genres WHERE primary_genre_id=$1 AND lower(secondary_genre_name)=lower($2) LIMIT 1', [primaryGenreId, subGenreName])
       if (sgRow?.[0]) secondaryGenreId = sgRow[0].secondary_genre_id
+      else {
+        const near = await pgQ(
+          `SELECT secondary_genre_name FROM secondary_genres WHERE primary_genre_id=$1
+            ORDER BY secondary_genre_name LIMIT 8`, [primaryGenreId]).catch(() => [])
+        unmatched.push(`Subgenre "${subGenreName}" is not a subgenre of ${genreName}.${near?.length ? `\n   Available: ${near.map(r => r.secondary_genre_name).join(', ')}` : ''}`)
+      }
     }
 
     // Resolve mood 1 ID
@@ -6179,6 +6200,18 @@ async function saveMetadataEditor(sku) {
     if (mood1Name) {
       const m1Row = await pgQ('SELECT mood_1_id FROM mood_1 WHERE lower(mood_1_name)=lower($1) LIMIT 1', [mood1Name])
       if (m1Row?.[0]) mood1Id = m1Row[0].mood_1_id
+      else {
+        const near = await pgQ(
+          `SELECT mood_1_name FROM mood_1
+            WHERE lower(mood_1_name) LIKE '%' || lower($1) || '%'
+            ORDER BY mood_1_name LIMIT 6`, [mood1Name]).catch(() => [])
+        unmatched.push(`Mood 1 "${mood1Name}" is not in the list.${near?.length ? `\n   Did you mean: ${near.map(r => r.mood_1_name).join(', ')}` : ''}`)
+      }
+    }
+    if (unmatched.length) {
+      alert(`Nothing was saved.\n\n${unmatched.join('\n\n')}\n\nPick the value from the list, then save again.`)
+      if (status) { status.textContent = 'Not saved — unrecognised value'; status.style.color = '#C0392B' }
+      return
     }
 
     // UPDATE titles table
@@ -13170,8 +13203,16 @@ async function executeIntake(snapshot = null) {
       const b2Missing = b2Connected && b2BucketId
         ? renamedFiles.filter(f => !b2Keys[f])
         : renamedFiles
-      if (!renamedFiles.length || b2Missing.length) {
-        const why = (!b2Connected || !b2BucketId)
+      // 2026-09-12: the DB write must have SUCCEEDED too. Two songs shipped with
+      // no titles row at all (S33a49594, S33a49654) and one of them lost its
+      // source folder, because this check only looked at Shipping and B2. An
+      // unrecorded song is not a finished song: keep the source so the run can
+      // simply be repeated.
+      const notRecorded = !pgConnected || !dbResult?.skuRoot
+      if (!renamedFiles.length || b2Missing.length || notRecorded) {
+        const why = notRecorded
+          ? 'the song was NOT saved to the database'
+          : (!b2Connected || !b2BucketId)
           ? 'B2 not connected — no second copy'
           : `${b2Missing.length} file(s) not confirmed in B2`
         console.warn(`[executeIntake] source KEPT for "${title}": ${why} — ${d.path}`)

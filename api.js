@@ -108,11 +108,12 @@ function _hashPassword(pw) {
 
 function _b2Request(opts) {
   return new Promise((resolve, reject) => {
-    const { method, hostname, urlPath, headers, body, isBuffer } = opts
+    const { method, hostname, urlPath, headers, body, isBuffer, timeoutMs } = opts
     const bodyData = isBuffer ? body : (body ? JSON.stringify(body) : null)
     const hdrs = { ...headers }
     if (bodyData) hdrs['Content-Length'] = Buffer.byteLength(bodyData)
-    const req = https.request({ hostname, path: urlPath, method, headers: hdrs, rejectUnauthorized: true }, res => {
+    const req = https.request({ hostname, path: urlPath, method, headers: hdrs, rejectUnauthorized: true,
+      timeout: timeoutMs || 60000 }, res => {
       if (isBuffer) {
         const chunks = []
         res.on('data', c => chunks.push(c))
@@ -125,6 +126,9 @@ function _b2Request(opts) {
           catch { resolve({ status: res.statusCode, headers: res.headers, body: data }) }
         })
       }
+    })
+    req.on('timeout', () => {
+      req.destroy(new Error(`B2 request timed out after ${timeoutMs || 60000}ms with no response -- ${method} ${hostname}${urlPath}`))
     })
     req.on('error', reject)
     if (bodyData) req.write(bodyData)
@@ -308,7 +312,14 @@ async function runServerMigrations(pool) {
           keepAlive: true,
           connectionTimeoutMillis: 30000,
           idleTimeoutMillis: 0,
-          socket: { timeout: 30000 }
+          socket: { timeout: 30000 },
+          // Added 2026-09-17: without these, a query that never gets a reply
+          // (confirmed live -- see engineering_notes.md) holds its pooled
+          // connection forever, with no error and no retry ever triggered.
+          // statement_timeout cancels the query server-side in Postgres;
+          // query_timeout is node-postgres's own client-side backstop.
+          statement_timeout: 20000,
+          query_timeout: 25000
         })
         pgPool.on('error', (err, client) => {
           console.error('[pool] error:', err.message)
@@ -319,6 +330,15 @@ async function runServerMigrations(pool) {
         pgPool.on('remove', () => {
           console.log('[pool] client removed')
         })
+        // Diagnostic added 2026-09-17 while investigating upload-lot dry-run
+        // hangs on INTAKE LOT_251202_SNAPPED 48. Logs pool saturation every
+        // 60s so a future hang can be checked against real pool state at the
+        // time it happened, rather than inferred after the fact. Reads the
+        // pool's own counters directly (no query), so this keeps logging
+        // even if the pool itself is fully checked out -- that's the point.
+        setInterval(() => {
+          console.log(`[pool] stats total=${pgPool.totalCount} idle=${pgPool.idleCount} waiting=${pgPool.waitingCount}`)
+        }, 60000).unref()
         await pgPool.query('SELECT 1')
         console.log('✅ PostgreSQL connected')
         await runServerMigrations(pgPool)
@@ -352,9 +372,10 @@ app.post('/api/auth/login', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
     const hash   = _hashPassword(password)
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT user_id, username, display_name FROM haus_users WHERE LOWER(username)=LOWER($1) AND password_hash=$2`,
-      [username, hash]
+      [username, hash],
+      'auth/login'
     )
     if (!result.rows.length) return res.json({ ok: false, error: 'Invalid username or password' })
     req.session.user = result.rows[0]
@@ -396,6 +417,14 @@ app.post('/api/pg/connect', async (req, res) => {
       keepAlive: true,
       connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 0,
+      // Added 2026-09-18: this pool replaces the boot-time pgPool (see below)
+      // whenever the app calls /api/pg/connect -- which index.html does
+      // automatically on page load, even while logged out. Without these,
+      // every reconnect silently threw away the statement_timeout/query_timeout
+      // fix from 2026-09-17, which is why hangs kept coming back with no
+      // code change: the boot pool was fine, but this one replaced it.
+      statement_timeout: 20000,
+      query_timeout: 25000,
     })
     // MUST attach an error handler BEFORE the pool is used. node-postgres emits
     // 'error' on the pool when an IDLE client dies (Neon drops them routinely). An
@@ -1518,6 +1547,16 @@ app.post('/api/b2/authorize', async (req, res) => {
 
 app.get('/api/b2/status', (req, res) => {
   res.json({ connected: !!b2Auth })
+})
+
+// Diagnostic added 2026-09-17 while investigating upload-lot dry-run hangs on
+// INTAKE LOT_251202_SNAPPED 48. Reads pool counters directly (no query), so
+// it still answers even when the pool itself is fully checked out -- that's
+// the whole point: confirm or rule out pool exhaustion at the moment of a
+// hang, on demand, instead of only every 60s from the log line above.
+app.get('/api/debug/pool-stats', (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  res.json({ ok: true, total: pgPool.totalCount, idle: pgPool.idleCount, waiting: pgPool.waitingCount })
 })
 
 app.post('/api/b2/get-song-lots', async (req, res) => {
@@ -3595,7 +3634,7 @@ async function _pgRetry(sql, params = [], label = 'query') {
     try { return await pgPool.query(sql, params) }
     catch (e) {
       last = e
-      const transient = /terminated|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|Connection|socket|starting up|shutting down/i.test(e.message || '')
+      const transient = /terminated|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|Connection|socket|starting up|shutting down|timeout/i.test(e.message || '')
       if (!transient || attempt === ATTEMPTS - 1) throw e
       const wait = 1000 * Math.pow(2, attempt)
       console.warn(`[pg] ${label} failed (${e.message}) — waking/reconnecting, retry ${attempt + 1}/${ATTEMPTS - 1} in ${wait}ms`)

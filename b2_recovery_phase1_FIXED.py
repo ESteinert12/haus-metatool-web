@@ -20,8 +20,8 @@ from requests.exceptions import RequestException, Timeout, ConnectionError
 
 # Configuration
 # Try mounted path first (for sandboxed bash), fall back to actual path
-SHIPPING_MOUNTED = Path("/sessions/sleepy-trusting-heisenberg/mnt/2. ATMOS_Shipping")
-SHIPPING_ACTUAL = Path.home() / "Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping"
+SHIPPING_MOUNTED = Path("/Users/HAUS/Downloads/1. ATMOS_SHIPPING")
+SHIPPING_ACTUAL = Path.home() / "Downloads/1. ATMOS_SHIPPING"
 SHIPPING_DIR = SHIPPING_MOUNTED if SHIPPING_MOUNTED.exists() else SHIPPING_ACTUAL
 
 CHECKPOINT_FILE = Path.home() / ".haus-recovery/phase1-checkpoint.json"

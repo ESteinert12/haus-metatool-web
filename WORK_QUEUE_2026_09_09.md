@@ -1,8 +1,18 @@
+## SOURCEAUDIO IS GONE — BUT bpm/mmw ARE STILL REQUIRED (Erik, 2026-09-09)
+HAUS no longer uses SourceAudio. ATMOSPHERE REPLACES it, so it needs the SAME
+metadata: `bpm` and `mmw` must still be filled in. The requirement did not go
+away, it moved in-house.
+
+So a song is only FINISHED when BOTH are true:
+  1. it has mix_stems rows pointing at real audio  (what create-stems does)
+  2. bpm and mmw are populated                     (still to do, all 3,261)
+Step 1 is done for 492. Step 2 is done for none of them.
+
 # The 3,261 unfinished songs — found, characterised, flagged
 
 ## What they are (Erik's account, confirmed against the data 2026-09-09)
 Songs logged during the FileMaker era by someone entering ONLY the fields Avid
-needed, not the fields SourceAudio deployment needs. They came across in the
+needed, not the second-pass fields (bpm, mmw, description). They came across in the
 FileMaker->Neon migration as real records and have sat in the catalogue since,
 invisible to every audit we had — because every audit starts
 `WHERE b2_key IS NOT NULL` and these have NO mix_stems rows at all.
