@@ -10,7 +10,7 @@ const { Pool } = require('pg')
 const fs = require('fs')
 const path = require('path')
 
-const CONN = process.env.DATABASE_URL || 'postgresql://neondb_owner:PASTE_NEW_PASSWORD_HERE@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+const CONN = process.env.DATABASE_URL
 const DRY_RUN = process.argv.includes('--dry-run')
 const DIR = process.cwd()
 console.log('Looking for CSVs in:', DIR)

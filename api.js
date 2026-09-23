@@ -17,7 +17,8 @@ process.on('unhandledRejection', e => {
   console.error('unhandledRejection:', e && e.stack ? e.stack : e)
 })
 
-require("dotenv").config()
+require('dotenv').config()
+
 const express    = require('express')
 const session    = require('express-session')
 const crypto     = require('crypto')
@@ -39,17 +40,31 @@ app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
 
 // ✅ SECURITY: Load session secret from environment variable
-const sessionSecret = process.env.SESSION_SECRET || 'haus-workspace-secret-2024'
-if (!process.env.SESSION_SECRET) {
-  console.warn('⚠️  WARNING: SESSION_SECRET not set; using fallback. Set SESSION_SECRET env var for production.')
+// No fallback secret. A published fallback is the same as no secret at all: anyone
+// with the repo can forge a session cookie. Refuse to start instead.
+const sessionSecret = process.env.SESSION_SECRET
+if (!sessionSecret) {
+  console.error('FATAL: SESSION_SECRET is not set. Generate one with:')
+  console.error('  node -e "console.log(require(\'crypto\').randomBytes(32).toString(\'hex\'))"')
+  console.error('and put it in .env (local) or the Vercel project env vars (deployed).')
+  process.exit(1)
 }
+
+// secure:true off a real HTTPS origin. Local dev over plain http sets HAUS_INSECURE_COOKIE=1.
+const secureCookie = process.env.HAUS_INSECURE_COOKIE !== '1'
 
 app.use(session({
   secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
-  cookie: { maxAge: 7 * 24 * 60 * 60 * 1000, httpOnly: true, secure: false } // httpOnly prevents JS access; set secure:true if HTTPS
+  cookie: {
+    maxAge: 7 * 24 * 60 * 60 * 1000,
+    httpOnly: true,
+    secure: secureCookie,
+    sameSite: 'lax'
+  }
 }))
+if (secureCookie) app.set('trust proxy', 1)   // Vercel/Cloudflare terminate TLS upstream
 
 // Disable caching for all files
 app.use((req, res, next) => {
@@ -73,37 +88,222 @@ app.get('/haus-api.js', (req, res) => {
   res.sendFile(path.join(__dirname, 'haus-api.js'))
 })
 
-// Serve static files (index.html, assets, etc.)
-app.use(express.static(__dirname))
+// Static serving used to be express.static(__dirname), which published the entire
+// repository over HTTP with no login: GET /mydatabase.bak returned the 7 MB database
+// backup and GET /api.js returned this file, connection string and all. Serve only
+// the handful of things the browser actually asks for.
+app.use('/assets', express.static(path.join(__dirname, 'assets')))
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html', 'client-portal.html']) {
+  app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
+}
 
-// Auth guard — only these routes are public; everything else requires session authentication
+// ─── Auth guard ────────────────────────────────────────────────────────────
+// Public means "reachable with no login at all", so the list is method-aware:
+// GET /cfg/server-paths is read by loadCfg() before the login screen appears,
+// but POST /cfg/server-paths rewrites the server's folder config and is not public.
+//
+// Removed from this list, and why:
+//   /fs/*              arbitrary file read/write on the host (see _safeRead/_safeWrite)
+//   /pg/connect        repointed the server's pool at any Postgres the caller named
+//   /shell/*           open-external and show-in-finder act on the host desktop
+//   /b2/*              nine routes, several of which mutate the bucket
 const PUBLIC_ROUTES = [
-  // Auth (needed before login)
-  '/auth/login', '/pg/connect', '/pg/status',
-  // Config (safe, no credentials)
-  '/cfg/server-paths',
-  // File ops (needed for file browser before login) — TODO: implement path validation
-  '/fs/read-dir', '/fs/count-files', '/fs/path-exists', '/fs/read-file',
-  '/fs/write-file', '/fs/folder-stats', '/fs/audio-status', '/fs/audio-meta', '/audio/stream',
-  // Shell ops (safe ones only)
-  '/shell/app-path', '/shell/home-dir', '/shell/show-in-finder', '/shell/open-external',
-  // B2 (mostly audit/recovery operations)
-  // '/b2/rebuild-stem-keys' and '/b2/authorize' REMOVED 2026-09-09. Both are
-  // writers -- rebuild mutates mix_stems across the whole catalogue, authorize
-  // replaces the process-wide B2 credentials -- and a bulk B2 writer must never
-  // be reachable without a login. /b2/stream stays public: the <audio> element
-  // cannot send session credentials.
-  '/b2/stream', '/b2/status', '/b2/audit', '/b2/quick-audit', '/b2/db-audit', '/b2/list-buckets', '/b2/get-song-lots'
+  'POST /auth/login',
+  'GET /auth/me',
+  'GET /pg/status',
+  'GET /cfg/server-paths'
 ]
+// Routes that can do damage no amount of SQL could reproduce: host side effects,
+// bucket mutations, and config the whole team shares. Admin only.
+const ADMIN_ROUTES = [
+  'POST /pg/query',
+  'POST /shell/exec',
+  'POST /applescript',
+  'POST /fs/write-file',
+  'POST /cfg/server-paths',
+  'POST /pg/connect',
+  'POST /db/migrate-client-ids',
+  'POST /clients/import-csv',
+  'POST /b2/upload-file',
+  'POST /b2/get-upload-url',
+  'POST /b2/rebuild-stem-keys',
+  'GET /b2/heal',
+  'GET /b2/hide-strays',
+  'GET /b2/relocate-strays',
+  'GET /b2/repair',
+  'GET /b2/recover-broken',
+  'GET /b2/recovery-from-dropbox',
+  'GET /b2/batch-upload-shipping',
+  'GET /b2/stub-audit-refresh'
+]
+
+// Client Portal logins (producers/clients) are a separate identity from
+// haus_users admin logins — req.session.portalUser, never req.session.user.
+// A portal login must never satisfy the admin guard below, or vice versa.
+const PORTAL_PUBLIC_ROUTES = [
+  'POST /portal/auth/login',
+  'GET /portal/auth/me'
+]
+
 app.use('/api', (req, res, next) => {
-  if (PUBLIC_ROUTES.some(r => req.path === r)) return next()
+  const sig = `${req.method} ${req.path}`
+
+  if (req.path.startsWith('/portal/')) {
+    if (PORTAL_PUBLIC_ROUTES.includes(sig)) return next()
+    if (!req.session?.portalUser) return res.status(401).json({ ok: false, error: 'Not logged in' })
+    return next()
+  }
+
+  if (PUBLIC_ROUTES.includes(sig)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  if (ADMIN_ROUTES.includes(sig) && req.session.user.role !== 'admin') {
+    console.warn(`[authz] ${req.session.user.username} denied ${sig} (role=${req.session.user.role})`)
+    return res.status(403).json({ ok: false, error: 'Admin only' })
+  }
   next()
 })
 
 // ─── Helpers ──────────────────────────────────────────────────────────────
-function _hashPassword(pw) {
+// Legacy scheme: unsalted sha256 with a fixed prefix. A fixed prefix is a pepper,
+// not a salt — identical passwords hash identically and the whole space is
+// brute-forceable at GPU speed. Kept only to verify an old hash once, at which
+// point the row is rewritten in the new format. Never used to write a new hash.
+function _legacyHash(pw) {
   return crypto.createHash('sha256').update('haus-workspace:' + pw).digest('hex')
+}
+
+// scrypt, per-user random salt. Stored as: scrypt$<N>$<saltHex>$<keyHex>
+const _SCRYPT_N = 16384
+function _hashPassword(pw) {
+  const salt = crypto.randomBytes(16)
+  const key  = crypto.scryptSync(pw, salt, 64, { N: _SCRYPT_N, r: 8, p: 1 })
+  return `scrypt$${_SCRYPT_N}$${salt.toString('hex')}$${key.toString('hex')}`
+}
+
+// Constant-time verify. Returns { ok, needsUpgrade }.
+function _verifyPassword(pw, stored) {
+  if (typeof stored !== 'string' || !stored) return { ok: false, needsUpgrade: false }
+  if (stored.startsWith('scrypt$')) {
+    const [, nStr, saltHex, keyHex] = stored.split('$')
+    try {
+      const key = crypto.scryptSync(pw, Buffer.from(saltHex, 'hex'), 64, { N: parseInt(nStr, 10), r: 8, p: 1 })
+      const exp = Buffer.from(keyHex, 'hex')
+      return { ok: key.length === exp.length && crypto.timingSafeEqual(key, exp), needsUpgrade: false }
+    } catch { return { ok: false, needsUpgrade: false } }
+  }
+  const a = Buffer.from(_legacyHash(pw), 'utf8')
+  const b = Buffer.from(stored, 'utf8')
+  const ok = a.length === b.length && crypto.timingSafeEqual(a, b)
+  return { ok, needsUpgrade: ok }
+}
+
+// ─── Filesystem access control ─────────────────────────────────────────────
+// Every /api/fs/* handler resolves its caller-supplied path through one of these.
+// Writes are confined to the four configured working folders, tmp, and ~/Downloads
+// (where the lot export defaults) — an app that files deliverables into Dropbox has
+// no reason to write anywhere else. Reads are the same set plus the app dir, for the
+// migration .sql files index.html reads at boot.
+//
+// Reads used to be allowed anywhere under the user's home. Nothing in the app needs
+// that: the only two read call sites are the boot migrations (app dir) and the
+// FileMaker backfill's pasted CSV path, which belongs in a working folder or
+// Downloads like every other file this app touches. A denied read logs one
+// "[fs-guard] read denied (outside roots)" line with the offending path.
+//
+// One rule covers the sensitive cases: no path segment may begin with a dot. That
+// excludes .ssh, .aws, .env, .config and .haus-workspace-cfg.json in a single check,
+// and no music file or CSV lives in a dotfolder.
+const FS_ROOT_KEYS = ['hausjup', 'staging', 'intake', 'finish']
+
+function _configuredRoots() {
+  const roots = []
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
+    for (const k of FS_ROOT_KEYS) if (cfg[k]) roots.push(_resolveReal(cfg[k]))
+  } catch {}
+  for (const extra of (process.env.HAUS_FS_EXTRA_ROOTS || '').split(':')) {
+    if (extra.trim()) roots.push(_resolveReal(extra.trim()))
+  }
+  return roots
+}
+
+function _resolveReal(p) {
+  const abs = path.resolve(p)
+  // Resolve symlinks so a link inside a root cannot point outside one. A path that
+  // does not exist yet (a file about to be written) resolves via its parent.
+  try { return fs.realpathSync(abs) } catch {}
+  try { return path.join(fs.realpathSync(path.dirname(abs)), path.basename(abs)) } catch {}
+  return abs
+}
+
+function _under(real, roots) {
+  return roots.some(r => real === r || real.startsWith(r + path.sep))
+}
+
+function _hasDotSegment(real) {
+  return real.split(path.sep).some(seg => seg.startsWith('.') && seg !== '.' && seg !== '..')
+}
+
+function _guard(p, roots, kind) {
+  if (typeof p !== 'string' || !p.trim()) return null
+  const real = _resolveReal(p)
+  if (_hasDotSegment(real)) { console.warn(`[fs-guard] ${kind} denied (dot segment): ${p}`); return null }
+  if (!_under(real, roots))  { console.warn(`[fs-guard] ${kind} denied (outside roots): ${p}`); return null }
+  return real
+}
+
+// Every root goes through _resolveReal, the same resolution the caller's path gets.
+// A root left unresolved silently refuses everything under it whenever the path to
+// it crosses a symlink — which on macOS is the normal case, not an edge case:
+// os.tmpdir() reports /var/folders/... and /var is a symlink to /private/var, so a
+// candidate resolves to /private/var/folders/... and matches no root at all. The
+// same trap catches any working folder reached through a symlink.
+//
+// os.tmpdir() is also NOT /tmp on macOS — it is the per-user $TMPDIR under
+// /var/folders. index.html's Excel IP export writes /tmp/gen_ip.py and
+// /tmp/ip_data.json and then runs python3 over them, so /tmp has to be a root in
+// its own right or that export silently fails: writeFile returns false, nothing
+// checks it, and the shell.exec that follows runs a script that was never written.
+function _tempRoots() {
+  const roots = []
+  for (const d of [os.tmpdir(), '/tmp']) {
+    const r = _resolveReal(d)
+    if (!roots.includes(r)) roots.push(r)
+  }
+  return roots
+}
+// ~/Downloads is a write root because the lot export defaults there
+// (index.html: _exportFolder = home + '/Downloads').
+function _writeRoots() {
+  return _dedupe([..._configuredRoots(), ..._tempRoots(), _resolveReal(path.join(os.homedir(), 'Downloads'))])
+}
+// Reads add only the app directory, for the migration .sql files index.html
+// reads at boot (index.html: sqlPath, derived from shell.appPath()).
+function _readRoots() {
+  return _dedupe([..._writeRoots(), _resolveReal(__dirname)])
+}
+function _dedupe(list) {
+  return list.filter((v, i) => v && list.indexOf(v) === i)
+}
+function _safeRead(p) {
+  return _guard(p, _readRoots(), 'read')
+}
+function _safeWrite(p) {
+  return _guard(p, _writeRoots(), 'write')
+}
+const _DENIED = { ok: false, error: 'Path not allowed' }
+
+// Print the active roots at startup. If a legitimate folder is missing from this
+// list, /api/fs/* will refuse it and the reason will be one line in the log
+// ("[fs-guard] ... denied") rather than a mystery. Add roots with HAUS_FS_EXTRA_ROOTS.
+function _logFsRoots() {
+  const cfg = _configuredRoots()
+  console.log('[fs-guard] write roots:', _writeRoots().join('  |  '))
+  console.log('[fs-guard] read  roots:', _readRoots().join('  |  '))
+  if (!cfg.length) {
+    console.warn('[fs-guard] ⚠ no working folders configured — /api/fs/* writes will be refused')
+    console.warn('[fs-guard]   set them in Settings (admin), or via HAUS_FS_EXTRA_ROOTS')
+  }
 }
 
 function _b2Request(opts) {
@@ -221,7 +421,7 @@ const fmSessions = {}
 // are in that history permanently. Rotate them, then keep the string in .env.
 // No fallback on purpose: a missing DATABASE_URL should fail loudly, not
 // silently connect somewhere with a credential nobody can rotate.
-const DEFAULT_NEON = process.env.DATABASE_URL || ''
+const DEFAULT_NEON = process.env.DATABASE_URL || null
 
 // ─── Server-side migrations ────────────────────────────────────────────────
 async function runServerMigrations(pool) {
@@ -235,14 +435,29 @@ async function runServerMigrations(pool) {
       created_at    TIMESTAMPTZ DEFAULT now()
     )
   `)
-  // Default password: haus2024  (sha256 of 'haus-workspace:haus2024')
-  const defaultHash = 'b306649bab59e11eea165a339f03855f9a1d9290364f0187f49294a3555a5f5b'
-  await pool.query(`
-    INSERT INTO haus_users (username, display_name, password_hash) VALUES
-      ('erik', 'Erik', $1),
-      ('kyle', 'Kyle', $1)
-    ON CONFLICT (username) DO NOTHING
-  `, [defaultHash])
+  await pool.query(`ALTER TABLE haus_users ADD COLUMN IF NOT EXISTS role TEXT NOT NULL DEFAULT 'user'`)
+  await pool.query(`ALTER TABLE haus_users ADD COLUMN IF NOT EXISTS must_change_password BOOLEAN NOT NULL DEFAULT false`)
+  // Seed accounts get a random password nobody knows, flagged must_change_password.
+  // The old seed used sha256('haus-workspace:haus2024') with the plaintext spelled out
+  // in the comment, in a public repo — so anyone could sign in as erik or kyle.
+  // Anyone still on that hash is force-reset here.
+  const LEAKED_DEFAULT = 'b306649bab59e11eea165a339f03855f9a1d9290364f0187f49294a3555a5f5b'
+  for (const [username, display, role] of [['erik', 'Erik', 'admin'], ['kyle', 'Kyle', 'admin']]) {
+    await pool.query(
+      `INSERT INTO haus_users (username, display_name, password_hash, role, must_change_password)
+       VALUES ($1, $2, $3, $4, true) ON CONFLICT (username) DO NOTHING`,
+      [username, display, _hashPassword(crypto.randomBytes(24).toString('hex')), role]
+    )
+  }
+  const reset = await pool.query(
+    `UPDATE haus_users SET password_hash=$1, must_change_password=true
+      WHERE password_hash=$2 RETURNING username`,
+    [_hashPassword(crypto.randomBytes(24).toString('hex')), LEAKED_DEFAULT]
+  )
+  if (reset.rowCount) {
+    console.warn(`⚠ reset ${reset.rowCount} account(s) still using the published default password: ${reset.rows.map(r => r.username).join(', ')}`)
+    console.warn('  Set a new one with: node scripts/set-password.js <username>')
+  }
   console.log('✅ haus_users ready')
 
   // staged_files: pre-scraped metadata for files waiting in the staging folder
@@ -287,20 +502,134 @@ async function runServerMigrations(pool) {
     `)
     console.log('✅ ksl unique constraint ready')
   } catch (e) { console.warn('[schema] ksl unique constraint:', e.message) }
+
+  // ── Client Portal: producers (reuses the existing `clients` table imported
+  // from FileMaker — CL074 AETN Networks, etc. — rather than a parallel
+  // table), portal login, briefs/pitches/licenses/messages/playlists. All
+  // scoped by clients.id via client_id, guarded IF NOT EXISTS so this is safe
+  // to run against whatever the real `clients` table already looks like.
+  try {
+    await pool.query(`ALTER TABLE clients ADD COLUMN IF NOT EXISTS portal_enabled BOOLEAN NOT NULL DEFAULT false`)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_users (
+        portal_user_id        SERIAL PRIMARY KEY,
+        client_id              INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        email                   TEXT UNIQUE NOT NULL,
+        display_name            TEXT NOT NULL,
+        password_hash           TEXT NOT NULL,
+        must_change_password    BOOLEAN NOT NULL DEFAULT true,
+        created_at               TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS briefs (
+        brief_id      SERIAL PRIMARY KEY,
+        client_id     INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        title         TEXT NOT NULL,
+        description   TEXT,
+        mood_tags     TEXT[] NOT NULL DEFAULT '{}',
+        budget_type   TEXT,
+        due_date      DATE,
+        status        TEXT NOT NULL DEFAULT 'draft',
+        created_by    INTEGER REFERENCES portal_users(portal_user_id) ON DELETE SET NULL,
+        created_at    TIMESTAMPTZ DEFAULT now(),
+        updated_at    TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS pitches (
+        pitch_id      SERIAL PRIMARY KEY,
+        client_id     INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        brief_id      INTEGER REFERENCES briefs(brief_id) ON DELETE SET NULL,
+        sku_root      VARCHAR NOT NULL REFERENCES titles(sku_root) ON DELETE CASCADE,
+        rep_note      TEXT,
+        status        TEXT NOT NULL DEFAULT 'pending',
+        responded_at  TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ DEFAULT now(),
+        UNIQUE (client_id, sku_root, brief_id)
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS licenses (
+        license_id     SERIAL PRIMARY KEY,
+        client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        sku_root       VARCHAR NOT NULL REFERENCES titles(sku_root) ON DELETE CASCADE,
+        brief_id       INTEGER REFERENCES briefs(brief_id) ON DELETE SET NULL,
+        license_type   TEXT NOT NULL DEFAULT 'Sync+Master',
+        formats        TEXT[] NOT NULL DEFAULT '{WAV,MP3}',
+        expires_at     DATE,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_messages (
+        message_id     SERIAL PRIMARY KEY,
+        client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        sender_type    TEXT NOT NULL CHECK (sender_type IN ('portal_user','haus_rep')),
+        sender_id      INTEGER,
+        sender_name    TEXT NOT NULL,
+        body           TEXT NOT NULL,
+        read_at        TIMESTAMPTZ,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_playlists (
+        playlist_id    SERIAL PRIMARY KEY,
+        client_id      INTEGER NOT NULL REFERENCES clients(id) ON DELETE CASCADE,
+        name           TEXT NOT NULL,
+        share_token    TEXT UNIQUE,
+        created_by     TEXT,
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS portal_playlist_tracks (
+        playlist_id  INTEGER NOT NULL REFERENCES portal_playlists(playlist_id) ON DELETE CASCADE,
+        sku_root     VARCHAR NOT NULL REFERENCES titles(sku_root) ON DELETE CASCADE,
+        sort_order   INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (playlist_id, sku_root)
+      )
+    `)
+
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_briefs_client ON briefs(client_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_pitches_client ON pitches(client_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_licenses_client ON licenses(client_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_client ON portal_messages(client_id)`)
+    console.log('✅ client portal tables ready')
+  } catch (e) { console.warn('[schema] client portal tables:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
 // Neon serverless computes may sleep after ~5 min of inactivity (30-60s cold start).
 // We don't ping proactively — next query wakes compute if needed.
 
+_logFsRoots()
+
 // Auto-connect to Neon on startup — tries saved config first, falls back to default
 ;(async () => {
   try {
+    // DATABASE_URL wins over the saved config file. The other way round, a stale
+    // pgConn left in ~/.haus-workspace-cfg.json would keep the app pointed at a
+    // rotated-away credential and it would look broken for no visible reason.
     let connStr = DEFAULT_NEON
-    const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
-    if (fs.existsSync(cfgPath)) {
-      const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
-      if (cfg.pgConn) connStr = cfg.pgConn
+    if (!connStr) {
+      const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
+      if (fs.existsSync(cfgPath)) {
+        const cfg = JSON.parse(fs.readFileSync(cfgPath, 'utf8'))
+        if (cfg.pgConn) connStr = cfg.pgConn
+      }
+    }
+    if (!connStr) {
+      console.error('FATAL: no database connection string. Set DATABASE_URL in .env')
+      console.error('(or the Vercel project env vars). Nothing works without it.')
+      process.exit(1)
     }
 
     // Retry logic for initial connection (Neon can reset on cold start)
@@ -371,15 +700,35 @@ app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const hash   = _hashPassword(password)
+    // Fetch by username, then verify — the old query compared the hash in SQL, which
+    // cannot work once each row has its own salt. Wrapped in _pgRetry: Neon drops
+    // idle clients and a login attempt during that window should retry, not fail.
     const result = await _pgRetry(
-      `SELECT user_id, username, display_name FROM haus_users WHERE LOWER(username)=LOWER($1) AND password_hash=$2`,
-      [username, hash],
+      `SELECT user_id, username, display_name, password_hash, role, must_change_password
+         FROM haus_users WHERE LOWER(username)=LOWER($1)`,
+      [username],
       'auth/login'
     )
-    if (!result.rows.length) return res.json({ ok: false, error: 'Invalid username or password' })
-    req.session.user = result.rows[0]
-    res.json({ ok: true, user: result.rows[0] })
+    const row = result.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Invalid username or password' })
+    const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
+    if (!ok) return res.json({ ok: false, error: 'Invalid username or password' })
+    // Transparent re-hash: an account on the legacy scheme is migrated the first
+    // time it signs in, without anyone being locked out.
+    if (needsUpgrade) {
+      await pgPool.query(`UPDATE haus_users SET password_hash=$1 WHERE user_id=$2`,
+        [_hashPassword(password), row.user_id]).catch(e => console.warn('[auth] rehash failed:', e.message))
+      console.log(`[auth] upgraded ${row.username} to scrypt`)
+    }
+    const user = {
+      user_id: row.user_id,
+      username: row.username,
+      display_name: row.display_name,
+      role: row.role || 'user',
+      must_change_password: row.must_change_password === true
+    }
+    req.session.user = user
+    res.json({ ok: true, user })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
@@ -396,14 +745,374 @@ app.post('/api/auth/change-password', async (req, res) => {
   const { username, oldPassword, newPassword } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const oldHash = _hashPassword(oldPassword)
-    const newHash = _hashPassword(newPassword)
-    const result  = await pgPool.query(
-      `UPDATE haus_users SET password_hash=$1 WHERE LOWER(username)=LOWER($2) AND password_hash=$3 RETURNING user_id`,
-      [newHash, username, oldHash]
-    )
-    if (!result.rowCount) return res.json({ ok: false, error: 'Current password incorrect' })
+    if (!newPassword || String(newPassword).length < 12) {
+      return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+    }
+    const cur = await pgPool.query(
+      `SELECT user_id, password_hash FROM haus_users WHERE LOWER(username)=LOWER($1)`, [username])
+    const row = cur.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Current password incorrect' })
+    if (!_verifyPassword(oldPassword || '', row.password_hash).ok) {
+      return res.json({ ok: false, error: 'Current password incorrect' })
+    }
+    await pgPool.query(
+      `UPDATE haus_users SET password_hash=$1, must_change_password=false WHERE user_id=$2`,
+      [_hashPassword(newPassword), row.user_id])
+    if (req.session?.user?.user_id === row.user_id) req.session.user.must_change_password = false
     res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+
+// HAUS is a two-person shop (Erik + Kyle) and Erik is the point of contact for
+// every client — there is no per-client rep assignment to manage.
+const HAUS_REP = 'Erik Steinert'
+
+// ─── Client Portal routes ───────────────────────────────────────────────────
+// Producers/clients (the `clients` table) log in here with their own email +
+// password, entirely separate from haus_users admin login. Every query below
+// is scoped by req.session.portalUser.client_id so one client can never see
+// another's briefs, pitches, licenses, or messages.
+app.post('/api/portal/auth/login', async (req, res) => {
+  const { email, password } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT pu.portal_user_id, pu.client_id, pu.email, pu.display_name,
+              pu.password_hash, pu.must_change_password,
+              c.name AS client_name
+         FROM portal_users pu
+         JOIN clients c ON c.id = pu.client_id
+        WHERE LOWER(pu.email) = LOWER($1)`,
+      [email]
+    )
+    const row = result.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Invalid email or password' })
+    const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
+    if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (needsUpgrade) {
+      await pgPool.query(`UPDATE portal_users SET password_hash=$1 WHERE portal_user_id=$2`,
+        [_hashPassword(password), row.portal_user_id]).catch(e => console.warn('[portal-auth] rehash failed:', e.message))
+    }
+    const portalUser = {
+      portal_user_id: row.portal_user_id,
+      client_id: row.client_id,
+      email: row.email,
+      display_name: row.display_name,
+      client_name: row.client_name,
+      haus_rep: HAUS_REP,
+      must_change_password: row.must_change_password === true
+    }
+    req.session.portalUser = portalUser
+    res.json({ ok: true, user: portalUser })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/auth/logout', (req, res) => {
+  req.session.destroy()
+  res.json({ ok: true })
+})
+
+app.get('/api/portal/auth/me', (req, res) => {
+  res.json({ user: req.session?.portalUser || null })
+})
+
+app.post('/api/portal/auth/change-password', async (req, res) => {
+  const { oldPassword, newPassword } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const pu = req.session?.portalUser
+  if (!pu) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    if (!newPassword || String(newPassword).length < 12) {
+      return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+    }
+    const cur = await pgPool.query(`SELECT password_hash FROM portal_users WHERE portal_user_id=$1`, [pu.portal_user_id])
+    const row = cur.rows[0]
+    if (!row || !_verifyPassword(oldPassword || '', row.password_hash).ok) {
+      return res.json({ ok: false, error: 'Current password incorrect' })
+    }
+    await pgPool.query(`UPDATE portal_users SET password_hash=$1, must_change_password=false WHERE portal_user_id=$2`,
+      [_hashPassword(newPassword), pu.portal_user_id])
+    req.session.portalUser.must_change_password = false
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Overview ────────────────────────────────────────────────────────────
+app.get('/api/portal/overview', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const clientId = req.session.portalUser.client_id
+  try {
+    const [pitches, briefs, licenses, messages, client] = await Promise.all([
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM pitches WHERE client_id=$1 AND status='pending'`, [clientId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM briefs WHERE client_id=$1 AND status='active'`, [clientId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM licenses WHERE client_id=$1 AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)`, [clientId]),
+      pgPool.query(`SELECT COUNT(*)::int AS n FROM portal_messages WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`, [clientId]),
+      pgPool.query(`SELECT name FROM clients WHERE id=$1`, [clientId])
+    ])
+    res.json({
+      ok: true,
+      client: client.rows[0] ? { ...client.rows[0], haus_rep: HAUS_REP } : null,
+      pendingPitches: pitches.rows[0].n,
+      activeBriefs: briefs.rows[0].n,
+      activeLicenses: licenses.rows[0].n,
+      unreadMessages: messages.rows[0].n
+    })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Briefs ───────────────────────────────────────────────────────────────
+app.get('/api/portal/briefs', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT brief_id, title, description, mood_tags, budget_type, due_date, status, created_at
+         FROM briefs WHERE client_id=$1 ORDER BY created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    res.json({ ok: true, briefs: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/briefs', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { title, description, mood_tags, budget_type, due_date } = req.body
+  if (!title || !String(title).trim()) return res.json({ ok: false, error: 'Title is required' })
+  try {
+    const result = await pgPool.query(
+      `INSERT INTO briefs (client_id, title, description, mood_tags, budget_type, due_date, status, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
+       RETURNING brief_id, title, description, mood_tags, budget_type, due_date, status, created_at`,
+      [req.session.portalUser.client_id, title, description || null,
+       Array.isArray(mood_tags) ? mood_tags : [], budget_type || null, due_date || null,
+       req.session.portalUser.portal_user_id]
+    )
+    res.json({ ok: true, brief: result.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Pitches ──────────────────────────────────────────────────────────────
+app.get('/api/portal/pitches', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT p.pitch_id, p.brief_id, p.rep_note, p.status, p.created_at, p.responded_at,
+              t.sku_root, t.title, t.key, t.bpm, t.mood,
+              pg.primary_genre_name
+         FROM pitches p
+         JOIN titles t ON t.sku_root = p.sku_root
+         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+        WHERE p.client_id=$1
+        ORDER BY p.created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    res.json({ ok: true, pitches: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/pitches/:id/respond', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { status } = req.body
+  if (!['approved', 'passed'].includes(status)) return res.json({ ok: false, error: 'status must be approved or passed' })
+  try {
+    const result = await pgPool.query(
+      `UPDATE pitches SET status=$1, responded_at=now()
+        WHERE pitch_id=$2 AND client_id=$3
+        RETURNING pitch_id, status, responded_at`,
+      [status, req.params.id, req.session.portalUser.client_id]
+    )
+    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Pitch not found' })
+    res.json({ ok: true, pitch: result.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Licenses ─────────────────────────────────────────────────────────────
+app.get('/api/portal/licenses', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT l.license_id, l.license_type, l.formats, l.expires_at, l.created_at,
+              t.sku_root, t.title, b.title AS brief_title
+         FROM licenses l
+         JOIN titles t ON t.sku_root = l.sku_root
+         LEFT JOIN briefs b ON b.brief_id = l.brief_id
+        WHERE l.client_id=$1
+        ORDER BY l.created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    res.json({ ok: true, licenses: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Library (browse the full HAUS catalog to pull tracks into a playlist) ──
+// Not scoped by client_id — every logged-in client sees the same catalog.
+// facets:true also returns the distinct genre/mood lists for filter dropdowns,
+// asked for once by the client and cached client-side rather than on every search.
+app.get('/api/portal/library', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const q      = (req.query.q || '').trim()
+    const genre  = (req.query.genre || '').trim()
+    const mood   = (req.query.mood || '').trim()
+    const limit  = Math.min(parseInt(req.query.limit, 10) || 50, 200)
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0)
+
+    const where = []
+    const params = []
+    if (q) { params.push(`%${q}%`); where.push(`t.title ILIKE $${params.length}`) }
+    if (genre) { params.push(genre); where.push(`pg.primary_genre_name = $${params.length}`) }
+    if (mood) { params.push(`%${mood}%`); where.push(`t.mood ILIKE $${params.length}`) }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+    params.push(limit, offset)
+    const result = await pgPool.query(
+      `SELECT t.sku_root, t.title, t.key, t.bpm, t.mood, pg.primary_genre_name
+         FROM titles t
+         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+         ${whereSql}
+        ORDER BY t.title
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    let facets = undefined
+    if (req.query.facets === 'true') {
+      const [genres, moods] = await Promise.all([
+        pgPool.query(`SELECT DISTINCT primary_genre_name FROM primary_genres ORDER BY primary_genre_name`),
+        pgPool.query(`SELECT DISTINCT mood FROM titles WHERE mood IS NOT NULL AND mood <> '' ORDER BY mood LIMIT 200`)
+      ])
+      facets = { genres: genres.rows.map(r => r.primary_genre_name), moods: moods.rows.map(r => r.mood) }
+    }
+
+    res.json({ ok: true, tracks: result.rows, facets })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Playlists — clients build their own from the library; HAUS staff can
+// still create/curate these too once that admin UI exists (not built yet) ──
+app.get('/api/portal/playlists', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const playlists = await pgPool.query(
+      `SELECT playlist_id, name, share_token, created_by, created_at
+         FROM portal_playlists WHERE client_id=$1 ORDER BY created_at DESC`,
+      [req.session.portalUser.client_id]
+    )
+    const withTracks = await Promise.all(playlists.rows.map(async pl => {
+      const tracks = await pgPool.query(
+        `SELECT t.sku_root, t.title, t.key, t.bpm
+           FROM portal_playlist_tracks ppt
+           JOIN titles t ON t.sku_root = ppt.sku_root
+          WHERE ppt.playlist_id=$1
+          ORDER BY ppt.sort_order`,
+        [pl.playlist_id]
+      )
+      return { ...pl, tracks: tracks.rows }
+    }))
+    res.json({ ok: true, playlists: withTracks })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/playlists', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { name } = req.body
+  if (!name || !String(name).trim()) return res.json({ ok: false, error: 'Playlist name is required' })
+  try {
+    const pu = req.session.portalUser
+    const result = await pgPool.query(
+      `INSERT INTO portal_playlists (client_id, name, created_by)
+       VALUES ($1, $2, $3)
+       RETURNING playlist_id, name, share_token, created_by, created_at`,
+      [pu.client_id, name, pu.display_name]
+    )
+    res.json({ ok: true, playlist: { ...result.rows[0], tracks: [] } })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.delete('/api/portal/playlists/:id', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `DELETE FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
+      [req.params.id, req.session.portalUser.client_id]
+    )
+    if (!result.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/playlists/:id/tracks', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { sku_root } = req.body
+  if (!sku_root) return res.json({ ok: false, error: 'sku_root is required' })
+  try {
+    // Ownership check — the playlist must belong to this client.
+    const owns = await pgPool.query(
+      `SELECT 1 FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
+      [req.params.id, req.session.portalUser.client_id]
+    )
+    if (!owns.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
+
+    const pos = await pgPool.query(
+      `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM portal_playlist_tracks WHERE playlist_id=$1`,
+      [req.params.id]
+    )
+    await pgPool.query(
+      `INSERT INTO portal_playlist_tracks (playlist_id, sku_root, sort_order)
+       VALUES ($1, $2, $3) ON CONFLICT (playlist_id, sku_root) DO NOTHING`,
+      [req.params.id, sku_root, pos.rows[0].next]
+    )
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.delete('/api/portal/playlists/:id/tracks/:skuRoot', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const owns = await pgPool.query(
+      `SELECT 1 FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
+      [req.params.id, req.session.portalUser.client_id]
+    )
+    if (!owns.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
+    await pgPool.query(
+      `DELETE FROM portal_playlist_tracks WHERE playlist_id=$1 AND sku_root=$2`,
+      [req.params.id, req.params.skuRoot]
+    )
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Messages ─────────────────────────────────────────────────────────────
+app.get('/api/portal/messages', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const clientId = req.session.portalUser.client_id
+    const result = await pgPool.query(
+      `SELECT message_id, sender_type, sender_name, body, created_at, read_at
+         FROM portal_messages WHERE client_id=$1 ORDER BY created_at ASC`,
+      [clientId]
+    )
+    pgPool.query(
+      `UPDATE portal_messages SET read_at=now() WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`,
+      [clientId]
+    ).catch(e => console.warn('[portal-messages] mark-read failed:', e.message))
+    res.json({ ok: true, messages: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/portal/messages', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { body } = req.body
+  if (!body || !String(body).trim()) return res.json({ ok: false, error: 'Message body is required' })
+  try {
+    const pu = req.session.portalUser
+    const result = await pgPool.query(
+      `INSERT INTO portal_messages (client_id, sender_type, sender_id, sender_name, body)
+       VALUES ($1, 'portal_user', $2, $3, $4)
+       RETURNING message_id, sender_type, sender_name, body, created_at`,
+      [pu.client_id, pu.portal_user_id, pu.display_name, body]
+    )
+    res.json({ ok: true, message: result.rows[0] })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
@@ -482,6 +1191,24 @@ app.post('/api/pg/connect', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
+// Restored 2026-09-22 (was deleted 2026-08-12 as a SQL-injection risk, but
+// the promised replacement -- specific per-feature routes like
+// /api/composers/list -- was never built, and pgQ() in index.html calls
+// this directly at 370+ call sites, so deleting it without a replacement
+// silently broke Catalog and most other DB-backed admin features.
+//
+// Restored behind ADMIN_ROUTES (see above) rather than left on the plain
+// logged-in-user check it had before: only a haus_users row with
+// role='admin' can reach it now. This does not make arbitrary SQL safe --
+// an admin session can still run a destructive query by mistake -- but it
+// closes off the Client Portal and Artist Portal identities entirely
+// (req.session.portalUser / req.session.artistUser never satisfy
+// req.session.user, so they can never match this route at all) and matches
+// how PUBLIC_ROUTES/ADMIN_ROUTES already gate every other route with
+// host-level or bucket-level power. Replacing this with purpose-built
+// per-feature routes (the original intent) remains open work -- see
+// engineering_notes.md, 2026-09-22 -- tracked separately, not blocking this
+// restore, which exists to stop the app being broken today.
 app.post('/api/pg/query', async (req, res) => {
   const { sql, params } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
@@ -499,7 +1226,8 @@ app.get('/api/pg/status', async (req, res) => {
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
 app.post('/api/fs/read-dir', (req, res) => {
-  const { dirPath } = req.body
+  const dirPath = _safeRead(req.body.dirPath)
+  if (!dirPath) return res.json({ error: 'Path not allowed' })
   try {
     const items = fs.readdirSync(dirPath, { withFileTypes: true })
     const result = items
@@ -520,8 +1248,8 @@ app.post('/api/fs/read-dir', (req, res) => {
 
 // Read BPM/key from audio file tags (same music-metadata library used by staging watcher)
 app.post('/api/fs/audio-meta', async (req, res) => {
-  const { filePath } = req.body
-  if (!filePath) return res.json({ ok: false, error: 'No path' })
+  const filePath = _safeRead(req.body.filePath)
+  if (!filePath) return res.json(_DENIED)
   try {
     let mm = null
     try { mm = require('music-metadata') } catch { return res.json({ ok: false, error: 'music-metadata not installed' }) }
@@ -546,7 +1274,8 @@ app.post('/api/fs/audio-meta', async (req, res) => {
 
 // Check whether _FULL audio files are locally available or cloud-only (Dropbox SmartSync)
 app.post('/api/fs/audio-status', async (req, res) => {
-  const { folderPath } = req.body
+  const folderPath = _safeRead(req.body.folderPath)
+  if (!folderPath) return res.json({ mp3: 'error', wav: 'error' })
   try {
     const names = await fs.promises.readdir(folderPath).catch(() => [])
     const checkFile = async (pattern) => {
@@ -565,46 +1294,31 @@ app.post('/api/fs/audio-status', async (req, res) => {
   } catch (e) { res.json({ mp3: 'error', wav: 'error' }) }
 })
 
-app.post('/api/fs/count-files', (req, res) => {
-  const { dirPath, ext } = req.body
-  try {
-    const cmd = ext ? `find "${dirPath}" -name "*.${ext}" | wc -l` : `find "${dirPath}" -type f | wc -l`
-    const result = execSync(cmd).toString().trim()
-    res.json(parseInt(result, 10))
-  } catch { res.json(0) }
-})
-
 app.post('/api/fs/path-exists', (req, res) => {
-  const { filePath } = req.body
-  res.json(fs.existsSync(filePath))
+  const filePath = _safeRead(req.body.filePath)
+  res.json(filePath ? fs.existsSync(filePath) : false)
 })
 
 app.post('/api/fs/read-file', (req, res) => {
-  const { filePath } = req.body
+  const filePath = _safeRead(req.body.filePath)
+  if (!filePath) return res.json(null)
   try { res.json(fs.readFileSync(filePath, 'utf8')) }
   catch { res.json(null) }
 })
 
 app.post('/api/fs/write-file', (req, res) => {
-  const { filePath, content } = req.body
+  const filePath = _safeWrite(req.body.filePath)
+  if (!filePath) return res.json(false)
   try {
     fs.mkdirSync(path.dirname(filePath), { recursive: true })
-    fs.writeFileSync(filePath, content, 'utf8')
+    fs.writeFileSync(filePath, req.body.content ?? '', 'utf8')
     res.json(true)
   } catch { res.json(false) }
 })
 
-app.post('/api/fs/mkdir', (req, res) => {
-  const { dirPath } = req.body
-  if (!dirPath) return res.json({ ok: false, error: 'No dirPath provided' })
-  try {
-    fs.mkdirSync(dirPath, { recursive: true })
-    res.json({ ok: true, path: dirPath })
-  } catch (e) { res.json({ ok: false, error: e.message }) }
-})
-
 app.post('/api/fs/folder-stats', (req, res) => {
-  const { dirPath } = req.body
+  const dirPath = _safeRead(req.body.dirPath)
+  if (!dirPath) return res.json({ audioCount: 0, totalCount: 0, folderCount: 0 })
   try {
     const audioExts = ['.wav', '.mp3', '.aiff', '.aif']
     let audioCount = 0, totalCount = 0, folderCount = 0
@@ -874,7 +1588,10 @@ app.get('/api/shell/show-folder-picker', (req, res) => {
 
 // ─── Server-side canonical paths ───────────────────────────────────────────
 // Stores shared folder paths so all users inherit them without local config.
-const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail', 'pgConn']
+// 'pgConn' was in this list, and GET /api/cfg/server-paths is read before login —
+// so the database connection string was handed to anyone who asked. The server gets
+// its connection from DATABASE_URL now and the browser never needs one.
+const SERVER_PATH_KEYS = ['hausjup', 'staging', 'intake', 'finish', 'gmail']
 
 app.get('/api/cfg/server-paths', (req, res) => {
   const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
@@ -893,6 +1610,10 @@ app.post('/api/cfg/server-paths', (req, res) => {
     if (req.body[k] !== undefined) cfg[k] = req.body[k]
   }
   fs.writeFileSync(cfgPath, JSON.stringify(cfg, null, 2))
+  // A second app.post('/api/cfg/server-paths') was registered later in this file to
+  // restart the staging watcher on a path change. Express matches the first route,
+  // so that hook never ran and the watcher kept watching the old folder. Folded in here.
+  res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
   res.json({ ok: true })
 })
 
@@ -907,6 +1628,8 @@ app.get('/api/audio/stream', async (req, res) => {
     try { filePath = Buffer.from(req.query.h, 'hex').toString('utf8') } catch {}
   }
   if (!filePath) return res.status(400).json({ error: 'No path', receivedQuery: req.query })
+  filePath = _safeRead(filePath)
+  if (!filePath) return res.status(403).json({ error: 'Path not allowed' })
   let stat
   try { stat = await fs.promises.stat(filePath) } catch { return res.status(404).json({ error: 'File not found' }) }
 
@@ -5853,13 +6576,6 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     console.error('[import] Unexpected error:', e.message)
     res.status(500).json({ ok: false, error: e.message })
   }
-})
-
-// Restart watcher when staging path changes
-app.post('/api/cfg/server-paths', async (req, res, next) => {
-  // handled by original route below — we just hook to restart watcher
-  res.on('finish', () => { if (pgPool) startStagingWatcher(pgPool).catch(() => {}) })
-  next()
 })
 
 // ─── Clients import ────────────────────────────────────────────────────────

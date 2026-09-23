@@ -303,4 +303,16 @@ function validateFilename(filename) {
   }
 }
 
-
+// Export for use in both app and Node environments
+if (typeof module !== 'undefined' && module.exports) {
+  module.exports = {
+    detectVersion,
+    isValidKey,
+    normalizeKey,
+    buildHausName,
+    titleToCamelCase,
+    deduplicateHausNames,
+    validateFilename,
+    parseFilename
+  }
+}

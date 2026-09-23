@@ -1,0 +1,242 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HAUS — Client Portal (preview)</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Geist:wght@300;400;500;600;700&display=swap">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
+  --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
+  --radius:10px;--radius-sm:6px;
+  --navy:#0b2a5b;--teal:#C0C9CD;--green-accent:#6F927E;
+  --blue:#1a6cf6;--blue-bg:#eef4fe;--blue-text:#1251c2;
+  --green:#1a8a4a;--green-bg:#eaf6ef;--green-text:#156638;
+  --amber:#b87500;--amber-bg:#fdf3e0;--amber-text:#8a5800;
+  --red:#d63030;--red-bg:#fdeaea;--red-text:#a82020;
+}
+body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);height:100vh;overflow:hidden;display:flex;flex-direction:column}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:7px 13px;font-size:12px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;font-family:inherit;white-space:nowrap}
+.btn:hover{background:var(--bg2)}
+.btn.primary{background:var(--navy);color:#fff;border-color:var(--navy)}
+.btn i{font-size:14px}
+.pill{display:inline-flex;align-items:center;gap:4px;font-size:10px;font-weight:600;padding:2px 7px;border-radius:10px;flex-shrink:0;text-transform:capitalize}
+.pill.blue{background:var(--blue-bg);color:var(--blue-text)}
+.pill.green{background:var(--green-bg);color:var(--green-text)}
+.pill.amber{background:var(--amber-bg);color:var(--amber-text)}
+.pill.gray{background:var(--bg2);color:var(--text2)}
+.form-label{font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.05em;margin-bottom:5px;display:block}
+.form-input,textarea.form-input,select.form-input{padding:8px 10px;border:0.5px solid var(--border2);border-radius:var(--radius-sm);font-size:13px;color:var(--text);background:var(--bg);font-family:inherit;outline:none;width:100%}
+::-webkit-scrollbar{width:5px;height:5px}
+::-webkit-scrollbar-thumb{background:var(--border2);border-radius:3px}
+
+#app-shell{flex:1;display:flex;flex-direction:column;overflow:hidden}
+.topbar{display:flex;align-items:center;gap:0;padding:0 20px;height:56px;background:var(--navy);flex-shrink:0}
+.topbar-brand{color:#fff;font-weight:700;font-size:18px;letter-spacing:.04em;margin-right:26px}
+.nav-tabs{display:flex;gap:2px;flex:1}
+.nav-tab{display:flex;align-items:center;gap:6px;padding:6px 14px;font-size:13px;font-weight:500;color:rgba(255,255,255,0.65);cursor:pointer;border-bottom:2px solid transparent;margin-bottom:-1px;background:none;border:none;font-family:inherit;border-radius:var(--radius-sm)}
+.nav-tab:hover{color:#fff;background:rgba(255,255,255,0.08)}
+.nav-tab.active{color:#fff;background:rgba(255,255,255,0.12);font-weight:600}
+.nav-tab i{font-size:15px}
+.nav-badge{background:var(--red);color:#fff;font-size:9px;font-weight:700;border-radius:8px;padding:1px 5px;margin-left:2px}
+.topbar-right{display:flex;align-items:center;gap:10px}
+.user-chip{font-size:12px;color:rgba(255,255,255,0.85);display:flex;align-items:center;gap:8px;padding:5px 8px;border-radius:var(--radius-sm)}
+.avatar-sm{width:26px;height:26px;border-radius:50%;background:var(--green-accent);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;color:#fff;flex-shrink:0}
+
+.section{flex:1;overflow-y:auto;display:none;flex-direction:column;padding:22px 28px}
+.section.active{display:flex}
+.section-head{display:flex;align-items:center;gap:10px;margin-bottom:18px;flex-wrap:wrap}
+.section-head h2{font-size:16px;font-weight:700}
+.section-sub{font-size:12px;color:var(--text3)}
+
+.stat-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:12px;margin-bottom:24px}
+.stat-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px}
+.stat-card .n{font-size:24px;font-weight:700;color:var(--navy)}
+.stat-card .lbl{font-size:11px;color:var(--text3);margin-top:3px}
+.rep-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:16px;display:flex;align-items:center;gap:12px;max-width:420px}
+.rep-card .avatar-sm{background:var(--navy)}
+
+.item-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;margin-bottom:10px}
+.item-top{display:flex;align-items:flex-start;justify-content:space-between;gap:10px;margin-bottom:4px}
+.item-title{font-size:14px;font-weight:600}
+.item-meta{font-size:12px;color:var(--text3);margin-top:2px}
+.item-actions{display:flex;gap:8px;margin-top:10px}
+
+.library-bar{display:flex;gap:10px;align-items:flex-end;flex-wrap:wrap;margin-bottom:16px}
+.library-bar > div{min-width:160px}
+.library-bar .full{flex:1;min-width:220px}
+.track-row{display:flex;align-items:center;gap:12px;padding:9px 12px;border-bottom:0.5px solid var(--border);font-size:13px}
+.track-row:hover{background:var(--bg2)}
+.track-row .tr-title{font-weight:500;flex:1;min-width:0}
+.track-row .tr-meta{color:var(--text3);font-size:11px}
+.lib-results{border:0.5px solid var(--border);border-radius:var(--radius);background:var(--bg3);overflow:hidden}
+
+.playlist-card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);margin-bottom:14px;overflow:hidden}
+.playlist-card-head{display:flex;align-items:center;gap:10px;padding:12px 16px;border-bottom:0.5px solid var(--border)}
+.playlist-card-head .name{font-size:14px;font-weight:600;flex:1}
+.playlist-track-row{display:flex;align-items:center;justify-content:space-between;padding:8px 16px;font-size:12px;border-bottom:0.5px solid var(--border)}
+.playlist-track-row:last-child{border-bottom:none}
+.icon-btn{background:none;border:none;cursor:pointer;color:var(--text3);font-size:14px}
+
+#preview-banner{background:#1a1a18;color:#fff;font-size:11px;text-align:center;padding:5px;letter-spacing:.03em}
+</style>
+</head>
+<body>
+<div id="preview-banner">PREVIEW — sample data, nothing here talks to a real server</div>
+
+<div id="app-shell">
+  <div class="topbar">
+    <div class="topbar-brand">ATMOSPHERE</div>
+    <div class="nav-tabs">
+      <button class="nav-tab active" onclick="sw('overview',this)"><i class="ti ti-layout-dashboard"></i> Overview</button>
+      <button class="nav-tab" onclick="sw('pitches',this)"><i class="ti ti-send"></i> Pitches</button>
+      <button class="nav-tab" onclick="sw('briefs',this)"><i class="ti ti-clipboard-text"></i> Briefs</button>
+      <button class="nav-tab" onclick="sw('licenses',this)"><i class="ti ti-certificate"></i> My Licenses</button>
+      <button class="nav-tab" onclick="sw('library',this)"><i class="ti ti-library"></i> Library</button>
+      <button class="nav-tab" onclick="sw('playlists',this)"><i class="ti ti-playlist"></i> Playlists</button>
+      <button class="nav-tab" onclick="sw('messages',this)"><i class="ti ti-message-circle"></i> Messages <span class="nav-badge">2</span></button>
+    </div>
+    <div class="topbar-right">
+      <div class="user-chip"><div class="avatar-sm">LM</div><span>Liz Morgan</span><i class="ti ti-chevron-down" style="font-size:12px"></i></div>
+    </div>
+  </div>
+
+  <div class="section active" id="s-overview">
+    <div class="section-head"><h2>Overview</h2></div>
+    <div class="stat-grid">
+      <div class="stat-card"><div class="n">3</div><div class="lbl">Pending pitches</div></div>
+      <div class="stat-card"><div class="n">2</div><div class="lbl">Active briefs</div></div>
+      <div class="stat-card"><div class="n">7</div><div class="lbl">Active licenses</div></div>
+      <div class="stat-card"><div class="n">2</div><div class="lbl">Unread messages</div></div>
+    </div>
+    <div class="rep-card">
+      <div class="avatar-sm" style="width:36px;height:36px;font-size:13px">ES</div>
+      <div><div style="font-size:13px;font-weight:600">Erik Steinert</div><div style="font-size:11px;color:var(--text3)">Your contact at HAUS</div></div>
+    </div>
+  </div>
+
+  <div class="section" id="s-pitches">
+    <div class="section-head"><h2>Pitches</h2><span class="section-sub">Tracks HAUS has sent for consideration</span></div>
+    <div id="pitches-list"></div>
+  </div>
+
+  <div class="section" id="s-briefs">
+    <div class="section-head"><h2>Briefs</h2><span class="section-sub">Tell HAUS what you're looking for</span></div>
+    <div id="briefs-list"></div>
+  </div>
+
+  <div class="section" id="s-licenses">
+    <div class="section-head"><h2>My Licenses</h2><span class="section-sub">Tracks you've licensed, with formats and expiry</span></div>
+    <div id="licenses-list"></div>
+  </div>
+
+  <div class="section" id="s-library">
+    <div class="section-head"><h2>Library</h2><span class="section-sub">Browse the full HAUS catalog and add tracks to a playlist</span></div>
+    <div class="library-bar">
+      <div class="full"><label class="form-label">Search</label><input class="form-input" placeholder="Track title…"></div>
+      <div><label class="form-label">Genre</label><select class="form-input"><option>All genres</option></select></div>
+      <div><label class="form-label">Mood</label><select class="form-input"><option>All moods</option></select></div>
+      <div><label class="form-label">Adding to</label><select class="form-input"><option>For your consideration — Q4</option></select></div>
+    </div>
+    <div class="lib-results" id="library-results"></div>
+  </div>
+
+  <div class="section" id="s-playlists">
+    <div class="section-head"><h2>Playlists</h2><span class="section-sub">Yours to build — add tracks from the Library tab</span><button class="btn primary" style="margin-left:auto"><i class="ti ti-plus"></i> New playlist</button></div>
+    <div id="playlists-list"></div>
+  </div>
+
+  <div class="section" id="s-messages">
+    <div class="section-head"><h2>Messages</h2></div>
+    <div id="messages-scroll" style="display:flex;flex-direction:column;gap:10px"></div>
+  </div>
+</div>
+
+<script>
+function esc(s){ return String(s) }
+function sw(name, btn){
+  document.querySelectorAll('.nav-tab').forEach(t=>t.classList.remove('active'))
+  document.querySelectorAll('.section').forEach(s=>s.classList.remove('active'))
+  btn.classList.add('active')
+  document.getElementById('s-'+name).classList.add('active')
+}
+
+const PITCHES = [
+  { title:'Slow Burn', genre:'Dramatic Underscore', key:'Cm', bpm:78, status:'pending', note:'Editor loved this for the season finale reveal.' },
+  { title:'Neon Drift', genre:'Synthwave', key:'Am', bpm:112, status:'pending', note:null },
+  { title:'Quiet Static', genre:'Ambient', key:'F', bpm:64, status:'approved', note:'Cleared for the cold open.' },
+]
+document.getElementById('pitches-list').innerHTML = PITCHES.map(p => `
+  <div class="item-card">
+    <div class="item-top">
+      <div><div class="item-title">${p.title}</div><div class="item-meta">${p.genre} · ${p.key} · ${p.bpm} BPM</div></div>
+      <span class="pill ${p.status==='approved'?'green':'amber'}">${p.status}</span>
+    </div>
+    ${p.note ? `<div style="font-size:12px;color:var(--text2);margin-top:6px">"${p.note}"</div>` : ''}
+    ${p.status==='pending' ? `<div class="item-actions"><button class="btn primary"><i class="ti ti-check"></i> Approve</button><button class="btn"><i class="ti ti-x"></i> Pass</button></div>` : ''}
+  </div>`).join('')
+
+const BRIEFS = [
+  { title:'Season 4 opening credits', desc:'Tense, driving, builds through :20', tags:['tense','driving','dark'], budget:'Sync+Master', due:'Oct 3, 2026', status:'active' },
+  { title:'Holiday campaign backing track', desc:'Warm, upbeat, 30s cutdown needed', tags:['warm','upbeat'], budget:'Blanket', due:'Nov 1, 2026', status:'active' },
+]
+document.getElementById('briefs-list').innerHTML = BRIEFS.map(b => `
+  <div class="item-card">
+    <div class="item-top">
+      <div><div class="item-title">${b.title}</div><div class="item-meta">${b.budget} · Due ${b.due}</div></div>
+      <span class="pill blue">${b.status}</span>
+    </div>
+    <div style="font-size:12px;color:var(--text2);margin-top:6px">${b.desc}</div>
+    <div style="margin-top:8px;display:flex;gap:5px;flex-wrap:wrap">${b.tags.map(t=>`<span class="pill gray">${t}</span>`).join('')}</div>
+  </div>`).join('')
+
+const LICENSES = [
+  { title:'Slow Burn', type:'Sync+Master', brief:'Season 4 opening credits', expires:'Sep 3, 2027', formats:['WAV','Stems'] },
+  { title:'Midnight Runner', type:'Blanket', brief:null, expires:'—', formats:['WAV','MP3'] },
+]
+document.getElementById('licenses-list').innerHTML = LICENSES.map(l => `
+  <div class="item-card">
+    <div class="item-top"><div><div class="item-title">${l.title}</div><div class="item-meta">${l.type}${l.brief?' · '+l.brief:''} · Expires ${l.expires}</div></div></div>
+    <div style="margin-top:8px;display:flex;gap:6px;flex-wrap:wrap">${l.formats.map(f=>`<span class="pill blue">${f}</span>`).join('')}</div>
+    <div style="font-size:11px;color:var(--text3);margin-top:8px">Contact HAUS for download links.</div>
+  </div>`).join('')
+
+const LIB = [
+  { title:'Slow Burn', genre:'Dramatic Underscore', key:'Cm', bpm:78 },
+  { title:'Neon Drift', genre:'Synthwave', key:'Am', bpm:112 },
+  { title:'Midnight Runner', genre:'Electronic', key:'Gm', bpm:128 },
+  { title:'Open Road', genre:'Americana', key:'G', bpm:96 },
+  { title:'Paper Lanterns', genre:'Ambient', key:'D', bpm:70 },
+]
+document.getElementById('library-results').innerHTML = LIB.map(t => `
+  <div class="track-row">
+    <div class="tr-title">${t.title}</div>
+    <div class="tr-meta">${t.genre} · ${t.key} · ${t.bpm} BPM</div>
+    <button class="btn"><i class="ti ti-plus"></i> Add</button>
+  </div>`).join('')
+
+const PLAYLISTS = [
+  { name:'For your consideration — Q4', by:'Liz Morgan', tracks:[{title:'Slow Burn',key:'Cm',bpm:78},{title:'Neon Drift',key:'Am',bpm:112}] },
+]
+document.getElementById('playlists-list').innerHTML = PLAYLISTS.map(pl => `
+  <div class="playlist-card">
+    <div class="playlist-card-head"><div class="name">${pl.name}</div><span class="section-sub">${pl.tracks.length} tracks · by ${pl.by}</span><button class="icon-btn"><i class="ti ti-trash"></i></button></div>
+    ${pl.tracks.map(t => `<div class="playlist-track-row"><span>${t.title} <span style="color:var(--text3)">— ${t.key} · ${t.bpm} BPM</span></span><button class="icon-btn"><i class="ti ti-x"></i></button></div>`).join('')}
+  </div>`).join('')
+
+const MESSAGES = [
+  { mine:false, name:'Erik Steinert', body:'Sent over two new pitches for the finale — take a look when you get a sec.', time:'Sep 14, 2:10 PM' },
+  { mine:true, name:'Liz Morgan', body:'Great, will review today.', time:'Sep 14, 2:32 PM' },
+]
+document.getElementById('messages-scroll').innerHTML = MESSAGES.map(m => `
+  <div style="display:flex;flex-direction:column;max-width:70%;${m.mine?'align-self:flex-end;align-items:flex-end':''}">
+    <div style="background:${m.mine?'var(--navy)':'var(--bg3)'};color:${m.mine?'#fff':'var(--text)'};border:0.5px solid var(--border);border-radius:10px;padding:9px 12px;font-size:13px">${m.body}</div>
+    <div style="font-size:10px;color:var(--text3);margin-top:3px">${m.name} · ${m.time}</div>
+  </div>`).join('')
+</script>
+</body>
+</html>

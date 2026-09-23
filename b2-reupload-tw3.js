@@ -11,7 +11,7 @@ const { Pool } = require('pg')
 const KEY_ID  = '0a76021cb5da'
 const APP_KEY = '00512129adc584be3490f5e337f63dbc5f2a7c1c66'
 const BUCKET  = 'haus-music'
-const CONN    = 'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+const CONN    = process.env.DATABASE_URL
 const SKUS    = ['R82a8854', 'S20d1064', 'S20d1074']
 
 const SHIPPING = '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping/260708_TEXAS WIVES_3'

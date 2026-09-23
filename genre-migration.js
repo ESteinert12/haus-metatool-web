@@ -7,7 +7,7 @@
 
 const { Pool } = require('pg')
 const pool = new Pool({
-  connectionString: 'postgresql://neondb_owner:npg_q7Sf3XALBusc@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require'
+  connectionString: process.env.DATABASE_URL
 })
 
 const DRY_RUN = !process.argv.includes('--execute')

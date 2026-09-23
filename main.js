@@ -6,6 +6,7 @@ const fs     = require('fs')
 const path   = require('path')
 const crypto = require('crypto')
 const os     = require('os')
+const XLSX   = require('xlsx')
 
 function _hashPassword(pw) {
   return crypto.createHash('sha256').update('haus-workspace:' + pw).digest('hex')
@@ -126,6 +127,99 @@ ipcMain.handle('write-file', async (event, filePath, content) => {
     fs.writeFileSync(filePath, content, 'utf8')
     return true
   } catch { return false }
+})
+
+// ── EBR (MusicMark Electronic Batch Registration) export ───────────
+ipcMain.handle('ebr-save-dialog', async (event, defaultName) => {
+  try {
+    const win = BrowserWindow.getFocusedWindow()
+    const result = await dialog.showSaveDialog(win, {
+      title: 'Save EBR File',
+      defaultPath: path.join(app.getPath('desktop'), defaultName),
+      filters: [{ name: 'Excel Workbook', extensions: ['xlsx'] }]
+    })
+    return result.canceled ? null : result.filePath
+  } catch (e) {
+    return null
+  }
+})
+
+// headers: array of column header strings (must match MusicMark's EBR
+// template exactly). rows: array of arrays, same column order as headers.
+ipcMain.handle('ebr-write-xlsx', async (event, filePath, headers, rows) => {
+  try {
+    const wsData = [headers, ...rows]
+    const ws = XLSX.utils.aoa_to_sheet(wsData)
+    const wb = XLSX.utils.book_new()
+    XLSX.utils.book_append_sheet(wb, ws, 'Registrations')
+    fs.mkdirSync(path.dirname(filePath), { recursive: true })
+    XLSX.writeFile(wb, filePath)
+    return { ok: true, path: filePath }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
+
+// Ack file open dialog — MusicMark sends back EByynnnnsss(sender)_recipient.xls/.xlsx
+ipcMain.handle('ebr-pick-ack-file', async () => {
+  try {
+    const win = BrowserWindow.getFocusedWindow()
+    const result = await dialog.showOpenDialog(win, {
+      title: 'Import MusicMark Acknowledgment File',
+      properties: ['openFile'],
+      filters: [{ name: 'Excel Workbook', extensions: ['xls', 'xlsx'] }]
+    })
+    return (result.canceled || !result.filePaths.length) ? null : result.filePaths[0]
+  } catch (e) {
+    return null
+  }
+})
+
+// Parses MusicMark's ACK response format: Record_Type, Work_Title,
+// Submitter_Work_ID, Recipient_Work_ID, ISWC, Transaction_Status, Comments.
+// Column names are matched case/whitespace-insensitively since the sheet
+// name and exact header casing have varied between real sample files.
+ipcMain.handle('ebr-read-ack-file', async (event, filePath) => {
+  try {
+    const wb = XLSX.readFile(filePath)
+    const sheetName = wb.SheetNames[0]
+    const sheet = wb.Sheets[sheetName]
+    const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
+    if (!aoa.length) return { ok: false, error: 'Sheet is empty' }
+
+    const norm = (s) => String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '')
+    const headerRow = aoa[0].map(norm)
+    const colMap = {
+      workTitle:        ['worktitle'],
+      submitterWorkId:  ['submitterworkid'],
+      recipientWorkId:  ['recipientworkid'],
+      iswc:             ['iswc'],
+      status:           ['transactionstatus'],
+      comments:         ['comments']
+    }
+    const idx = {}
+    for (const [key, names] of Object.entries(colMap)) {
+      idx[key] = headerRow.findIndex(h => names.includes(h))
+    }
+    if (idx.submitterWorkId === -1 || idx.status === -1) {
+      return { ok: false, error: 'Unrecognized ack file format — missing Submitter_Work_ID or Transaction_Status column' }
+    }
+
+    const rows = aoa.slice(1)
+      .filter(r => r.some(c => String(c || '').trim() !== ''))
+      .map(r => ({
+        workTitle:       idx.workTitle       >= 0 ? String(r[idx.workTitle]       || '').trim() : '',
+        submitterWorkId: idx.submitterWorkId >= 0 ? String(r[idx.submitterWorkId] || '').trim() : '',
+        recipientWorkId: idx.recipientWorkId >= 0 ? String(r[idx.recipientWorkId] || '').trim() : '',
+        iswc:            idx.iswc            >= 0 ? String(r[idx.iswc]            || '').trim() : '',
+        status:          idx.status          >= 0 ? String(r[idx.status]          || '').trim() : '',
+        comments:        idx.comments        >= 0 ? String(r[idx.comments]        || '').trim() : ''
+      }))
+
+    return { ok: true, rows, fileName: path.basename(filePath) }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
 })
 
 // Get folder size

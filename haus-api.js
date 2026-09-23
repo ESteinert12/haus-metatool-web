@@ -22,7 +22,6 @@
   // ── Filesystem ──────────────────────────────────────────────────────────
   const fs = {
     readDir:     (p)       => _post('/api/fs/read-dir',     { dirPath: p }),
-    countFiles:  (p, ext)  => _post('/api/fs/count-files',  { dirPath: p, ext }),
     pathExists:  (p)       => _post('/api/fs/path-exists',  { filePath: p }),
     readFile:    (p)       => _post('/api/fs/read-file',    { filePath: p }),
     writeFile:   (p, c)    => _post('/api/fs/write-file',   { filePath: p, content: c }),
@@ -67,6 +66,8 @@
   const auth = {
     login:          (username, password)            => _post('/api/auth/login',           { username, password }),
     changePassword: (username, oldPw, newPw)        => _post('/api/auth/change-password', { username, oldPassword: oldPw, newPassword: newPw }),
+    logout:         ()                              => _post('/api/auth/logout',          {}),
+    me:             ()                              => _get('/api/auth/me'),
   }
 
   // ── Backblaze B2 ────────────────────────────────────────────────────────

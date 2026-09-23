@@ -12,7 +12,7 @@ const path = require('path')
 
 // Database connection
 const pool = new Pool({
-  connectionString: process.env.DATABASE_URL || 'postgresql://neondb_owner:npg_VWPl7U3kYwJb@ep-polished-cloud-adsex56o.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require'
+  connectionString: process.env.DATABASE_URL
 })
 
 const SHIPPING_ROOT = '/Users/HAUS/Library/CloudStorage/Dropbox/2. COLLECTION UPLOADER/2. ATMOS_Shipping'
