@@ -1039,6 +1039,12 @@ webview{flex:1;border:none}
           <span style="font-size:13px;font-weight:500;flex:1">Acknowledgments &amp; Fix-It</span>
           <span id="ebr-tab-ack-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:#c0392b;flex-shrink:0"></span>
         </div>
+        <div id="ebr-tab-btn-gap" class="ebr-tab-row" onclick="ebrSwitchTab('gap')"
+          style="display:flex;align-items:center;gap:8px;padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);transition:background .1s,color .1s">
+          <i class="ti ti-alert-triangle" style="font-size:15px"></i>
+          <span style="font-size:13px;font-weight:500;flex:1">Missing Registrations</span>
+          <span id="ebr-tab-gap-dot" style="display:none;width:8px;height:8px;border-radius:50%;background:#c0392b;flex-shrink:0"></span>
+        </div>
       </div>
 
       <!-- Detail panel -->
@@ -1087,6 +1093,30 @@ webview{flex:1;border:none}
             <button class="btn" onclick="ebrImportAckFile()"><i class="ti ti-upload"></i> Import Acknowledgment File</button>
           </div>
           <div id="ebr-ack-panel" style="border:1px solid var(--border);border-radius:8px;max-height:420px;overflow-y:auto"></div>
+        </div>
+
+        <!-- Missing Registrations panel -->
+        <div id="ebr-tab-content-gap" style="display:none">
+          <div style="font-size:11px;color:var(--text3);margin-bottom:10px">
+            Songs with no confirmed registration in ASCAP, BMI, or SESAC's real catalogs (checked 2026-09-23).
+            SESAC-affiliated-writer titles and titles with no writers on file are shown but not exportable —
+            MusicMark/EBR has no path for those. Exported titles drop off this list automatically.
+          </div>
+          <div style="display:flex;align-items:center;gap:10px;margin-bottom:10px;flex-wrap:wrap">
+            <span id="ebr-gap-range" style="font-size:12px;color:var(--text3)"></span>
+            <div style="flex:1"></div>
+            <button class="btn" id="ebr-gap-prev" onclick="ebrGapPrevPage()"><i class="ti ti-chevron-left"></i> Prev 50</button>
+            <button class="btn" id="ebr-gap-next" onclick="ebrGapNextPage()">Next 50 <i class="ti ti-chevron-right"></i></button>
+          </div>
+          <div id="ebr-gap-results" style="border:1px solid var(--border);border-radius:8px;max-height:420px;overflow-y:auto"></div>
+          <div style="display:flex;align-items:center;gap:14px;margin-top:16px;padding-top:14px;border-top:1px solid var(--border);flex-wrap:wrap">
+            <div>
+              <div style="font-size:11px;font-weight:600;color:#6F9276;text-transform:uppercase;letter-spacing:.05em;margin-bottom:4px">MusicMark submitter code</div>
+              <input id="ebr-gap-sender-code" class="form-input" style="width:80px" value="H03" maxlength="3">
+            </div>
+            <div style="flex:1"></div>
+            <button class="btn btn-primary" onclick="ebrGenerateGap()"><i class="ti ti-download"></i> Generate EBR File (this batch)</button>
+          </div>
         </div>
       </div>
     </div>
@@ -8453,7 +8483,7 @@ const EBR_MAX_ORIGINAL_PUBS = 4
 let ebrState = { lotsLoaded: false, titles: [], writersByTeam: {}, stemsBySku: {} }
 
 function ebrSwitchTab(tab) {
-  ;['export', 'ack'].forEach(t => {
+  ;['export', 'ack', 'gap'].forEach(t => {
     const row = document.getElementById(`ebr-tab-btn-${t}`)
     const content = document.getElementById(`ebr-tab-content-${t}`)
     const active = t === tab
@@ -8464,6 +8494,10 @@ function ebrSwitchTab(tab) {
       row.style.color = active ? '#1a1a1a' : ''
     }
   })
+  if (tab === 'gap' && !ebrGapState.loaded) {
+    ebrGapState.loaded = true
+    ebrOpenGapTab()
+  }
 }
 
 function ebrSetTabDot(tab, show) {
@@ -8558,6 +8592,7 @@ function ebrWireTabHover() {
 
 async function loadEbrSection() {
   ebrWireTabHover()
+  ebrGapCount().then(n => ebrSetTabDot('gap', n > 0)).catch(() => {})
   if (ebrState.lotsLoaded) {
     ebrRenderAcknowledgments()
     return
@@ -8667,7 +8702,12 @@ function ebrRenderWriterReview() {
   `
 }
 
-function ebrBuildRow(title) {
+function ebrBuildRow(title, writersByTeam, stemsBySku) {
+  // 2026-09-29: now takes writersByTeam/stemsBySku explicitly (defaulting to the Export
+  // tab's own ebrState) so the Missing Registrations tab's separate ebrGapState can reuse
+  // this exact row-building logic without clobbering (or being clobbered by) the Export tab.
+  writersByTeam = writersByTeam || ebrState.writersByTeam
+  stemsBySku = stemsBySku || ebrState.stemsBySku
   const row = new Array(EBR_HEADERS.length).fill('')
   const col = (name) => {
     const idx = EBR_COL_INDEX[name]
@@ -8680,7 +8720,7 @@ function ebrBuildRow(title) {
   set('Submitter Work ID', title.sku_root || '')
   set('Arrangement of PD Work (Y/N)', 'No')
 
-  const stems = (ebrState.stemsBySku[title.sku_root] || [])
+  const stems = (stemsBySku[title.sku_root] || [])
     .filter(s => (s.stem_name || '').toUpperCase() !== 'FULL')
     .slice(0, 10)
   stems.forEach((s, i) => {
@@ -8688,7 +8728,7 @@ function ebrBuildRow(title) {
     set(`Alt Title ${i + 1}`, base)
   })
 
-  const writers = ebrState.writersByTeam[title.team_id] || []
+  const writers = writersByTeam[title.team_id] || []
   writers.slice(0, 10).forEach((w, i) => {
     const n = i + 1
     const pub = ebrPublisherFor(w.pro)
@@ -8730,6 +8770,170 @@ async function ebrLogExport(fileName, seq, skus) {
     `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
     [seq, fileName, skus.length, skus.join(',')]
   ).catch(() => {})
+}
+
+// ── Missing Registrations tab (added 2026-09-29) ────────────────────────────
+// Shows songs with no confirmed registration in ANY of ASCAP/BMI/SESAC's real
+// catalogs (pro_catalog_matches, built 2026-09-23 -- see engineering_notes.md),
+// paginated 50 at a time, with the same SESAC-writer / no-writer exclusion the
+// Export tab applies per-title (EBR/MusicMark has no path for SESAC works).
+// Exporting a page logs to the same ebr_export_log table as the Export tab
+// (shared sequence numbering), and already-exported sku_roots are excluded
+// from this list on the next load -- so a batch, once sent, doesn't resurface.
+let ebrGapState = { loaded: false, total: 0, offset: 0, pageSize: 50, titles: [], writersByTeam: {}, stemsBySku: {} }
+
+const EBR_GAP_CTE = `
+  WITH gap AS (
+    SELECT sku_root FROM pro_catalog_matches
+    WHERE pro_name IN ('ASCAP','BMI','SESAC')
+    GROUP BY sku_root HAVING NOT bool_or(match_status = 'matched')
+  ),
+  already_exported AS (
+    SELECT DISTINCT trim(unnest(string_to_array(sku_list, ','))) AS sku_root FROM ebr_export_log
+  )
+`
+
+async function ebrGapCount() {
+  const rows = await pgQ(`
+    ${EBR_GAP_CTE}
+    SELECT count(*) AS n
+    FROM titles t
+    JOIN gap g ON g.sku_root = t.sku_root
+    LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
+    WHERE COALESCE(t.status,'active') = 'active'
+      AND COALESCE(t.is_jup,false)    = false
+      AND ae.sku_root IS NULL
+  `)
+  return (Array.isArray(rows) && rows.length) ? parseInt(rows[0].n, 10) : 0
+}
+
+async function ebrOpenGapTab() {
+  ebrGapState.total = await ebrGapCount()
+  ebrGapState.offset = 0
+  await ebrLoadGapPage()
+  ebrSetTabDot('gap', ebrGapState.total > 0)
+}
+
+async function ebrLoadGapPage() {
+  const listEl = document.getElementById('ebr-gap-results')
+  if (listEl) listEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:13px">Loading…</div>'
+
+  const titleRows = await pgQ(`
+    ${EBR_GAP_CTE}
+    SELECT t.sku_root, t.title, t.team_id
+    FROM titles t
+    JOIN gap g ON g.sku_root = t.sku_root
+    LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
+    WHERE COALESCE(t.status,'active') = 'active'
+      AND COALESCE(t.is_jup,false)    = false
+      AND ae.sku_root IS NULL
+    ORDER BY t.title ASC
+    LIMIT $1 OFFSET $2
+  `, [ebrGapState.pageSize, ebrGapState.offset])
+
+  if (!titleRows || !titleRows.length) {
+    if (listEl) listEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:13px">Nothing here -- either the list is empty or you\'ve paged past the end.</div>'
+    ebrGapState.titles = []
+    ebrRenderGapResults()
+    return
+  }
+
+  const teamIds  = [...new Set(titleRows.map(t => t.team_id).filter(Boolean))]
+  const skuRoots = titleRows.map(t => t.sku_root)
+  const [writers, stems] = await Promise.all([ebrLoadWriters(teamIds), ebrLoadStems(skuRoots)])
+
+  ebrGapState.writersByTeam = {}
+  writers.forEach(w => {
+    if (!ebrGapState.writersByTeam[w.team_id]) ebrGapState.writersByTeam[w.team_id] = []
+    const { first, last } = ebrSplitName(w.writer_name)
+    ebrGapState.writersByTeam[w.team_id].push({ ...w, first, last })
+  })
+  ebrGapState.stemsBySku = {}
+  stems.forEach(s => {
+    if (!ebrGapState.stemsBySku[s.sku_root]) ebrGapState.stemsBySku[s.sku_root] = []
+    ebrGapState.stemsBySku[s.sku_root].push(s)
+  })
+
+  ebrGapState.titles = titleRows.map(t => {
+    const w = ebrGapState.writersByTeam[t.team_id] || []
+    const hasSesac = w.some(x => x.pro === 'SESAC')
+    const noWriters = w.length === 0
+    return { ...t, __checked: !hasSesac && !noWriters, __sesac: hasSesac, __noWriters: noWriters }
+  })
+
+  ebrRenderGapResults()
+}
+
+function ebrRenderGapResults() {
+  const listEl = document.getElementById('ebr-gap-results')
+  if (!listEl) return
+  listEl.innerHTML = ebrGapState.titles.map((t, i) => {
+    const writers = ebrGapState.writersByTeam[t.team_id] || []
+    const wSummary = writers.length
+      ? writers.map(w => `${esc(w.writer_name)} (${esc(w.pro || '?')}${w.split_pct != null ? ' ' + w.split_pct + '%' : ''})`).join(', ')
+      : '<span style="color:#c0392b">no writers on file for this team</span>'
+    let warn = ''
+    if (t.__sesac) warn = '<span style="color:#c0392b;font-weight:600">SESAC writer — not EBR/MusicMark-eligible, handle separately</span>'
+    else if (t.__noWriters) warn = '<span style="color:#c0392b">no writers on file — not exportable</span>'
+    else if (writers.length > EBR_MAX_ORIGINAL_PUBS) warn = `<span style="color:#c0392b">${writers.length} writers — this template only carries publisher info for the first ${EBR_MAX_ORIGINAL_PUBS}, review manually</span>`
+    const disabled = t.__sesac || t.__noWriters
+    return `
+      <label style="display:flex;align-items:flex-start;gap:8px;padding:8px 10px;border-bottom:1px solid var(--border);font-size:12px;${disabled ? 'opacity:.55' : ''}">
+        <input type="checkbox" ${t.__checked ? 'checked' : ''} ${disabled ? 'disabled' : ''} onchange="ebrGapState.titles[${i}].__checked=this.checked">
+        <div style="flex:1">
+          <div style="font-weight:600">${esc(t.title)} <span style="font-weight:400;color:var(--text3)">${esc(t.sku_root)}</span></div>
+          <div style="color:var(--text3);margin-top:2px">${wSummary}</div>
+          ${warn ? `<div style="margin-top:2px">${warn}</div>` : ''}
+        </div>
+      </label>`
+  }).join('')
+
+  const rangeEl = document.getElementById('ebr-gap-range')
+  if (rangeEl) {
+    const from = ebrGapState.total ? ebrGapState.offset + 1 : 0
+    const to = ebrGapState.offset + ebrGapState.titles.length
+    rangeEl.textContent = `${from}–${to} of ${ebrGapState.total}`
+  }
+  const prevBtn = document.getElementById('ebr-gap-prev')
+  const nextBtn = document.getElementById('ebr-gap-next')
+  if (prevBtn) prevBtn.disabled = ebrGapState.offset <= 0
+  if (nextBtn) nextBtn.disabled = (ebrGapState.offset + ebrGapState.pageSize) >= ebrGapState.total
+}
+
+function ebrGapPrevPage() {
+  ebrGapState.offset = Math.max(0, ebrGapState.offset - ebrGapState.pageSize)
+  ebrLoadGapPage()
+}
+function ebrGapNextPage() {
+  ebrGapState.offset = ebrGapState.offset + ebrGapState.pageSize
+  ebrLoadGapPage()
+}
+
+async function ebrGenerateGap() {
+  const checked = ebrGapState.titles.filter(t => t.__checked && !t.__sesac && !t.__noWriters)
+  if (!checked.length) { alert('Select at least one title to export.'); return }
+  if (!window.haus?.ebr) { alert('EBR export isn\'t available in this build — restart the app after updating.'); return }
+
+  const rows = checked.map(t => ebrBuildRow(t, ebrGapState.writersByTeam, ebrGapState.stemsBySku))
+  const now  = new Date()
+  const yy   = String(now.getFullYear()).slice(-2)
+  const seq  = await ebrNextSequence()
+  const nnnn = String(seq).padStart(4, '0')
+  const sss  = (document.getElementById('ebr-gap-sender-code')?.value || 'H03').trim().toUpperCase().slice(0, 3)
+  const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
+
+  const savePath = await window.haus.ebr.saveDialog(fileName)
+  if (!savePath) return
+
+  const result = await window.haus.ebr.writeXlsx(savePath, EBR_HEADERS, rows)
+  if (result && result.ok) {
+    await ebrLogExport(fileName, seq, checked.map(t => t.sku_root))
+    ebrToast(`Saved ${fileName} — ${checked.length} work${checked.length !== 1 ? 's' : ''}. Exported titles will drop off this list.`)
+    ebrGapState.loaded = false
+    ebrOpenGapTab()
+  } else {
+    alert('Failed to write EBR file: ' + ((result && result.error) || 'unknown error'))
+  }
 }
 
 function ebrToast(message, isWarning) {
