@@ -306,7 +306,7 @@ function _logFsRoots() {
   }
 }
 
-function _b2Request(opts) {
+function _b2RequestRaw(opts) {
   return new Promise((resolve, reject) => {
     const { method, hostname, urlPath, headers, body, isBuffer, timeoutMs } = opts
     const bodyData = isBuffer ? body : (body ? JSON.stringify(body) : null)
@@ -334,6 +334,65 @@ function _b2Request(opts) {
     if (bodyData) req.write(bodyData)
     req.end()
   })
+}
+
+// 2026-09-25: B2's account-authorization token expires after roughly 24
+// hours (see the AP450/lot-migration notes -- this exact symptom already
+// bit the lot uploader once: every B2 call starts returning 401 while the
+// app keeps believing it is connected, because nothing previously checked
+// whether the token was still valid, only whether one had ever been
+// issued). Restarting the whole server was the only known fix, since that
+// re-runs the boot-time authorize below. _b2Request now detects a 401 on an
+// AUTHENTICATED call (never on the account-authorize call itself, which
+// uses Basic auth, not the bearer-style b2Auth token -- checked via the
+// header prefix) and transparently re-authorizes once via _b2Authorize(),
+// retrying the original request with the fresh token before giving up.
+// Every existing call site is unchanged -- they all still call
+// _b2Request(opts) exactly as before; only the internals gained a retry.
+async function _b2Request(opts) {
+  const result = await _b2RequestRaw(opts)
+  const isAuthedCall = opts.headers?.Authorization && !opts.headers.Authorization.startsWith('Basic ')
+  if (result.status === 401 && isAuthedCall && !opts._retriedAfterReauth) {
+    console.warn('[b2] got 401 on an authenticated call -- token likely expired (~24h TTL), re-authorizing...')
+    const reauthed = await _b2Authorize()
+    if (reauthed && b2Auth?.authorizationToken) {
+      return _b2Request({ ...opts, headers: { ...opts.headers, Authorization: b2Auth.authorizationToken }, _retriedAfterReauth: true })
+    }
+    console.error('[b2] re-authorization failed -- returning the original 401')
+  }
+  return result
+}
+
+// Shared by the boot-time auto-connect below and the 401 auto-retry above --
+// one place that knows how to get a fresh B2 account token.
+async function _b2Authorize() {
+  if (!process.env.B2_APP_KEY_ID || !process.env.B2_APP_KEY) {
+    console.warn('[b2] cannot authorize -- B2_APP_KEY_ID/B2_APP_KEY not set in .env')
+    return false
+  }
+  try {
+    const creds = Buffer.from(`${process.env.B2_APP_KEY_ID}:${process.env.B2_APP_KEY}`).toString('base64')
+    const result = await _b2RequestRaw({
+      method: 'GET', hostname: 'api.backblazeb2.com',
+      urlPath: '/b2api/v3/b2_authorize_account',
+      headers: { 'Authorization': `Basic ${creds}` }
+    })
+    if (result.status === 200) {
+      const b = result.body
+      b2Auth = {
+        accountId:           b.accountId,
+        authorizationToken:  b.authorizationToken,
+        apiUrl:              b.apiInfo?.storageApi?.apiUrl      || b.apiUrl,
+        downloadUrl:         b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
+      }
+      return true
+    }
+    console.error('[b2] authorization failed:', result.body?.message || `HTTP ${result.status}`)
+    return false
+  } catch (e) {
+    console.error('[b2] authorization error:', e.message)
+    return false
+  }
 }
 
 // ─── Dropbox auth ───────────────────────────────────────────────────────────
@@ -6037,7 +6096,27 @@ async function generateSku(composerFullId, albumDigit = CURRENT_ALBUM_DIGIT) {
       throw new Error(`Unknown team: ${composerFullId}`)
     }
 
-    const seq    = parseInt(result.rows[0].seq)
+    const seq = parseInt(result.rows[0].seq)
+
+    // ── Sanity guard ────────────────────────────────────────────────────
+    // 2026-09-25: sku_sequences.next_seq for R13a was found corrupted to
+    // ~15,905 (real usage was ~1,591), silently producing malformed SKUs
+    // for 14 titles before anyone noticed. Refuse to issue a SKU that
+    // jumps unreasonably far past the highest sequence actually already
+    // used for this composer -- almost certainly a corrupted counter.
+    const SEQ_JUMP_GUARD = 500
+    const maxRow = await client.query(`
+      SELECT MAX(CAST(substring(left(sku_root, -1) FROM '(\d+)$') AS INTEGER)) AS max_seq
+      FROM titles
+      WHERE composer_id = $1
+        AND sku_root ~ '^[A-Z0-9]+[a-z]\d{4,5}$'
+    `, [composerFullId])
+    const maxIssued = maxRow.rows[0]?.max_seq != null ? parseInt(maxRow.rows[0].max_seq, 10) : null
+    if (maxIssued !== null && seq > maxIssued + SEQ_JUMP_GUARD) {
+      await client.query('ROLLBACK')
+      throw new Error(`[generateSku] REFUSING to issue ${composerFullId}${seq} -- jumps ${seq - maxIssued} past the highest real sequence already used (${maxIssued}). sku_sequences.next_seq for "${composerFullId}" is likely corrupted -- check it manually (see 2026-09-25 R13a incident) before retrying.`)
+    }
+
     const padded = seq < 1000
       ? String(seq).padStart(3, '0')
       : String(seq).padStart(4, '0')
@@ -6683,31 +6762,18 @@ app.listen(PORT, HOST, () => {
   console.log(`\n   Share the Tunnel URL with Kyle\n`)
 
   // ─── Auto-authorize B2 on startup ───────────────────────────────────────
+  // Shares _b2Authorize() with the 401 auto-retry inside _b2Request -- one
+  // place that knows how to get a B2 token, used both here at boot and
+  // whenever the ~24h token expires mid-session (see _b2Request above).
   if (process.env.B2_APP_KEY_ID && process.env.B2_APP_KEY) {
     (async () => {
-      try {
-        console.log('[startup] Authorizing B2...')
-        const creds = Buffer.from(`${process.env.B2_APP_KEY_ID}:${process.env.B2_APP_KEY}`).toString('base64')
-        const result = await _b2Request({
-          method: 'GET', hostname: 'api.backblazeb2.com',
-          urlPath: '/b2api/v3/b2_authorize_account',
-          headers: { 'Authorization': `Basic ${creds}` }
-        })
-        if (result.status === 200) {
-          const b = result.body
-          b2Auth = {
-            accountId:           b.accountId,
-            authorizationToken:  b.authorizationToken,
-            apiUrl:              b.apiInfo?.storageApi?.apiUrl      || b.apiUrl,
-            downloadUrl:         b.apiInfo?.storageApi?.downloadUrl || b.downloadUrl
-          }
-          console.log('[startup] ✓ B2 authorized successfully')
-          console.log(`[startup]   Download URL: ${b2Auth.downloadUrl}`)
-        } else {
-          console.error('[startup] ✗ B2 authorization failed:', result.body?.message || `HTTP ${result.status}`)
-        }
-      } catch (e) {
-        console.error('[startup] ✗ B2 authorization error:', e.message)
+      console.log('[startup] Authorizing B2...')
+      const ok = await _b2Authorize()
+      if (ok) {
+        console.log('[startup] ✓ B2 authorized successfully')
+        console.log(`[startup]   Download URL: ${b2Auth.downloadUrl}`)
+      } else {
+        console.error('[startup] ✗ B2 authorization failed')
       }
     })()
   } else {

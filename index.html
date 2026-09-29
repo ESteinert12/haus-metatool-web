@@ -1647,6 +1647,14 @@ async function doLogin() {
   await applyUserDefaultPaths(r.user.username)
   // Hide login screen
   document.getElementById('login-screen').style.display = 'none'
+  // Clear the password field's value now that login succeeded. Left filled,
+  // this is a live type="password" input sitting in the DOM for the rest of
+  // the session (the page never navigates away -- no <form> anywhere in this
+  // file, so Chrome falls back to its formless-password heuristic). Every
+  // subsequent fetch/XHR -- e.g. a Finish Queue save -- then reads as a
+  // "form submission" to Chrome and triggers the save-password prompt.
+  // logout() already clears this field on sign-out; this mirrors that here.
+  document.getElementById('login-password').value = ''
 }
 
 // Per-user path defaults — runs after every login to keep paths fresh
@@ -3148,6 +3156,28 @@ async function generateSku(composerId) {
   }
 
   const seq = parseInt(rows[0].seq, 10)
+
+  // ── Sanity guard ────────────────────────────────────────────────────
+  // 2026-09-25: sku_sequences.next_seq for R13a was found corrupted to
+  // ~15,905 (real usage was ~1,591), silently producing SKUs like
+  // R13a159134 for 14 titles before anyone noticed. Compare the freshly
+  // issued seq against the highest sequence actually already used in
+  // titles for this composer, and refuse if it's jumped unreasonably far
+  // ahead -- almost certainly a corrupted counter, not a legitimate batch.
+  const SEQ_JUMP_GUARD = 500
+  const maxRow = await pgQ(`
+    SELECT MAX(CAST(substring(left(sku_root, -1) FROM '(\d+)$') AS INTEGER)) AS max_seq
+    FROM titles
+    WHERE composer_id = $1
+      AND sku_root ~ '^[A-Z0-9]+[a-z]\d{4,5}$'
+  `, [composerId])
+  const maxIssued = (maxRow && maxRow.length && maxRow[0].max_seq != null)
+    ? parseInt(maxRow[0].max_seq, 10)
+    : null
+  if (maxIssued !== null && seq > maxIssued + SEQ_JUMP_GUARD) {
+    throw new Error(`[generateSku] REFUSING to issue ${composerId}${seq} -- jumps ${seq - maxIssued} past the highest real sequence already used (${maxIssued}). sku_sequences.next_seq for "${composerId}" is likely corrupted -- check it manually (see 2026-09-25 R13a incident) before retrying.`)
+  }
+
   const pad = seq >= 1000 ? 4 : 3
   const skuRoot = composerId + seq.toString().padStart(pad, '0')
 
@@ -14735,6 +14765,17 @@ document.head.appendChild(spinStyle)
   renderTopbarDate()
   loadLibraryStats()
   qaLoadBadge()
+
+  // Clear the login form's password field unconditionally on every page load.
+  // Chrome's save-password prompt was firing on every Finish Queue save --
+  // traced to this field staying live in the DOM (no <form> anywhere in this
+  // file, so Chrome uses its formless-password heuristic keyed on any
+  // password-type input + a subsequent XHR). doLogin() now clears it after a
+  // fresh login, but a session-restored reload (__hausCheckSession() below)
+  // skips doLogin() entirely -- "doLogin never runs" per the comment below --
+  // so that fix alone doesn't cover a plain refresh with a live cookie. This
+  // covers all paths at once.
+  { const pw = document.getElementById('login-password'); if (pw) pw.value = '' }
 
   // Warn on unsaved changes before leaving page
   window.addEventListener('beforeunload', e => {

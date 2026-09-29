@@ -56,7 +56,8 @@ Tick these off. 30 lots.
 
     [x] INTAKE LOT_250918_SOHO4_09_EDM(EX)   180 files 3.13 GB
         UPLOADED 164/164 on 2026-09-10, 0 failed. 2 folders skipped (bad names).
-    [ ] INTAKE LOT_230825_AP450 RETURNS   187 folders -- set aside earlier
+    [x] INTAKE LOT_230825_AP450 RETURNS   187 folders -- set aside earlier
+        (all 3 chunks closed 2026-09-24: 50+50+87=187)
         purely for size, no other blocker. Being worked in CHUNKS as of
         2026-09-23: Erik makes a sibling folder under the same Dropbox
         directory (e.g. AP450_Returns_Group1), moves in whatever is already
@@ -67,6 +68,54 @@ Tick these off. 30 lots.
         [x] AP450_Returns_Group1   50 folders / 405 files -- PASS 2026-09-23
             uploaded=397 skippedAlreadyThere=8 failed=0, 0 ambiguous, clean
             on the first pass -- no folder-name or new-composer issues.
+        [x] AP450_Returns_Group2   50 folders / 419 files -- PASS 2026-09-24
+            uploaded=409 skippedAlreadyThere=10 failed=0(after 1 idempotent
+            retry), 0 ambiguous. Two blockers fixed before this passed:
+            (1) S60a14483_Hard Hittin_E_GARAGE -- wrong SKU in the folder
+            name (real title is S60a14473 "Hard Hittin' Pickin'"), Erik
+            renamed the folder by hand;
+            (2) S54a0574_Heartland Summer Love_D_AP31HEARTLAND -- composer
+            S54 (Stylianos Michael Kalisperides, ASCAP, IPI 295973207 --
+            confirmed spelling from migration_021_composers.sql, not
+            guessed) had no NIMBUS-collection B2 folder yet (a CIRRUS
+            folder for the same composer already existed and resolved
+            fine). Raw-uploaded via upload_new_composer_songs.py into a new
+            nimbus/S54_Stylianos Michael Kalisperides_NIMBUS folder, then
+            create-stems for the whole lot before retrying upload-lot --
+            same pattern as the R89/S81 composers on LOT_260107_SOHO4_18.
+            Also hit and fixed, separate from the above: /api/b2/get-upload-url
+            and /api/b2/upload-file started returning 403 "Admin only" --
+            NOT a new bug, see engineering_notes.md 2026-09-24 entry
+            (yesterday's main-branch merge brought in role-gated
+            ADMIN_ROUTES and neither erik nor kyle had role='admin' in the
+            live haus_users table). Fixed by granting both accounts admin
+            directly via a standalone script against Neon (the app's own
+            admin-gated query endpoint couldn't do it -- chicken and egg).
+        [x] AP450_Returns_Group3   87 folders / 690 files -- PASS 2026-09-24
+            FINAL chunk -- AP450 RETURNS is fully closed. uploaded=690
+            failed=0, 0 ambiguous. Two blockers fixed before this passed:
+            (1) S60a16343 was used on TWO different folders (Hope And Love,
+            which matched the catalogue, and In The Land of Hearts, which
+            didn't) -- a genuine duplicate-SKU folder-naming mistake, not a
+            digit typo. Found via search_titles.js title search, Erik
+            renamed the wrong one by hand once the real SKU was confirmed.
+            (2) S23a0364_Mighty Blue_E_AP31Blues -- composer S23 (Michael
+            Levine, ASCAP, IPI 336631762, from migration_021_composers.sql)
+            had NO existing B2 folder in any collection at all (unlike S54
+            in Group2, which already had a cirrus folder) -- genuinely
+            brand new. Same upload_new_composer_songs.py + create-stems
+            pattern, into a new nimbus/S23_Michael Levine_NIMBUS folder.
+            Also: the live upload-lot curl (690 files) ran past
+            lot_pipeline.py's own 1800s client-side timeout and the script
+            crashed with an unhandled TimeoutExpired -- but the server's
+            own terminal showed it had actually finished all 690 files
+            cleanly and the pool was healthy afterward (idle=1/waiting=0).
+            Not a hang, not related to the 09-17/09-18 pool fixes -- just a
+            client-side wait timeout on a bigger-than-usual chunk. Resumed
+            with upload_live_only.py (idempotent, confirmed 0
+            uploaded/690 skippedAlreadyThere/0 failed) then ran
+            create-stems and verify-lot&record=1 directly via curl rather
+            than restarting lot_pipeline.py from the top.
     [x] INTAKE LOT_251028_SOHO4_12 EDM(EX)   30 folders / 154 files / 2.14 GB
         PASS 2026-09-15. All 154 files were already in B2 at correct size
         (uploaded:0, skippedAlreadyThere:154 -- confirmed live via B2 list API,
@@ -565,8 +614,36 @@ Tick these off. 30 lots.
         (manual SQL, not from a lot_logs/ file since this went through
         the manual curl path after the auth-token retry rather than
         lot_pipeline.py end to end).
-    [ ] INTAKE LOT_260407_SOHO4_31
-    [ ] T28a0823_mrdramatix_Gm_SH        (single song, not a lot)
+    [x] INTAKE LOT_260407_SOHO4_31   31 folders / 183 files -- PASS 2026-09-24
+        Local Dropbox folder was already gone by the time this was picked
+        back up (an earlier, undocumented 2026-09-22 attempt had already
+        uploaded all 211 files live to B2 -- 0 failures after 1 idempotent
+        retry -- and left 2 full log dirs in lot_logs/, but never got past
+        create-stems's dry run: 6 ambiguous stems, all from one song, see
+        the T28a0823 line below). Recovered without needing the original
+        folder back: rebuilt the 31 still-needed song folders as
+        correctly-SIZED placeholder files (exact bytes from the 09-22
+        report's own toInsert data, not guessed) in a scratch folder
+        (_scratch_SOHO4_31_recovery/ inside ATMOSPHERE, not Dropbox), then
+        ran create-stems/verify-lot against that via each endpoint's
+        ?base= override. Turned out live create-stems had ALREADY been run
+        for these 31 songs by something/someone between 2026-09-22 and
+        now (alreadyRecorded=183, rowsToCreate=0 on the dry run) -- no log
+        or runbook trace of who/when, just noting it happened. verify-lot
+        record=1: 183/183 verified, recorded=183, 0 failures. (3 of the
+        original 35 songs were already fully recorded before any of this
+        -- same unexplained-but-harmless pattern as LOT_251028_SOHO4_12.)
+    [x] T28a0823_mrdramatix_Gm_SH        (single song, not a lot) -- RESOLVED 2026-09-24
+        Two B2 folders under composer T28 (Ryan Welch) held byte-identical
+        audio for this SKU: T28a0823_mrdramatix_Gm and
+        T28a0823_mrdramatix_Gm_SH. Neither name meant anything distinct to
+        Erik ("_SH" -- possibly "Southern Hospitality", unconfirmed, and
+        irrelevant to the decision). Erik's call: hide both rather than
+        pick one. All 12 objects (6 stems x 2 folders) hidden via
+        hide_duplicate_song.js (direct to B2's API, b2_hide_file --
+        nothing deleted, recoverable via B2 version history). This SKU is
+        now deliberately absent from the catalogue, same treatment as the
+        1 deferred song on the PUNTA lot.
     [ ] T38_Catchup                      (single song, not a lot)
 
 ## Some lots may already be in B2 (found 2026-09-15, lot 251028_SOHO4_12)

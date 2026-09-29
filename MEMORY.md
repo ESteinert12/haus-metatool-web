@@ -270,6 +270,14 @@
 ---
 
 ## Session notes index (newest first)
+- `SESSION_2026_09_25_R13A_SKU_INFLATION.md` - R13a's sku_sequences.next_seq
+  was found corrupted to 15,905 (real usage ~1,591), silently issuing
+  6-digit SKUs for 14 titles before Erik noticed. Root write never fully
+  traced (checked and ruled out: malformed title rows, duplicate
+  sku_sequences row). No data changed -- already-shipped titles left as
+  is, counter left forward (not reset). Added a guardrail to
+  generateSku() in both index.html and api.js that refuses to issue a
+  SKU jumping >500 past a composer's highest real sequence.
 - `B2_NEON_LOT_MIGRATION_BRIEFING_2026_09_15.md` - trimmed briefing for a chat
   scoped to finishing the Dropbox -> B2 -> Neon lot upload.
 - `SESSION_2026_09_12.md` - **START HERE for 12 Sep.** Intake ergonomics: the
