@@ -53,7 +53,46 @@ if (!sessionSecret) {
 // secure:true off a real HTTPS origin. Local dev over plain http sets HAUS_INSECURE_COOKIE=1.
 const secureCookie = process.env.HAUS_INSECURE_COOKIE !== '1'
 
+// Session store. express-session's default MemoryStore loses every login on
+// restart (the 5am/5pm restart job would log everyone out) and cannot be shared
+// across processes. Persist sessions in Postgres instead, through a small pool
+// of its own -- the main pgPool is torn down and rebuilt on reconnect, which
+// would strand a store holding a reference to it. Falls back to MemoryStore
+// (loudly) if DATABASE_URL or the connect-pg-simple package is missing, so a
+// merge without `npm install` degrades instead of refusing to boot.
+let sessionStore = undefined
+try {
+  if (process.env.DATABASE_URL) {
+    const PgSession = require('connect-pg-simple')(session)
+    const sessionPool = new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      max: 3,
+      keepAlive: true,
+      idleTimeoutMillis: 30000,
+      connectionTimeoutMillis: 10000
+    })
+    sessionPool.on('error', err => console.warn('[session-pool] error:', err.message))
+    sessionStore = new PgSession({
+      pool: sessionPool,
+      tableName: 'user_sessions',
+      createTableIfMissing: true,
+      pruneSessionInterval: 60 * 60
+    })
+    console.log('[session] using Postgres session store (table user_sessions)')
+  } else {
+    console.warn('[session] DATABASE_URL not set -- using in-memory sessions (lost on restart)')
+  }
+} catch (e) {
+  console.warn('[session] could not start Postgres session store, using in-memory sessions:', e.message)
+  sessionStore = undefined
+}
+
 app.use(session({
+  store: sessionStore,
+  // The cookie has a fixed 7-day maxAge (not rolling), so the row's expiry never
+  // needs extending -- skipping touch saves one UPDATE per request.
+  disableTouch: true,
   secret: sessionSecret,
   resave: false,
   saveUninitialized: false,
@@ -541,6 +580,21 @@ async function runServerMigrations(pool) {
     )
   `)
   console.log('✅ staged_files ready')
+
+  // Multi-intake: who is working on a staged drop, so two people can't import
+  // the same folder at once (status 'processing' = claimed).
+  await pool.query(`ALTER TABLE staged_files ADD COLUMN IF NOT EXISTS claimed_by TEXT`)
+  await pool.query(`ALTER TABLE staged_files ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ`)
+  // Per-user intake drafts (previously one shared in-memory object).
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS intake_drafts (
+      username    TEXT NOT NULL,
+      draft_key   TEXT NOT NULL,
+      payload     JSONB NOT NULL,
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      PRIMARY KEY (username, draft_key)
+    )
+  `)
 
   // ksl had no constraints at all, so the INSERT ... ON CONFLICT (ksl_name) in
   // addIntakeTagNew failed every time -- new KSL tags appeared in the dropdown
@@ -6425,7 +6479,7 @@ app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const r = await pgPool.query(
-      `SELECT * FROM staged_files WHERE status='pending' ORDER BY arrived_at ASC`
+      `SELECT * FROM staged_files WHERE status IN ('pending','processing') ORDER BY arrived_at ASC`
     )
     // Reconcile against disk. The watcher is add-only (chokidar addDir), so a
     // folder that left staging -- archived after intake, or moved by hand --
@@ -6567,10 +6621,34 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     const { id } = req.params
 
     // Get the staged file record
-    const r = await pgPool.query(`SELECT * FROM staged_files WHERE id=$1`, [id])
-    if (!r.rows.length) return res.json({ ok: false, error: 'Staged file not found' })
-    const record = r.rows[0]
+    // Atomically claim the drop. Without this, two people importing the same
+    // folder both validate and both `mv`; the loser's failed move got the folder
+    // quarantined to _INVALID. A claim older than 10 minutes is treated as
+    // abandoned (crashed request) and can be taken over.
+    const me = req.session?.user?.username || 'unknown'
+    const claim = await pgPool.query(
+      `UPDATE staged_files
+          SET status='processing', claimed_by=$2, claimed_at=NOW()
+        WHERE id=$1
+          AND (status='pending'
+               OR (status='processing' AND claimed_at < NOW() - INTERVAL '10 minutes'))
+        RETURNING *`, [id, me])
+    if (!claim.rows.length) {
+      const cur = await pgPool.query(`SELECT status, claimed_by FROM staged_files WHERE id=$1`, [id])
+      if (!cur.rows.length) return res.json({ ok: false, error: 'Staged file not found' })
+      const c = cur.rows[0]
+      if (c.status === 'processing') {
+        return res.status(409).json({ ok: false, error: `Already being imported by ${c.claimed_by || 'another user'}` })
+      }
+      return res.status(409).json({ ok: false, error: `Nothing to import -- this drop is already "${c.status}"` })
+    }
+    const record = claim.rows[0]
     const stagingPath = record.filepath
+    // Put the drop back in the queue on any failure that didn't already mark it
+    // invalid/shipped (guarded on status so it never clobbers those).
+    const releaseClaim = (sid) => pgPool.query(
+      `UPDATE staged_files SET status='pending', claimed_by=NULL, claimed_at=NULL
+        WHERE id=$1 AND status='processing'`, [sid]).catch(() => {})
 
     // Find the .md file in the folder
     let mdFile = null
@@ -6580,11 +6658,13 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
       mdFile = files.find(f => f.endsWith('.md'))
     } catch (e) {
       console.warn('[import] Could not read folder:', stagingPath, e.message)
+      await releaseClaim(id)
       return res.json({ ok: false, error: 'Could not read staging folder' })
     }
 
     if (!mdFile) {
       console.warn('[import] No .md file found. Files in folder:', files)
+      await releaseClaim(id)
       return res.json({ ok: false, error: 'No .md file found in folder' })
     }
 
@@ -6594,6 +6674,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     try {
       mdContent = fs.readFileSync(mdPath, 'utf8')
     } catch (e) {
+      await releaseClaim(id)
       return res.json({ ok: false, error: 'Could not read .md file: ' + e.message })
     }
 
@@ -6643,6 +6724,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
       })
     } else {
       // Failure response
+      if (!intakeResult.quarantined) await releaseClaim(id)
       res.status(400).json({
         ok: false,
         error: intakeResult.reason,
@@ -6653,6 +6735,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     }
   } catch (e) {
     console.error('[import] Unexpected error:', e.message)
+    try { await pgPool.query(`UPDATE staged_files SET status='pending', claimed_by=NULL, claimed_at=NULL WHERE id=$1 AND status='processing'`, [req.params.id]) } catch {}
     res.status(500).json({ ok: false, error: e.message })
   }
 })
@@ -6709,36 +6792,56 @@ app.post('/api/db/migrate-client-ids', async (req, res) => {
 })
 
 // ─── Intake Draft Save/Load ────────────────────────────────────────────────
-const intakeDrafts = {} // In-memory store: { clientName_dropIndex: { clientName, dropIndex, dropName, formData, timestamp } }
+// Per-user, persisted in Postgres (table intake_drafts). This used to be one
+// in-memory object: every user saw the newest draft from ANY user, and a
+// restart dropped them all.
+const draftUser = req => req.session?.user?.username || 'unknown'
 
-app.post('/api/intake/draft', (req, res) => {
-  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+app.post('/api/intake/draft', async (req, res) => {
+  if (!pgPool) return res.status(503).json({ ok: false, error: 'Database not connected' })
   const { clientName, dropIndex, dropName, formData } = req.body
-  if (!clientName || dropIndex === undefined) return res.json({ ok: false, error: 'Missing clientName or dropIndex' })
+  if (!clientName || dropIndex === undefined) return res.status(400).json({ ok: false, error: 'Missing clientName or dropIndex' })
 
   const key = `${clientName}_${dropIndex}`
-  intakeDrafts[key] = {
-    clientName,
-    dropIndex,
-    dropName,
-    formData,
-    timestamp: Date.now()
+  try {
+    await pgPool.query(
+      `INSERT INTO intake_drafts (username, draft_key, payload, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (username, draft_key)
+       DO UPDATE SET payload = EXCLUDED.payload, updated_at = NOW()`,
+      [draftUser(req), key, JSON.stringify({ clientName, dropIndex, dropName, formData, timestamp: Date.now() })]
+    )
+    console.log(`[intake/draft] ${draftUser(req)} saved draft for ${clientName} drop ${dropIndex}`)
+    res.json({ ok: true, message: 'Draft saved' })
+  } catch (e) {
+    console.error('[intake/draft] save failed:', e.message)
+    res.status(500).json({ ok: false, error: e.message })
   }
-  console.log(`[intake/draft] Saved draft for ${clientName} drop ${dropIndex}`)
-  res.json({ ok: true, message: 'Draft saved' })
 })
 
-app.get('/api/intake/draft', (req, res) => {
-  // Return the most recent draft (typically the last one the user was working on)
-  const drafts = Object.values(intakeDrafts).sort((a, b) => b.timestamp - a.timestamp)
-  if (drafts.length === 0) return res.json(null)
-  res.json(drafts[0])
+app.get('/api/intake/draft', async (req, res) => {
+  if (!pgPool) return res.status(503).json(null)
+  try {
+    // The calling user's own most recent draft only.
+    const r = await pgPool.query(
+      `SELECT payload FROM intake_drafts WHERE username = $1 ORDER BY updated_at DESC LIMIT 1`,
+      [draftUser(req)]
+    )
+    res.json(r.rows.length ? r.rows[0].payload : null)
+  } catch (e) {
+    console.error('[intake/draft] load failed:', e.message)
+    res.status(500).json(null)
+  }
 })
 
-app.delete('/api/intake/draft/:key', (req, res) => {
-  const { key } = req.params
-  delete intakeDrafts[key]
-  res.json({ ok: true })
+app.delete('/api/intake/draft/:key', async (req, res) => {
+  if (!pgPool) return res.status(503).json({ ok: false, error: 'Database not connected' })
+  try {
+    await pgPool.query(`DELETE FROM intake_drafts WHERE username = $1 AND draft_key = $2`, [draftUser(req), req.params.key])
+    res.json({ ok: true })
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message })
+  }
 })
 
 // ─── Start ─────────────────────────────────────────────────────────────────

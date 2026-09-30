@@ -12,7 +12,6 @@
 
 const fs = require('fs')
 const path = require('path')
-const { execSync } = require('child_process')
 
 // Import validation modules
 const IntakeValidator = require('./intake-validation.js')
@@ -155,7 +154,7 @@ class IntakeIntegration {
         }
 
         // Move the folder
-        execSync(`mv "${stagedFilePath}" "${newPath}"`, { stdio: 'pipe' })
+        await this.moveFolder(stagedFilePath, newPath)
         console.log(`[intake] Successfully moved to: ${newPath}`)
       } catch (moveError) {
         console.error(`[intake] Move failed: ${moveError.message}`)
@@ -228,6 +227,36 @@ class IntakeIntegration {
         success: false,
         reason: 'EXCEPTION',
         error: error.message
+      }
+    }
+  }
+
+  /**
+   * Move a folder without blocking the event loop (this used to be
+   * execSync(`mv ...`), which froze the whole server for every user for the
+   * duration of a move and interpolated the folder name into a shell string).
+   * Same-volume: one rename. Cross-volume (EXDEV): copy, then remove the source.
+   * Refuses to overwrite an existing destination.
+   */
+  async moveFolder(src, dest) {
+    if (fs.existsSync(dest)) throw new Error(`Destination already exists: ${dest}`)
+    try {
+      await fs.promises.rename(src, dest)
+    } catch (e) {
+      if (e.code !== 'EXDEV') throw e
+      try {
+        await fs.promises.cp(src, dest, { recursive: true, errorOnExist: true, force: false })
+      } catch (copyErr) {
+        // Copy failed part-way: remove our partial copy (dest did not exist before).
+        await fs.promises.rm(dest, { recursive: true, force: true }).catch(() => {})
+        throw copyErr
+      }
+      try {
+        await fs.promises.rm(src, { recursive: true })
+      } catch (rmErr) {
+        // The data is safely at dest. Never delete dest here -- src may be
+        // part-deleted. Report success; leftover staging files need manual cleanup.
+        console.error(`[intake] Copied to ${dest} but could not remove source ${src}: ${rmErr.message}`)
       }
     }
   }
