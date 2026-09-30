@@ -1283,6 +1283,58 @@ app.get('/api/pg/status', async (req, res) => {
   catch { res.json({ connected: false }) }
 })
 
+// Atomically claims the next ebr_export_log sequence number and inserts the
+// log row under the same advisory lock generate-ebr-export.js's --live path
+// uses (key 771983501, see that script's Fix 3), so ebrAutoRunForLot (lot
+// auto-close export) can't race with a concurrent standalone --live run --
+// or another lot auto-closing at the same moment -- for the same sequence
+// number. Added 2026-09-30 (engineering_notes.md) to close a real gap:
+// ebrAutoRunForLot previously called the old, non-transactional
+// ebrNextSequence()/ebrLogExport() pair.
+//
+// Scope note: this endpoint only protects sequence allocation + the log
+// row -- it runs entirely server-side in one request, which is what makes
+// the transaction possible. The actual xlsx write happens afterward on the
+// client via the Electron writeXlsx bridge and is NOT inside this
+// transaction (unlike the standalone script, which writes the file
+// server-side in the same process and can roll it back). If that write
+// fails after this call succeeds, this log row is not automatically
+// removed -- it will look like an export that never produced a file. That
+// residual case is rarer and less bad than today's un-guarded race (two
+// concurrent runs claiming the same sequence number / overwriting the same
+// file path), but it isn't fully closed. A complete fix would move the
+// whole lot-export (query + xlsx write) server-side into this same
+// transaction, mirroring generate-ebr-export.js exactly -- not done here,
+// flagged as a follow-up if wanted.
+app.post('/api/ebr/claim-export-sequence', async (req, res) => {
+  const { skuRoots } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  if (!Array.isArray(skuRoots) || !skuRoots.length) {
+    return res.json({ ok: false, error: 'skuRoots (non-empty array) is required' })
+  }
+  const client = await pgPool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT pg_advisory_xact_lock($1)', [771983501])
+    const { rows } = await client.query(`SELECT COALESCE(MAX(sequence_num),0) + 1 AS next FROM ebr_export_log`)
+    const seq  = rows[0].next
+    const yy   = String(new Date().getFullYear()).slice(-2)
+    const nnnn = String(seq).padStart(4, '0')
+    const fileName = `EB${yy}${nnnn}H03_707.xlsx`
+    await client.query(
+      `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
+      [seq, fileName, skuRoots.length, skuRoots.join(',')]
+    )
+    await client.query('COMMIT')
+    res.json({ ok: true, sequence: seq, fileName })
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    res.json({ ok: false, error: e.message })
+  } finally {
+    client.release()
+  }
+})
+
 // ─── Filesystem routes ─────────────────────────────────────────────────────
 app.post('/api/fs/read-dir', (req, res) => {
   const dirPath = _safeRead(req.body.dirPath)

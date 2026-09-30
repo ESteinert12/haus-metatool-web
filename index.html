@@ -8983,13 +8983,22 @@ async function ebrAutoRunForLot(lotId, lotName) {
       stemsBySku[s.sku_root].push(s)
     })
 
+    // SPLIT_TOLERANCE_PCT / first-10-writers check mirrors Fix 4 in
+    // generate-ebr-export.js (engineering_notes.md, 2026-09-30) -- this path
+    // (lot auto-close export) previously had no bad-split check at all, so a
+    // lot could auto-export titles with broken writer splits straight to
+    // MusicMark with no warning. Ported the same tolerance, not re-derived.
+    const EBR_AUTORUN_SPLIT_TOLERANCE_PCT = 0.5
     const exportable = [], skipped = []
     titles.forEach(t => {
       const w = writersByTeam[t.team_id] || []
+      const splitSum = w.slice(0, 10).reduce((s, x) => s + parseFloat(x.split_pct || 0), 0)
+      const badSplit = w.length > 0 && Math.abs(splitSum - 100) > EBR_AUTORUN_SPLIT_TOLERANCE_PCT
       if (t.ack_status === 'RA')                 skipped.push({ sku: t.sku_root, reason: 'already accepted by MusicMark' })
       else if (t.is_jup)                        skipped.push({ sku: t.sku_root, reason: 'JUP title — not supported yet' })
       else if (!w.length)                       skipped.push({ sku: t.sku_root, reason: 'no writers on file' })
       else if (w.some(x => x.pro === 'SESAC'))  skipped.push({ sku: t.sku_root, reason: 'SESAC writer — separate process' })
+      else if (badSplit)                        skipped.push({ sku: t.sku_root, reason: `writer splits sum to ${splitSum}%, not ~100% — fix before export` })
       else                                       exportable.push(t)
     })
 
@@ -9006,29 +9015,41 @@ async function ebrAutoRunForLot(lotId, lotName) {
     ebrState.writersByTeam = prevWriters
     ebrState.stemsBySku = prevStems
 
-    const now  = new Date()
-    const yy   = String(now.getFullYear()).slice(-2)
-    const seq  = await ebrNextSequence()
-    const nnnn = String(seq).padStart(4, '0')
-    const sss  = 'H03'
-    const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
-    const outDir  = `${cfg.hausjup}/EBR Exports`
-    const outPath = `${outDir}/${fileName}`
-
     if (!window.haus?.ebr) {
       ebrToast(`EBR: lot ${lotName} closed but the export bridge isn't available — restart the app, then run it manually from the EBR section.`, true)
       return
     }
 
+    // Sequence number + ebr_export_log row are claimed atomically server-side
+    // (advisory lock, same key generate-ebr-export.js's --live path uses) so
+    // this can't race with a concurrent standalone --live run or another lot
+    // auto-closing at the same time. See /api/ebr/claim-export-sequence in
+    // api.js for the residual-risk note (file write below isn't inside that
+    // same transaction). Replaces the old ebrNextSequence()/ebrLogExport()
+    // pair, which had no locking at all.
+    const exportSkuRoots = exportable.map(t => t.sku_root)
+    const claimResp = await fetch('/api/ebr/claim-export-sequence', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ skuRoots: exportSkuRoots })
+    })
+    const claim = await claimResp.json().catch(() => null)
+    if (!claim || !claim.ok) {
+      ebrToast(`EBR: lot ${lotName} closed but couldn't claim an export sequence — ${((claim && claim.error) || 'unknown error')}. Run it manually from the EBR section.`, true)
+      return
+    }
+    const { fileName } = claim
+    const outDir  = `${cfg.hausjup}/EBR Exports`
+    const outPath = `${outDir}/${fileName}`
+
     await window.haus.shell.exec(`mkdir -p "${outDir}"`)
     const result = await window.haus.ebr.writeXlsx(outPath, EBR_HEADERS, dataRows)
 
     if (result && result.ok) {
-      await ebrLogExport(fileName, seq, exportable.map(t => t.sku_root))
       const skipMsg = skipped.length ? ` — skipped ${skipped.length}: ${skipped.map(s => s.sku + ' (' + s.reason + ')').join(', ')}` : ''
       ebrToast(`EBR: lot ${lotName} closed — exported ${exportable.length} work${exportable.length !== 1 ? 's' : ''} to EBR Exports/${fileName}${skipMsg}`, skipped.length > 0)
     } else {
-      ebrToast(`EBR: lot ${lotName} closed but the export failed — ${((result && result.error) || 'unknown error')}. Run it manually from the EBR section.`, true)
+      ebrToast(`EBR: lot ${lotName} closed but the export failed after the sequence was already logged (${fileName}) — ${((result && result.error) || 'unknown error')}. This needs a manual look: the ebr_export_log row exists but the file doesn't. Run it manually from the EBR section.`, true)
     }
   } catch (e) {
     console.error('[ebrAutoRunForLot]', e)
