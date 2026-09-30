@@ -1283,6 +1283,94 @@ app.get('/api/pg/status', async (req, res) => {
   catch { res.json({ connected: false }) }
 })
 
+const ebrLotExport = require('./ebr-lot-export')
+
+// Atomically claims the next ebr_export_log sequence number and inserts the
+// log row under the same advisory lock generate-ebr-export.js's --live path
+// uses (key 771983501, see that script's Fix 3), so ebrAutoRunForLot (lot
+// auto-close export) can't race with a concurrent standalone --live run --
+// or another lot auto-closing at the same moment -- for the same sequence
+// number. Added 2026-09-30 (engineering_notes.md) to close a real gap:
+// ebrAutoRunForLot previously called the old, non-transactional
+// ebrNextSequence()/ebrLogExport() pair.
+//
+// Scope note: this endpoint only protects sequence allocation + the log
+// row -- it runs entirely server-side in one request, which is what makes
+// the transaction possible. The actual xlsx write happens afterward on the
+// client via the Electron writeXlsx bridge and is NOT inside this
+// transaction (unlike the standalone script, which writes the file
+// server-side in the same process and can roll it back). If that write
+// fails after this call succeeds, this log row is not automatically
+// removed -- it will look like an export that never produced a file. That
+// residual case is rarer and less bad than today's un-guarded race (two
+// concurrent runs claiming the same sequence number / overwriting the same
+// file path), but it isn't fully closed. A complete fix would move the
+// whole lot-export (query + xlsx write) server-side into this same
+// transaction, mirroring generate-ebr-export.js exactly -- not done here,
+// flagged as a follow-up if wanted.
+app.post('/api/ebr/claim-export-sequence', async (req, res) => {
+  const { skuRoots, senderCode } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  if (!Array.isArray(skuRoots) || !skuRoots.length) {
+    return res.json({ ok: false, error: 'skuRoots (non-empty array) is required' })
+  }
+  // String(...) rather than assuming senderCode is already a string -- a
+  // non-string value here used to throw on .trim() before the try/catch
+  // below even started, leaving the request hanging with no response.
+  const sss = String(senderCode || 'H03').trim().toUpperCase().slice(0, 3) || 'H03'
+  const client = await pgPool.connect()
+  try {
+    await client.query('BEGIN')
+    await client.query('SELECT pg_advisory_xact_lock($1)', [771983501])
+    const { rows } = await client.query(`SELECT COALESCE(MAX(sequence_num),0) + 1 AS next FROM ebr_export_log`)
+    const seq  = rows[0].next
+    const yy   = String(new Date().getFullYear()).slice(-2)
+    const nnnn = String(seq).padStart(4, '0')
+    const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
+    await client.query(
+      `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
+      [seq, fileName, skuRoots.length, skuRoots.join(',')]
+    )
+    await client.query('COMMIT')
+    res.json({ ok: true, sequence: seq, fileName })
+  } catch (e) {
+    await client.query('ROLLBACK').catch(() => {})
+    res.json({ ok: false, error: e.message })
+  } finally {
+    client.release()
+  }
+})
+
+// Full server-side lot auto-export (see ebr-lot-export.js). Used by
+// ebrAutoRunForLot in index.html when a track-limited lot hits its limit and
+// auto-closes -- the query, eligibility filters (including the bad-split
+// check), row-building, xlsx write, sequence claim and ebr_export_log insert
+// all run in this one request, inside a single advisory-locked transaction,
+// so this can no longer race with a concurrent standalone --live run or
+// another lot auto-closing at the same time. Added 2026-09-30 -- see
+// engineering_notes.md for why the two manual tabs (ebrGenerate /
+// ebrGenerateGap) were NOT moved here (they use an Electron save dialog for
+// the output path, which can't be driven from a server route).
+app.post('/api/ebr/auto-export-lot', async (req, res) => {
+  const { lotId, lotName, outDir, senderCode } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  if (!lotId || !outDir) return res.json({ ok: false, error: 'lotId and outDir are required' })
+  // outDir comes straight from the client -- same class of risk _fs/write-file_
+  // was locked down for (see the "Auth guard" comment above and _safeWrite).
+  // Route it through the same allowlist (hausjup/staging/intake/finish +
+  // temp roots + ~/Downloads) instead of trusting it raw; ebrAutoRunForLot
+  // only ever sends `${cfg.hausjup}/EBR Exports`, which resolves under the
+  // configured hausjup root, so this doesn't change the legitimate path.
+  const safeOutDir = _safeWrite(outDir)
+  if (!safeOutDir) return res.json({ ok: false, error: 'outDir not allowed' })
+  try {
+    const result = await ebrLotExport.runLotAutoExport(pgPool, { lotId, lotName, outDir: safeOutDir, senderCode })
+    res.json(result)
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 // ─── Filesystem routes ─────────────────────────────────────────────────────
 app.post('/api/fs/read-dir', (req, res) => {
   const dirPath = _safeRead(req.body.dirPath)

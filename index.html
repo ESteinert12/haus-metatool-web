@@ -8915,24 +8915,31 @@ async function ebrGenerateGap() {
   if (!window.haus?.ebr) { alert('EBR export isn\'t available in this build — restart the app after updating.'); return }
 
   const rows = checked.map(t => ebrBuildRow(t, ebrGapState.writersByTeam, ebrGapState.stemsBySku))
-  const now  = new Date()
-  const yy   = String(now.getFullYear()).slice(-2)
-  const seq  = await ebrNextSequence()
-  const nnnn = String(seq).padStart(4, '0')
   const sss  = (document.getElementById('ebr-gap-sender-code')?.value || 'H03').trim().toUpperCase().slice(0, 3)
-  const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
+
+  // Sequence claim + ebr_export_log insert happen atomically server-side
+  // (2026-09-30, see /api/ebr/claim-export-sequence in api.js) so this can't
+  // race with a concurrent standalone --live run or a lot auto-closing at
+  // the same time -- the gap Fix 3's handoff note flagged as unclosed.
+  const claimResp = await fetch('/api/ebr/claim-export-sequence', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skuRoots: checked.map(t => t.sku_root), senderCode: sss })
+  })
+  const claim = await claimResp.json().catch(() => null)
+  if (!claim || !claim.ok) { alert('Failed to claim an export sequence: ' + ((claim && claim.error) || 'unknown error')); return }
+  const { fileName } = claim
 
   const savePath = await window.haus.ebr.saveDialog(fileName)
   if (!savePath) return
 
   const result = await window.haus.ebr.writeXlsx(savePath, EBR_HEADERS, rows)
   if (result && result.ok) {
-    await ebrLogExport(fileName, seq, checked.map(t => t.sku_root))
     ebrToast(`Saved ${fileName} — ${checked.length} work${checked.length !== 1 ? 's' : ''}. Exported titles will drop off this list.`)
     ebrGapState.loaded = false
     ebrOpenGapTab()
   } else {
-    alert('Failed to write EBR file: ' + ((result && result.error) || 'unknown error'))
+    alert(`Failed to write EBR file (sequence ${claim.sequence} was already logged as ${fileName} — that row now has no matching file): ` + ((result && result.error) || 'unknown error'))
   }
 }
 
@@ -8949,87 +8956,33 @@ function ebrToast(message, isWarning) {
 // had to skip (JUP titles, SESAC writers, titles with no writer/split data
 // on file) rather than silently dropping them.
 async function ebrAutoRunForLot(lotId, lotName) {
+  // 2026-09-30: the whole export (query, eligibility filters incl. the
+  // bad-split check, row-building, xlsx write, sequence claim, log insert)
+  // now runs server-side in one locked transaction -- see
+  // POST /api/ebr/auto-export-lot and ebr-lot-export.js. This replaced a
+  // client-side version that built the rows here and wrote the file via the
+  // Electron bridge outside of any lock (engineering_notes.md, 2026-09-30).
   try {
-    await ebrEnsureAckTable()
-    const rows = await pgQ(
-      `SELECT t.sku_root, t.title, t.team_id, t.is_jup, ack.status AS ack_status
-       FROM titles t
-       JOIN lot_titles lt ON lt.sku_root = t.sku_root
-       LEFT JOIN LATERAL (
-         SELECT status FROM ebr_acknowledgments a2
-          WHERE a2.sku_root = t.sku_root
-          ORDER BY a2.imported_at DESC LIMIT 1
-       ) ack ON TRUE
-       WHERE lt.lot_id = $1 AND COALESCE(t.status,'active') = 'active'
-       ORDER BY t.title ASC`,
-      [lotId]
-    )
-    const titles = Array.isArray(rows) ? rows : []
-    if (!titles.length) return
-
-    const teamIds  = [...new Set(titles.map(t => t.team_id).filter(Boolean))]
-    const skuRoots = titles.map(t => t.sku_root)
-    const [writersRaw, stemsRaw] = await Promise.all([ebrLoadWriters(teamIds), ebrLoadStems(skuRoots)])
-
-    const writersByTeam = {}
-    writersRaw.forEach(w => {
-      if (!writersByTeam[w.team_id]) writersByTeam[w.team_id] = []
-      const { first, last } = ebrSplitName(w.writer_name)
-      writersByTeam[w.team_id].push({ ...w, first, last })
+    const outDir = `${cfg.hausjup}/EBR Exports`
+    const resp = await fetch('/api/ebr/auto-export-lot', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lotId, lotName, outDir })
     })
-    const stemsBySku = {}
-    stemsRaw.forEach(s => {
-      if (!stemsBySku[s.sku_root]) stemsBySku[s.sku_root] = []
-      stemsBySku[s.sku_root].push(s)
-    })
+    const result = await resp.json().catch(() => null)
 
-    const exportable = [], skipped = []
-    titles.forEach(t => {
-      const w = writersByTeam[t.team_id] || []
-      if (t.ack_status === 'RA')                 skipped.push({ sku: t.sku_root, reason: 'already accepted by MusicMark' })
-      else if (t.is_jup)                        skipped.push({ sku: t.sku_root, reason: 'JUP title — not supported yet' })
-      else if (!w.length)                       skipped.push({ sku: t.sku_root, reason: 'no writers on file' })
-      else if (w.some(x => x.pro === 'SESAC'))  skipped.push({ sku: t.sku_root, reason: 'SESAC writer — separate process' })
-      else                                       exportable.push(t)
-    })
-
-    if (!exportable.length) {
-      ebrToast(`EBR: lot ${lotName} closed but nothing could be auto-exported (${skipped.length} skipped). Check it manually in the EBR section.`, true)
+    if (!result || !result.ok) {
+      ebrToast(`EBR: lot ${lotName} closed but auto-export failed — ${((result && result.error) || 'unknown error')}. Run it manually from the EBR section.`, true)
       return
     }
-
-    // ebrBuildRow reads from ebrState — point it at this run's data, then restore
-    const prevWriters = ebrState.writersByTeam, prevStems = ebrState.stemsBySku
-    ebrState.writersByTeam = writersByTeam
-    ebrState.stemsBySku = stemsBySku
-    const dataRows = exportable.map(t => ebrBuildRow(t))
-    ebrState.writersByTeam = prevWriters
-    ebrState.stemsBySku = prevStems
-
-    const now  = new Date()
-    const yy   = String(now.getFullYear()).slice(-2)
-    const seq  = await ebrNextSequence()
-    const nnnn = String(seq).padStart(4, '0')
-    const sss  = 'H03'
-    const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
-    const outDir  = `${cfg.hausjup}/EBR Exports`
-    const outPath = `${outDir}/${fileName}`
-
-    if (!window.haus?.ebr) {
-      ebrToast(`EBR: lot ${lotName} closed but the export bridge isn't available — restart the app, then run it manually from the EBR section.`, true)
+    if (!result.exported) {
+      const skipCount = (result.skipped || []).length
+      ebrToast(`EBR: lot ${lotName} closed but nothing could be auto-exported (${skipCount} skipped${result.reason ? ' — ' + result.reason : ''}). Check it manually in the EBR section.`, true)
       return
     }
-
-    await window.haus.shell.exec(`mkdir -p "${outDir}"`)
-    const result = await window.haus.ebr.writeXlsx(outPath, EBR_HEADERS, dataRows)
-
-    if (result && result.ok) {
-      await ebrLogExport(fileName, seq, exportable.map(t => t.sku_root))
-      const skipMsg = skipped.length ? ` — skipped ${skipped.length}: ${skipped.map(s => s.sku + ' (' + s.reason + ')').join(', ')}` : ''
-      ebrToast(`EBR: lot ${lotName} closed — exported ${exportable.length} work${exportable.length !== 1 ? 's' : ''} to EBR Exports/${fileName}${skipMsg}`, skipped.length > 0)
-    } else {
-      ebrToast(`EBR: lot ${lotName} closed but the export failed — ${((result && result.error) || 'unknown error')}. Run it manually from the EBR section.`, true)
-    }
+    const skipped = result.skipped || []
+    const skipMsg = skipped.length ? ` — skipped ${skipped.length}: ${skipped.map(s => s.sku + ' (' + s.reason + ')').join(', ')}` : ''
+    ebrToast(`EBR: lot ${lotName} closed — exported ${result.exported} work${result.exported !== 1 ? 's' : ''} to EBR Exports/${result.fileName}${skipMsg}`, skipped.length > 0)
   } catch (e) {
     console.error('[ebrAutoRunForLot]', e)
     ebrToast(`EBR: lot ${lotName} closed but auto-export hit an error (see console) — run it manually from the EBR section.`, true)
@@ -9155,22 +9108,26 @@ async function ebrGenerate() {
   if (!window.haus?.ebr) { alert('EBR export isn\'t available in this build — restart the app after updating.'); return }
 
   const rows = checked.map(t => ebrBuildRow(t))
-  const now  = new Date()
-  const yy   = String(now.getFullYear()).slice(-2)
-  const seq  = await ebrNextSequence()
-  const nnnn = String(seq).padStart(4, '0')
   const sss  = (document.getElementById('ebr-sender-code')?.value || 'H03').trim().toUpperCase().slice(0, 3)
-  const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
+
+  // See the matching comment in ebrGenerateGap -- same atomic claim, same reason.
+  const claimResp = await fetch('/api/ebr/claim-export-sequence', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ skuRoots: checked.map(t => t.sku_root), senderCode: sss })
+  })
+  const claim = await claimResp.json().catch(() => null)
+  if (!claim || !claim.ok) { alert('Failed to claim an export sequence: ' + ((claim && claim.error) || 'unknown error')); return }
+  const { fileName } = claim
 
   const savePath = await window.haus.ebr.saveDialog(fileName)
   if (!savePath) return
 
   const result = await window.haus.ebr.writeXlsx(savePath, EBR_HEADERS, rows)
   if (result && result.ok) {
-    await ebrLogExport(fileName, seq, checked.map(t => t.sku_root))
     alert(`Saved ${fileName} — ${checked.length} work${checked.length !== 1 ? 's' : ''}.`)
   } else {
-    alert('Failed to write EBR file: ' + ((result && result.error) || 'unknown error'))
+    alert(`Failed to write EBR file (sequence ${claim.sequence} was already logged as ${fileName} — that row now has no matching file): ` + ((result && result.error) || 'unknown error'))
   }
 }
 
