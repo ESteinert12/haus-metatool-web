@@ -1283,6 +1283,8 @@ app.get('/api/pg/status', async (req, res) => {
   catch { res.json({ connected: false }) }
 })
 
+const ebrLotExport = require('./ebr-lot-export')
+
 // Atomically claims the next ebr_export_log sequence number and inserts the
 // log row under the same advisory lock generate-ebr-export.js's --live path
 // uses (key 771983501, see that script's Fix 3), so ebrAutoRunForLot (lot
@@ -1307,11 +1309,12 @@ app.get('/api/pg/status', async (req, res) => {
 // transaction, mirroring generate-ebr-export.js exactly -- not done here,
 // flagged as a follow-up if wanted.
 app.post('/api/ebr/claim-export-sequence', async (req, res) => {
-  const { skuRoots } = req.body
+  const { skuRoots, senderCode } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
   if (!Array.isArray(skuRoots) || !skuRoots.length) {
     return res.json({ ok: false, error: 'skuRoots (non-empty array) is required' })
   }
+  const sss = (senderCode || 'H03').trim().toUpperCase().slice(0, 3) || 'H03'
   const client = await pgPool.connect()
   try {
     await client.query('BEGIN')
@@ -1320,7 +1323,7 @@ app.post('/api/ebr/claim-export-sequence', async (req, res) => {
     const seq  = rows[0].next
     const yy   = String(new Date().getFullYear()).slice(-2)
     const nnnn = String(seq).padStart(4, '0')
-    const fileName = `EB${yy}${nnnn}H03_707.xlsx`
+    const fileName = `EB${yy}${nnnn}${sss}_707.xlsx`
     await client.query(
       `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
       [seq, fileName, skuRoots.length, skuRoots.join(',')]
@@ -1332,6 +1335,28 @@ app.post('/api/ebr/claim-export-sequence', async (req, res) => {
     res.json({ ok: false, error: e.message })
   } finally {
     client.release()
+  }
+})
+
+// Full server-side lot auto-export (see ebr-lot-export.js). Used by
+// ebrAutoRunForLot in index.html when a track-limited lot hits its limit and
+// auto-closes -- the query, eligibility filters (including the bad-split
+// check), row-building, xlsx write, sequence claim and ebr_export_log insert
+// all run in this one request, inside a single advisory-locked transaction,
+// so this can no longer race with a concurrent standalone --live run or
+// another lot auto-closing at the same time. Added 2026-09-30 -- see
+// engineering_notes.md for why the two manual tabs (ebrGenerate /
+// ebrGenerateGap) were NOT moved here (they use an Electron save dialog for
+// the output path, which can't be driven from a server route).
+app.post('/api/ebr/auto-export-lot', async (req, res) => {
+  const { lotId, lotName, outDir, senderCode } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  if (!lotId || !outDir) return res.json({ ok: false, error: 'lotId and outDir are required' })
+  try {
+    const result = await ebrLotExport.runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode })
+    res.json(result)
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
   }
 })
 
