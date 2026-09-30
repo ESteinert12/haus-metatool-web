@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.hausmusic.server-restart</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/HAUS/Documents/Claude/Projects/ATMOSPHERE/restart-haus-server.sh</string>
+  </array>
+
+  <!-- Restart twice a day (5am and 5pm local time) so the B2 auth token
+       (valid 24h, see services_B2Service.js) is always refreshed well
+       inside its expiry window, even if one cycle is missed (sleep, etc). -->
+  <key>StartCalendarInterval</key>
+  <array>
+    <dict>
+      <key>Hour</key>
+      <integer>5</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+    <dict>
+      <key>Hour</key>
+      <integer>17</integer>
+      <key>Minute</key>
+      <integer>0</integer>
+    </dict>
+  </array>
+
+  <key>RunAtLoad</key>
+  <false/>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/haus-restart-launchd.log</string>
+  <key>StandardErrorPath</key>
+  <string>/tmp/haus-restart-launchd.log</string>
+</dict>
+</plist>
