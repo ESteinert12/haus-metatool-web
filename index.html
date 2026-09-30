@@ -9954,17 +9954,40 @@ async function executeRecopyStagingDupe(idx) {
     }
     if (!copied.length) throw new Error('All file copies failed — check Dropbox sync')
 
-    // Upload to B2 + upsert mix_stems
-    if (b2Connected && b2BucketId) {
+    // Upload to B2 + upsert mix_stems. b2UploadFile returns the downloadUrl
+    // on success and null on ANY failure (not connected, getUploadUrl failed,
+    // upload failed) -- it never throws. The old code discarded that return
+    // value and unconditionally wrote b2_key = <constructed path> regardless
+    // of whether the upload actually happened, so a mid-loop B2 disconnect
+    // (2026-09-30, Ben Zwerin / R13a recopy) silently recorded mix_stems rows
+    // that CLAIM a B2 copy exists when it doesn't. Track real success per file.
+    let b2Attempted   = b2Connected && b2BucketId
+    let b2AllOk       = b2Attempted
+    let b2FailedFiles = []
+    if (b2Attempted) {
       const composerFolder = await b2ComposerFolder(db.composer_id)
       for (const fname of copied) {
-        const b2Key = `${composerFolder}/${db.sku_root}_${db.title}/${fname}`
-        await b2UploadFile(`${destDir}/${fname}`, b2Key)
-        await pgQ(
-          `INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key) VALUES ($1,$2,$3,$4)
-           ON CONFLICT (sku_root, filename) DO UPDATE SET b2_key=EXCLUDED.b2_key`,
-          [db.sku_root, detectStemName(fname), fname, b2Key]
-        )
+        const b2Key   = `${composerFolder}/${db.sku_root}_${db.title}/${fname}`
+        const uploaded = await b2UploadFile(`${destDir}/${fname}`, b2Key)
+        if (uploaded) {
+          await pgQ(
+            `INSERT INTO mix_stems (sku_root, stem_name, filename, b2_key) VALUES ($1,$2,$3,$4)
+             ON CONFLICT (sku_root, filename) DO UPDATE SET b2_key=EXCLUDED.b2_key`,
+            [db.sku_root, detectStemName(fname), fname, b2Key]
+          )
+        } else {
+          b2AllOk = false
+          b2FailedFiles.push(fname)
+          // Upload failed (or B2 dropped mid-loop) -- record the stem so it's
+          // not lost, but WITHOUT a b2_key, so hasB2 checks correctly read
+          // this as "no confirmed B2 copy" instead of a fabricated one, and
+          // clear any stale b2_key a prior broken run may have written.
+          await pgQ(
+            `INSERT INTO mix_stems (sku_root, stem_name, filename) VALUES ($1,$2,$3)
+             ON CONFLICT (sku_root, filename) DO UPDATE SET b2_key = NULL`,
+            [db.sku_root, detectStemName(fname), fname]
+          )
+        }
       }
     } else {
       // No B2 — still upsert mix_stems with local file info
@@ -9977,15 +10000,26 @@ async function executeRecopyStagingDupe(idx) {
       }
     }
 
-    // Retire staging (move, not delete) + purge cache
-    await retireStagingFolder(r.drop.path)
-    fetch(`/api/staged-files/by-path?path=${encodeURIComponent(r.drop.path)}`, { method: 'DELETE' }).catch(() => {})
-
-    // Update row to show success + enable delete checkbox
-    if (row) row.style.opacity = '1'
-    if (btn) btn.closest('td').innerHTML = `<span style="color:#4a7c59"><i class="ti ti-cloud-check"></i> Copied${b2Connected ? ' + B2' : ''}</span>`
-    const chk = document.getElementById(`cleanup-chk-${idx}`)
-    if (chk) { chk.disabled = false; chk.checked = true }
+    // Only treat this as done -- retiring the staging source and offering the
+    // "safe to delete" checkbox -- when every copied file actually confirmed
+    // in B2. A local-only copy (B2 never connected, or it dropped mid-upload)
+    // is not a second copy, so the staging original stays put and the
+    // checkbox stays unchecked, mirroring executeIntake()'s stricter rule.
+    if (b2AllOk) {
+      await retireStagingFolder(r.drop.path)
+      fetch(`/api/staged-files/by-path?path=${encodeURIComponent(r.drop.path)}`, { method: 'DELETE' }).catch(() => {})
+      if (row) row.style.opacity = '1'
+      if (btn) btn.closest('td').innerHTML = `<span style="color:#4a7c59"><i class="ti ti-cloud-check"></i> Copied + B2</span>`
+      const chk = document.getElementById(`cleanup-chk-${idx}`)
+      if (chk) { chk.disabled = false; chk.checked = true }
+    } else {
+      const reason = b2Attempted
+        ? `B2 upload failed for ${b2FailedFiles.length}/${copied.length} file(s) -- staging kept, not marked safe to delete. Retry once B2 is back.`
+        : 'B2 not connected -- local copy only. Staging kept, not marked safe to delete.'
+      if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-alert-triangle"></i> Retry' }
+      if (btn) { const td = btn.closest('td'); if (td) td.title = reason }
+      toast(reason, 'error')
+    }
 
   } catch (e) {
     console.error('[executeRecopyStagingDupe]', e)
