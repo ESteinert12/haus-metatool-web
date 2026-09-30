@@ -9934,11 +9934,12 @@ async function executeRecopyStagingDupe(idx) {
 
     // If files are already in HAUS format, copy as-is. Otherwise rename.
     const copied = []
+    const copyFailures = []   // files that did NOT reach the HAUS folder
     if (r.alreadyRenamed) {
       for (const fname of stagingFiles) {
         const cpR = await window.haus.shell.exec(`cp "${r.drop.path}/${fname}" "${destDir}/${fname}"`)
         if (!cpR?.err) copied.push(fname)
-        else console.warn('[recopy] cp failed:', fname, cpR.err)
+        else { copyFailures.push(fname); console.warn('[recopy] cp failed:', fname, cpR.err) }
       }
     } else {
       // Mix or all-original — rename originals, copy pre-renamed as-is
@@ -9950,10 +9951,14 @@ async function executeRecopyStagingDupe(idx) {
       for (const { orig, name } of namedMap) {
         const cpR = await window.haus.shell.exec(`cp "${r.drop.path}/${orig}" "${destDir}/${name}"`)
         if (!cpR?.err) copied.push(name)
-        else console.warn('[recopy] cp failed:', orig, cpR.err)
+        else { copyFailures.push(orig); console.warn('[recopy] cp failed:', orig, cpR.err) }
       }
     }
     if (!copied.length) throw new Error('All file copies failed — check Dropbox sync')
+    // A PARTIAL local copy is not a complete copy. Without this, b2AllOk below only
+    // looked at the files that copied, so a folder where some cp calls failed could
+    // still be retired from staging and ticked "safe to delete" with files never copied.
+    const copyIncomplete = copyFailures.length > 0
 
     // Upload to B2 + upsert mix_stems. b2UploadFile returns the downloadUrl
     // on success and null on ANY failure (not connected, getUploadUrl failed,
@@ -9963,7 +9968,7 @@ async function executeRecopyStagingDupe(idx) {
     // (2026-09-30, Ben Zwerin / R13a recopy) silently recorded mix_stems rows
     // that CLAIM a B2 copy exists when it doesn't. Track real success per file.
     let b2Attempted   = b2Connected && b2BucketId
-    let b2AllOk       = b2Attempted
+    let b2AllOk       = b2Attempted && !copyIncomplete
     let b2FailedFiles = []
     if (b2Attempted) {
       const composerFolder = await b2ComposerFolder(db.composer_id)
@@ -10014,7 +10019,9 @@ async function executeRecopyStagingDupe(idx) {
       const chk = document.getElementById(`cleanup-chk-${idx}`)
       if (chk) { chk.disabled = false; chk.checked = true }
     } else {
-      const reason = b2Attempted
+      const reason = copyIncomplete
+        ? `${copyFailures.length}/${stagingFiles.length} file(s) failed to copy from staging -- staging kept, not marked safe to delete. Check Dropbox sync and retry.`
+        : b2Attempted
         ? `B2 upload failed for ${b2FailedFiles.length}/${copied.length} file(s) -- staging kept, not marked safe to delete. Retry once B2 is back.`
         : 'B2 not connected -- local copy only. Staging kept, not marked safe to delete.'
       if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-alert-triangle"></i> Retry' }
