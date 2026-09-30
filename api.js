@@ -1314,7 +1314,10 @@ app.post('/api/ebr/claim-export-sequence', async (req, res) => {
   if (!Array.isArray(skuRoots) || !skuRoots.length) {
     return res.json({ ok: false, error: 'skuRoots (non-empty array) is required' })
   }
-  const sss = (senderCode || 'H03').trim().toUpperCase().slice(0, 3) || 'H03'
+  // String(...) rather than assuming senderCode is already a string -- a
+  // non-string value here used to throw on .trim() before the try/catch
+  // below even started, leaving the request hanging with no response.
+  const sss = String(senderCode || 'H03').trim().toUpperCase().slice(0, 3) || 'H03'
   const client = await pgPool.connect()
   try {
     await client.query('BEGIN')
@@ -1352,8 +1355,16 @@ app.post('/api/ebr/auto-export-lot', async (req, res) => {
   const { lotId, lotName, outDir, senderCode } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
   if (!lotId || !outDir) return res.json({ ok: false, error: 'lotId and outDir are required' })
+  // outDir comes straight from the client -- same class of risk _fs/write-file_
+  // was locked down for (see the "Auth guard" comment above and _safeWrite).
+  // Route it through the same allowlist (hausjup/staging/intake/finish +
+  // temp roots + ~/Downloads) instead of trusting it raw; ebrAutoRunForLot
+  // only ever sends `${cfg.hausjup}/EBR Exports`, which resolves under the
+  // configured hausjup root, so this doesn't change the legitimate path.
+  const safeOutDir = _safeWrite(outDir)
+  if (!safeOutDir) return res.json({ ok: false, error: 'outDir not allowed' })
   try {
-    const result = await ebrLotExport.runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode })
+    const result = await ebrLotExport.runLotAutoExport(pgPool, { lotId, lotName, outDir: safeOutDir, senderCode })
     res.json(result)
   } catch (e) {
     res.json({ ok: false, error: e.message })

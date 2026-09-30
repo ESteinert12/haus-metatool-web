@@ -222,6 +222,14 @@ const EBR_HEADERS = [
   "Original Pub Internal ID 4",
   "Original Pub IPI Name# 4",
   "Original Pub Controlled (Y/N) 4",
+  "1st AM/Sub Pub Name 1",
+  "3rd AM/Sub Pub Name 1",
+  "3rd AM/Sub Pub Role Code 1",
+  "3rd AM/Sub Pub PR Affiliation 1",
+  "3rd AM/Sub Pub Territory Code 1",
+  "3rd AM/Sub Pub Collect Share 1",
+  "3rd AM/Sub Pub Internal ID 1",
+  "3rd AM/Sub Pub IPI Name# 1",
   "4th AM/Sub Pub Name 1",
   "4th AM/Sub Pub Role Code 1",
   "4th AM/Sub Pub PR Affiliation 1",
@@ -263,11 +271,12 @@ function ebrPublisherFor(pro) {
 
 
 function ebrBuildRow(title, writersByTeam, stemsBySku) {
-  // 2026-09-29: now takes writersByTeam/stemsBySku explicitly (defaulting to the Export
-  // tab's own ebrState) so the Missing Registrations tab's separate ebrGapState can reuse
-  // this exact row-building logic without clobbering (or being clobbered by) the Export tab.
-  writersByTeam = writersByTeam || ebrState.writersByTeam
-  stemsBySku = stemsBySku || ebrState.stemsBySku
+  // Unlike index.html's copy of this function (which defaults these params to
+  // its own page-level `ebrState` global when omitted), this module has no
+  // such global -- runLotAutoExport always passes both explicitly, so there
+  // is no default here. Passing them in is required; omitting them is a bug.
+  writersByTeam = writersByTeam || {}
+  stemsBySku = stemsBySku || {}
   const row = new Array(EBR_HEADERS.length).fill('')
   const col = (name) => {
     const idx = EBR_COL_INDEX[name]
@@ -340,7 +349,7 @@ async function ensureEbrTables(pool) {
 // -> (inside one locked transaction) claim sequence -> write xlsx -> log.
 // Returns a plain result object; never throws (callers get { ok:false, error }).
 async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) {
-  senderCode = (senderCode || 'H03').trim().toUpperCase().slice(0, 3) || 'H03';
+  senderCode = String(senderCode || 'H03').trim().toUpperCase().slice(0, 3) || 'H03';
   await ensureEbrTables(pgPool);
 
   const { rows: titleRows } = await pgPool.query(
