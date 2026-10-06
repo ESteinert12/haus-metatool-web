@@ -34,3 +34,16 @@ HAUS Workspace.app/Contents/Resources/haus-workspace/
 B2_SKUS.txt
 B2_PAIR_RESULTS.txt
 Claude outputs/client-portal-preview3.html
+
+# Bulk audio, scratch, stale copies, backups, data dumps (never commit)
+*.wav
+_scratch_*/
+_review-worktree/
+_BACKUP_*/
+*.bak-*
+*.backup.*
+lot_logs/
+B2Fix/
+*.psv
+*.gz
+b2-*-inventory*.txt
