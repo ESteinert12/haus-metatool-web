@@ -2134,6 +2134,16 @@ async function b2AutoConnect() {
     : '<span class="pill red">Offline</span>'
 }
 
+// 2026-10-01: one reconnect attempt before an upload path gives up and warns
+// the user. Call sites previously just read the (possibly stale) b2Connected
+// flag and either skipped the upload or asked the user to confirm running
+// without B2 -- without ever trying to reconnect first. Used at every point
+// Intake/Staging Cleanup decides whether to upload.
+async function _ensureB2Connected() {
+  if (!b2Connected || !b2BucketId) await b2AutoConnect()
+  return b2Connected && b2BucketId
+}
+
 
 async function b2Connect() {
   const btn = document.getElementById('b2-connect-btn')
@@ -9968,6 +9978,7 @@ async function executeRecopyStagingDupe(idx) {
     // of whether the upload actually happened, so a mid-loop B2 disconnect
     // (2026-09-30, Ben Zwerin / R13a recopy) silently recorded mix_stems rows
     // that CLAIM a B2 copy exists when it doesn't. Track real success per file.
+    if (!b2Connected || !b2BucketId) await b2AutoConnect()
     let b2Attempted   = b2Connected && b2BucketId
     let b2AllOk       = b2Attempted && !copyIncomplete
     let b2FailedFiles = []
@@ -13204,18 +13215,16 @@ async function resolveCurrentLot(clientName) {
     break
   }
 
-  // No open lot found — suggest a name and ask user to confirm before creating
+  // No open lot found. 2026-10-01, Erik: the inline "New Lot Required"
+  // create-dialog (_confirmNewLot) was redundant -- he builds the lot in
+  // Clients and assigns it here via the existing Assign Lot picker. Open
+  // that picker instead of prompting to create one; nothing is
+  // auto-created from this path anymore. (_confirmNewLot is left in place,
+  // unreferenced, in case this needs to be reverted.)
   if (!lotName) {
-    const suggestedName = await suggestLotName(clientName)
-    const confirmed = await _confirmNewLot(suggestedName, clientName)
-    if (!confirmed) return { lotName: null, lotId: null }
-    lotName  = confirmed.name
-    const lotClient = confirmed.clientName || clientName
-    const lotType2 = lotTypeFromClient(lotClient)
-    const lotId2   = await getOrCreateLot(lotName, lotType2, lotClient, confirmed.limit || 30, confirmed.projectId)
-    await window.haus.shell.exec(`mkdir -p "${hausjup}/${lotName}"`)
-    await loadLotPortalPicker()
-    return { lotName, lotId: lotId2 }
+    toast('No open lot for this client — choose one from Assign Lot', 'info')
+    showIntakeLotPicker()
+    return { lotName: null, lotId: null }
   }
 
   // Ensure DB record exists — pass default limit of 30 so legacy lots get backfilled
@@ -13828,6 +13837,12 @@ setInterval(pollIntakeBadge, 60000)
 // Initial badge check after 3s (let config load first)
 setTimeout(pollIntakeBadge, 3000)
 
+// 2026-10-01: B2 was only ever checked once, right after login. If it drops
+// mid-session for any reason the status pill goes stale and nothing notices
+// until a human does. Re-check every 60s and silently reconnect if needed --
+// b2AutoConnect() already updates the status pill, so this keeps it live.
+setInterval(() => { if (currentUser) b2AutoConnect().catch(() => {}) }, 60000)
+
 async function collectIntakeInfo() {
   // Only validate the currently visible batch, not all 190 drops
   const visibleIndices = intakeBatchMode
@@ -14056,6 +14071,7 @@ async function executeIntake(snapshot = null) {
   // B2 is the second copy. Without it a song still ships locally and saves, but
   // nothing is uploaded and source folders are kept rather than retired. Say so
   // once, up front, instead of only warning in the console.
+  if (!b2Connected || !b2BucketId) await _ensureB2Connected()
   if (!bgMode && (!b2Connected || !b2BucketId)) {
     if (!confirm('B2 is not connected.\n\nThe song will be renamed, shipped to Downloads and saved to the database, but NOTHING will be uploaded to B2 and the composer\'s source folder will be kept instead of retired.\n\nRun intake anyway?')) return
   }
@@ -14130,7 +14146,7 @@ async function executeIntake(snapshot = null) {
         const hasAudio = !!(existingAudio?.stdout || '').trim()
         if (hasAudio) {
           // Files in shipping — check B2 coverage and backfill any missing keys
-          if (b2Connected && b2BucketId) {
+          if (await _ensureB2Connected()) {
             const missingB2 = await pgQ(
               `SELECT mix_stem_id, filename FROM mix_stems WHERE sku_root=$1 AND b2_key IS NULL`,
               [skuRoot]
@@ -14290,7 +14306,7 @@ async function executeIntake(snapshot = null) {
 
     // Upload files to B2 if connected
     const b2Keys = {}
-    if (b2Connected && b2BucketId) {
+    if (await _ensureB2Connected()) {
       const composerFolder = await b2ComposerFolder(info.id)
       for (const fname of renamedFiles) {
         _intakeProgress('Uploading to B2…', fname)

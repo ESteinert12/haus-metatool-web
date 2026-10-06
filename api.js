@@ -434,6 +434,55 @@ async function _b2Authorize() {
   }
 }
 
+// 2026-10-01, Erik: the 401 auto-retry above only covers a LIVE token
+// expiring (~24h TTL) mid-session. It does nothing if the boot-time
+// authorize itself fails (previously a single attempt, no retry) or if
+// b2Auth ends up null for any other reason -- in both cases B2 stayed
+// disconnected indefinitely until a human noticed the status pill and
+// clicked Connect by hand. This is a real gap: Erik hit it directly
+// (reconnected manually, it dropped again before Intake even loaded).
+// Two additions to close it:
+//   1. Boot-time authorize retries with backoff instead of trying once.
+//   2. A background watchdog re-authorizes automatically whenever it finds
+//      b2Auth null, so a transient blip self-heals within one interval
+//      instead of needing a human to notice and reconnect.
+let _b2LastAuthorizedAt = null
+let _b2LastError = null
+
+async function _b2AuthorizeWithRetry(maxAttempts = 5, baseDelayMs = 1000) {
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const ok = await _b2Authorize()
+    if (ok) {
+      _b2LastAuthorizedAt = new Date().toISOString()
+      _b2LastError = null
+      return true
+    }
+    _b2LastError = `authorize attempt ${attempt}/${maxAttempts} failed`
+    if (attempt < maxAttempts) {
+      const delay = baseDelayMs * Math.pow(2, attempt - 1)
+      console.warn(`[b2] authorize attempt ${attempt}/${maxAttempts} failed -- retrying in ${delay}ms`)
+      await new Promise(r => setTimeout(r, delay))
+    }
+  }
+  console.error(`[b2] authorize failed after ${maxAttempts} attempts -- background watchdog will keep retrying`)
+  return false
+}
+
+const B2_WATCHDOG_INTERVAL_MS = 5 * 60 * 1000 // 5 minutes
+setInterval(async () => {
+  if (b2Auth) return // already connected -- the 401 retry in _b2Request handles mid-session expiry
+  console.warn('[b2-watchdog] B2 not connected -- attempting re-authorize')
+  const ok = await _b2Authorize()
+  if (ok) {
+    _b2LastAuthorizedAt = new Date().toISOString()
+    _b2LastError = null
+    console.log('[b2-watchdog] ✓ reconnected')
+  } else {
+    _b2LastError = 'watchdog re-authorize failed'
+    console.error(`[b2-watchdog] ✗ still disconnected -- will retry again in ${B2_WATCHDOG_INTERVAL_MS / 1000}s`)
+  }
+}, B2_WATCHDOG_INTERVAL_MS)
+
 // ─── Dropbox auth ───────────────────────────────────────────────────────────
 // Dropbox stopped issuing long-lived access tokens in 2021. A token generated in
 // the app console expires in ~4 HOURS, which is almost certainly why earlier
@@ -2203,12 +2252,36 @@ app.post('/api/fm/databases', async (req, res) => {
 // the Cloudflare tunnel on long responses, which is why this endpoint buffered in
 // the first place. Forwarding the Range means we now buffer only the bytes the
 // player actually asked for instead of the whole object.
-function _b2Get (urlPath, downloadHost, range) {
+// 2026-10-03: _b2Request (used by uploads/listings) already retries once on a
+// 401 and re-authorizes (2026-09-25 fix), but this GET path -- the one every
+// audio playback request goes through -- was a separate, simpler
+// implementation that never got that treatment. Erik hit this directly:
+// Fishing Pole (S87g0012) has a correct, real b2_key, confirmed byte-for-byte
+// against B2's own listing, yet wouldn't play -- the server log showed a
+// plain `B2 returned 401 {"code":"expired_auth_token"}` on the exact right
+// path. Nothing wrong with the data; the token had just expired and nothing
+// on this code path knew to retry. Same guarded single-retry pattern as
+// _b2Request, so playback self-heals the same way uploads already do.
+function _b2Get (urlPath, downloadHost, range, _retriedAfterReauth = false) {
   return new Promise((resolve, reject) => {
     const headers = { 'Authorization': b2Auth.authorizationToken }
     if (range) headers['Range'] = range
     const rq = https.request({ hostname: downloadHost, path: urlPath, method: 'GET', headers }, r => {
       const status = r.statusCode
+      if (status === 401 && !_retriedAfterReauth) {
+        r.resume() // discard B2's error body -- we're retrying, not reporting it
+        console.warn('[b2/stream] got 401 on GET -- token likely expired (~24h TTL), re-authorizing...')
+        _b2Authorize().then(reauthed => {
+          if (reauthed && b2Auth?.authorizationToken) {
+            const newHost = b2Auth.downloadUrl.replace(/^https?:\/\//, '')
+            resolve(_b2Get(urlPath, newHost, range, true))
+          } else {
+            console.error('[b2/stream] re-authorization failed -- returning the original 401')
+            reject(Object.assign(new Error('B2 returned 401 (re-auth failed)'), { status: 401 }))
+          }
+        }).catch(reject)
+        return
+      }
       if (status !== 200 && status !== 206) {
         let body = ''
         r.on('data', d => body += d)
@@ -2239,14 +2312,11 @@ async function _b2WavSibling(key, downloadHost) {
   const wavKey = key.replace(/\.mp3$/i, '.wav')
   const wavPath = `/file/haus-music/${wavKey.split('/').map(x => encodeURIComponent(x)).join('/')}`
   try {
-    const buf = await new Promise((resolve, reject) => {
-      const r2 = https.request({ hostname: downloadHost, path: wavPath, method: 'GET',
-        headers: { 'Authorization': b2Auth.authorizationToken } }, r => {
-        if (r.statusCode !== 200 && r.statusCode !== 206) { r.resume(); return reject(new Error(`wav sibling HTTP ${r.statusCode}`)) }
-        const cs = []; r.on('data', d => cs.push(d)); r.on('end', () => resolve(Buffer.concat(cs))); r.on('error', reject)
-      })
-      r2.on('error', reject); r2.end()
-    })
+    // Delegate to _b2Get instead of a second raw https.request -- this was the
+    // OTHER code path that hit an un-retried 401 in Erik's Fishing Pole log
+    // ("wav sibling unavailable: wav sibling HTTP 401"). _b2Get now retries
+    // once on 401, so this gets that fix for free instead of duplicating it.
+    const { body: buf } = await _b2Get(wavPath, downloadHost, null)
     if (buf.length < 1000) { console.log(`[b2/stream] wav sibling is only ${buf.length} bytes`); return null }
     console.log(`[b2/stream] serving wav sibling ${wavKey} (${buf.length} bytes)`)
     return buf
@@ -2470,7 +2540,7 @@ app.post('/api/b2/authorize', async (req, res) => {
 })
 
 app.get('/api/b2/status', (req, res) => {
-  res.json({ connected: !!b2Auth })
+  res.json({ connected: !!b2Auth, lastAuthorizedAt: _b2LastAuthorizedAt, lastError: _b2LastError })
 })
 
 // Diagnostic added 2026-09-17 while investigating upload-lot dry-run hangs on
@@ -6959,12 +7029,12 @@ app.listen(PORT, HOST, () => {
   if (process.env.B2_APP_KEY_ID && process.env.B2_APP_KEY) {
     (async () => {
       console.log('[startup] Authorizing B2...')
-      const ok = await _b2Authorize()
+      const ok = await _b2AuthorizeWithRetry()
       if (ok) {
         console.log('[startup] ✓ B2 authorized successfully')
         console.log(`[startup]   Download URL: ${b2Auth.downloadUrl}`)
       } else {
-        console.error('[startup] ✗ B2 authorization failed')
+        console.error('[startup] ✗ B2 authorization failed after retries -- background watchdog will keep trying every 5 min')
       }
     })()
   } else {
