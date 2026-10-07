@@ -1397,17 +1397,26 @@ app.get('/api/portal/playlists', async (req, res) => {
          FROM portal_playlists WHERE client_id=$1 ORDER BY created_at DESC`,
       [req.session.portalUser.client_id]
     )
-    const withTracks = await Promise.all(playlists.rows.map(async pl => {
-      const tracks = await pgPool.query(
-        `SELECT t.sku_root, t.title, t.key, t.bpm
+    // Was one query per playlist (N+1, via Promise.all). One query for every
+    // playlist's tracks instead, grouped here in JS -- same output shape,
+    // same per-playlist ordering, one round trip to Neon instead of N.
+    const playlistIds = playlists.rows.map(pl => pl.playlist_id)
+    const tracksByPlaylist = {}
+    if (playlistIds.length) {
+      const allTracks = await pgPool.query(
+        `SELECT ppt.playlist_id, t.sku_root, t.title, t.key, t.bpm
            FROM portal_playlist_tracks ppt
            JOIN titles t ON t.sku_root = ppt.sku_root
-          WHERE ppt.playlist_id=$1
-          ORDER BY ppt.sort_order`,
-        [pl.playlist_id]
+          WHERE ppt.playlist_id = ANY($1::int[])
+          ORDER BY ppt.playlist_id, ppt.sort_order`,
+        [playlistIds]
       )
-      return { ...pl, tracks: tracks.rows }
-    }))
+      for (const row of allTracks.rows) {
+        const { playlist_id, ...track } = row
+        ;(tracksByPlaylist[playlist_id] ||= []).push(track)
+      }
+    }
+    const withTracks = playlists.rows.map(pl => ({ ...pl, tracks: tracksByPlaylist[pl.playlist_id] || [] }))
     res.json({ ok: true, playlists: withTracks })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -7148,7 +7157,13 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
     const lines = csv.trim().split('\n')
     const headers = lines[0].split(',').map(h => h.trim())
 
-    let inserted = 0
+    // Was one INSERT per CSV line in a sequential loop (N+1, plus any mid-loop
+    // failure left a partial import with no rollback). Parse all valid rows
+    // first, then insert them in a single batched statement via unnest() --
+    // same pattern already used elsewhere in this file for batch updates.
+    // `inserted` still counts attempted (parsed, non-blank) rows, matching the
+    // previous behavior, not actual rows affected by ON CONFLICT DO NOTHING.
+    const pks = [], names = [], cities = [], states = [], countries = [], contacts = []
     for (let i = 1; i < lines.length; i++) {
       const parts = lines[i].split(',')
       const obj = {}
@@ -7157,14 +7172,20 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
       const { PK, CLIENT, CITY, State, Country, Contact } = obj
       if (!PK || !CLIENT) continue
 
+      pks.push(PK); names.push(CLIENT)
+      cities.push(CITY || null); states.push(State || null)
+      countries.push(Country || null); contacts.push(Contact || null)
+    }
+
+    if (pks.length) {
       await pgPool.query(
         `INSERT INTO clients (fm_pk, name, city, state, country, contact, active)
-         VALUES ($1, $2, $3, $4, $5, $6, true)
+         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], array_fill(true, ARRAY[array_length($1::text[],1)]))
          ON CONFLICT (fm_pk) DO NOTHING`,
-        [PK, CLIENT, CITY || null, State || null, Country || null, Contact || null]
+        [pks, names, cities, states, countries, contacts]
       )
-      inserted++
     }
+    const inserted = pks.length
 
     fs.unlinkSync(req.file.path)
     res.json({ ok: true, count: inserted })
