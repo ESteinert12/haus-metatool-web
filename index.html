@@ -311,14 +311,22 @@ webview{flex:1;border:none}
 </head>
 <body>
 
-<!-- ─── Login Screen ──────────────────────────────────────── -->
+<!-- ─── Login Screen ──────────────────────────────────────────────────────
+     Opened on demand (openLoginScreen()) by clicking the sidebar user row or
+     the topbar Sign In pill while logged out -- it is NOT the first thing the
+     app shows anymore. Starts display:none so the app shell behind it is the
+     landing experience; __hausCheckSession() in the Init block below only
+     ever sets this to 'none' (it never opens it), and doLogout() likewise
+     leaves it closed rather than forcing it back open. -->
 <div id="login-screen" style="
   position:fixed;inset:0;z-index:9999;
-  background:#0b2a5b;
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
+  background:rgba(11,42,91,0.92);
+  display:none;flex-direction:column;align-items:center;justify-content:center;
   font-family:var(--font-ui,'Inter',sans-serif);
-">
-  <div style="width:320px;">
+" onclick="if (event.target === this) closeLoginScreen()">
+  <div style="width:320px;position:relative;" onclick="event.stopPropagation()">
+    <button id="login-close" onclick="closeLoginScreen()" title="Continue without signing in"
+      style="position:absolute;top:-36px;right:-6px;background:none;border:none;color:rgba(255,255,255,0.6);font-size:22px;line-height:1;cursor:pointer;padding:6px;">×</button>
     <div style="text-align:center;margin-bottom:32px;">
       <img src="assets/atmosphere-logo.svg" alt="Atmosphere" style="width:260px;opacity:0.95;" />
     </div>
@@ -426,7 +434,7 @@ webview{flex:1;border:none}
     </div>
     <div class="user-row" id="user-row" onclick="toggleUserMenu(event)">
       <div class="avatar" id="user-avatar"></div>
-      <span class="user-name" id="user-name">Not signed in</span>
+      <span class="user-name" id="user-name">Sign In</span>
       <i class="ti ti-settings settings-btn" onclick="event.stopPropagation();navigate('settings')" title="Settings"></i>
       <div id="user-menu" hidden>
         <div class="um-who" id="um-who"></div>
@@ -2256,11 +2264,25 @@ function toast(message, type = 'info', ms) {
 }
 
 // ── User menu / sign out ───────────────────────────────────────────────────
+function openLoginScreen() {
+  const el = document.getElementById('login-screen')
+  if (!el) return
+  el.style.display = 'flex'
+  const errEl = document.getElementById('login-error')
+  if (errEl) errEl.style.display = 'none'
+  const un = document.getElementById('login-username')
+  if (un) un.focus()
+}
+function closeLoginScreen() {
+  const el = document.getElementById('login-screen')
+  if (el) el.style.display = 'none'
+}
+
 function toggleUserMenu(e) {
   if (e) e.stopPropagation()
   const m = document.getElementById('user-menu')
   if (!m) return
-  if (!currentUser) return toast('Not signed in.', 'info')
+  if (!currentUser) return openLoginScreen()
   if (m.hidden) {
     const who = document.getElementById('um-who')
     if (who) who.textContent = 'Signed in as ' + (currentUser.username || currentUser.display_name || '')
@@ -2285,18 +2307,17 @@ async function doLogout() {
   _pgAuthFailed = true
   const nameEl   = document.getElementById('user-name')
   const avatarEl = document.getElementById('user-avatar')
-  if (nameEl)   nameEl.textContent   = 'Not signed in'
+  if (nameEl)   nameEl.textContent   = 'Sign In'
   if (avatarEl) avatarEl.textContent = ''
-  // The login screen's inline style is display:flex; doLogin() overwrites that
-  // property with 'none', so restoring it means setting 'flex' back explicitly —
-  // clearing it would fall through to the div default of 'block' and break the
-  // centred layout.
+  // Signing out no longer force-reopens the login modal -- the app stays
+  // usable logged-out (see openLoginScreen()/closeLoginScreen()); just make
+  // sure the form itself is reset for whenever the user does click back in.
   const login = document.getElementById('login-screen')
-  if (login) login.style.display = 'flex'
+  if (login) login.style.display = 'none'
   const pw = document.getElementById('login-password')
   if (pw) pw.value = ''
   const un = document.getElementById('login-username')
-  if (un) { un.value = ''; un.focus() }
+  if (un) un.value = ''
   toast('Signed out.', 'success')
 }
 
