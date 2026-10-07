@@ -132,7 +132,7 @@ app.get('/haus-api.js', (req, res) => {
 // backup and GET /api.js returned this file, connection string and all. Serve only
 // the handful of things the browser actually asks for.
 app.use('/assets', express.static(path.join(__dirname, 'assets')))
-for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html', 'client-portal.html']) {
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'ebr-shared.js', 'producer.html', 'client-portal.html']) {
   app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
 }
 
