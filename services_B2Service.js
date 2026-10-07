@@ -31,6 +31,7 @@ class B2Service {
     this.bucketId = null
     this.uploadUrl = null
     this.uploadAuthToken = null
+    this.authTokenIssuedAt = null // ms epoch; B2 tokens are valid ~24h (authorize() comment below)
 
     // Retry config
     this.maxRetries = 3
@@ -59,6 +60,7 @@ class B2Service {
 
       this.authToken = response.body.authorizationToken
       this.apiUrl = response.body.apiUrl
+      this.authTokenIssuedAt = Date.now()
       this.bucketId = await this._getBucketId()
 
       console.log('✅ B2 authorization successful')
@@ -69,11 +71,22 @@ class B2Service {
     }
   }
 
+  // B2 account auth tokens are valid ~24h (see authorize()'s own comment). The
+  // original code here only checked whether a token existed, never its age, so a
+  // long-running server process kept using a token B2 had already invalidated —
+  // this is the confirmed root cause of the recurring "B2 needs a restart" symptom
+  // (see engineering_notes.md, 2026-09-30). Re-authorize proactively before the
+  // real expiry instead of waiting for calls to start failing.
+  static AUTH_TOKEN_MAX_AGE_MS = 23 * 60 * 60 * 1000 // 23h margin under the ~24h TTL
+
   async _ensureAuth() {
     /**
-     * Ensure we have valid auth token (re-authorize if needed)
+     * Ensure we have valid auth token (re-authorize if needed, including on age)
      */
-    if (!this.authToken || !this.apiUrl) {
+    const isStale = this.authTokenIssuedAt !== null &&
+      (Date.now() - this.authTokenIssuedAt) >= B2Service.AUTH_TOKEN_MAX_AGE_MS
+    if (!this.authToken || !this.apiUrl || isStale) {
+      if (isStale) console.log('[B2] auth token approaching 24h expiry — re-authorizing proactively')
       await this.authorize()
     }
   }
