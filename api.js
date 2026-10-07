@@ -717,6 +717,51 @@ async function runServerMigrations(pool) {
       )
     `)
 
+    // Real assignments: "assignments are given to composers by us, which are
+    // given to us by the producer of the show" (Kyle, 2026-10-07) -- a client
+    // brief (briefs, already real) turns into one or more assignments, each
+    // handed to one composer. This is what both index.html's Assignments tab
+    // (previously `let ASSIGNMENTS = [...]`, a hardcoded array -- never a real
+    // table) and the writer portal's /api/writer-portal/my-assignments below
+    // now read and write, instead of two separate pieces of mock data.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assignments (
+        assignment_id   SERIAL PRIMARY KEY,
+        brief_id        INTEGER REFERENCES briefs(brief_id) ON DELETE SET NULL,
+        composer_id     VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        title           TEXT NOT NULL,
+        type            TEXT,
+        track           TEXT,
+        brief_text      TEXT,
+        priority        TEXT NOT NULL DEFAULT 'Normal'
+                          CHECK (priority IN ('Normal', 'High', 'Urgent')),
+        status          TEXT NOT NULL DEFAULT 'Pending'
+                          CHECK (status IN ('Pending', 'In Progress', 'Needs Review', 'Delivered')),
+        due_date        DATE,
+        notes           TEXT,
+        created_by      INTEGER REFERENCES haus_users(user_id) ON DELETE SET NULL,
+        created_at      TIMESTAMPTZ DEFAULT now(),
+        updated_at      TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_assignments_composer ON assignments(composer_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_assignments_status ON assignments(status)`)
+
+    // Source files (what the composer was given) and deliverables (what they
+    // sent back), both listed in the UI but not actually populated anywhere
+    // yet -- the table exists so that can be wired in without another
+    // migration, but no upload/attach flow is built in this pass.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS assignment_files (
+        id              SERIAL PRIMARY KEY,
+        assignment_id   INTEGER NOT NULL REFERENCES assignments(assignment_id) ON DELETE CASCADE,
+        kind            TEXT NOT NULL CHECK (kind IN ('source', 'deliverable')),
+        filename        TEXT NOT NULL,
+        added_at        TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_assignment_files_assignment ON assignment_files(assignment_id)`)
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS briefs (
         brief_id      SERIAL PRIMARY KEY,
@@ -1104,6 +1149,66 @@ app.post('/api/writer-portal/auth/change-password', async (req, res) => {
     await pgPool.query(`UPDATE writer_portal_users SET password_hash=$1, must_change_password=false WHERE writer_portal_user_id=$2`,
       [_hashPassword(newPassword), wu.writer_portal_user_id])
     req.session.writerUser.must_change_password = false
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// GET /api/writer-portal/my-assignments -- every assignment handed to this
+// composer, scoped server-side off the session (never off anything the
+// client sends), newest first, with its files/deliverables attached.
+app.get('/api/writer-portal/my-assignments', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session?.writerUser?.composer_id
+  if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    const result = await pgPool.query(
+      `SELECT a.assignment_id, a.title, a.type, a.track, a.brief_text, a.priority,
+              a.status, a.due_date, a.notes, a.created_at,
+              COALESCE(
+                (SELECT json_agg(json_build_object('filename', f.filename, 'kind', f.kind) ORDER BY f.added_at)
+                   FROM assignment_files f WHERE f.assignment_id = a.assignment_id),
+                '[]'
+              ) AS files
+         FROM assignments a
+        WHERE a.composer_id = $1
+        ORDER BY a.created_at DESC`,
+      [composerId]
+    )
+    res.json({ ok: true, assignments: result.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// POST /api/writer-portal/assignments/:id/status -- a composer can move their
+// own assignment forward (Pending -> In Progress -> Needs Review) but cannot
+// mark it Delivered themselves -- that's the admin's approval step in
+// index.html's Assignments tab (the "Approve" button), matching how the
+// status workflow already works there. Ownership is re-checked here, not
+// just assumed from the list the composer was shown.
+const WRITER_ALLOWED_TRANSITIONS = {
+  'Pending': ['In Progress'],
+  'In Progress': ['Needs Review'],
+  'Needs Review': ['In Progress'] // allowed to pull back and keep working
+}
+app.post('/api/writer-portal/assignments/:id/status', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session?.writerUser?.composer_id
+  if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  const { status } = req.body
+  try {
+    const cur = await pgPool.query(
+      `SELECT status FROM assignments WHERE assignment_id = $1 AND composer_id = $2`,
+      [req.params.id, composerId]
+    )
+    const row = cur.rows[0]
+    if (!row) return res.status(404).json({ ok: false, error: 'No such assignment' })
+    const allowed = WRITER_ALLOWED_TRANSITIONS[row.status] || []
+    if (!allowed.includes(status)) {
+      return res.status(403).json({ ok: false, error: `Cannot move an assignment from "${row.status}" to "${status}"` })
+    }
+    await pgPool.query(
+      `UPDATE assignments SET status = $1, updated_at = now() WHERE assignment_id = $2`,
+      [status, req.params.id]
+    )
     res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })

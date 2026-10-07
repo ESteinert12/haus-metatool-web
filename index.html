@@ -3793,7 +3793,7 @@ function onSectionEnter(id) {
   if (id === 'files')     loadFiles()
   if (id === 'lots')      loadLotsSection()
   if (id === 'projects')  loadProjects()
-  if (id === 'assignments') renderAssignments()
+  if (id === 'assignments') loadAssignments()
   if (id === 'contacts')  loadDayliteContacts()
   if (id === 'clients')   loadClientsSection()
   if (id === 'deals')    loadDeals()
@@ -14825,50 +14825,44 @@ async function dbConsoleRun() {
 }
 
 // ─── Assignments ───────────────────────────────────────────
-let ASSIGNMENTS = [
-  {
-    id: 'A001', title: 'Cinematic trailer cut — 0:30', type: 'Edit',
-    assignee: { id: 'R13a', name: 'Ben Zwerin' }, track: 'HAUS_TensionRise_Cm_R13a',
-    brief: 'Trim the full to exactly 0:30 for trailer sync. Fade begins at 0:27. Keep the main hook at 0:14–0:20. Deliver WAV + MP3.',
-    dueDate: '2026-06-20', status: 'In Progress', priority: 'High',
-    files: ['HAUS_TensionRise_Cm_R13a_FULL.wav'],
-    deliverables: [], created: '2026-06-10', notes: ''
-  },
-  {
-    id: 'A002', title: 'Stem split — full stems package', type: 'Stem Split',
-    assignee: { id: 'R48a', name: 'R48a Composer' }, track: 'HAUS_MidnightDrive_Am_R48a',
-    brief: 'Export all stems: Melody, Bass, Drums, Pads, FX separately as 24bit WAV. Name per HAUS convention. Include a stereo mixdown.',
-    dueDate: '2026-06-18', status: 'Pending', priority: 'Normal',
-    files: ['HAUS_MidnightDrive_Am_R48a_FULL.wav'],
-    deliverables: [], created: '2026-06-12', notes: ''
-  },
-  {
-    id: 'A003', title: 'Alt version — underscore / no melody', type: 'Alt Version',
-    assignee: { id: 'R03b', name: 'R03b Composer' }, track: 'HAUS_UrbanPulse_Gm_R03b',
-    brief: 'Create an underscore version with the lead melody muted. Keep energy and rhythm. Ideal for voiceover placement.',
-    dueDate: '2026-06-15', status: 'Needs Review', priority: 'Urgent',
-    files: ['HAUS_UrbanPulse_Gm_R03b_FULL.wav', 'HAUS_UrbanPulse_Gm_R03b_FULL.mp3'],
-    deliverables: ['HAUS_UrbanPulse_Gm_R03b_UNDRSCR.wav'],
-    created: '2026-06-08', notes: 'Client needs this for Hulu review'
-  },
-  {
-    id: 'A004', title: 'Master — streaming loudness', type: 'Master',
-    assignee: { id: 'R13a', name: 'Ben Zwerin' }, track: 'HAUS_NeonHorizon_Dm_R13a',
-    brief: 'Master to -14 LUFS integrated for streaming platforms. No limiting artifacts. Deliver as 24bit WAV.',
-    dueDate: '2026-06-25', status: 'Pending', priority: 'Normal',
-    files: ['HAUS_NeonHorizon_Dm_R13a_FULL.wav'],
-    deliverables: [], created: '2026-06-13', notes: ''
-  },
-  {
-    id: 'A005', title: 'Mix revision — client notes applied', type: 'Mix',
-    assignee: { id: 'R03b', name: 'R03b Composer' }, track: 'HAUS_StormFront_Em_R03b',
-    brief: 'See attached client notes. Reduce low end by 3–4dB below 80Hz. Bring strings up +2dB in chorus. Deliver updated FULL.',
-    dueDate: '2026-06-14', status: 'Delivered', priority: 'High',
-    files: ['HAUS_StormFront_Em_R03b_FULL.wav'],
-    deliverables: ['HAUS_StormFront_Em_R03b_FULL_v2.wav', 'HAUS_StormFront_Em_R03b_FULL_v2.mp3'],
-    created: '2026-06-07', notes: 'Netflix revision round 2'
-  },
-]
+// Real table (migrated 2026-10-07): assignments JOIN composers for display.
+// Previously `let ASSIGNMENTS = [...]`, a hardcoded array with no backing
+// table at all -- see api.js's assignments migration for the schema. The
+// shape here (status/priority/dueDate etc.) is kept as close to the old
+// mock as possible so the rendering functions below barely had to change.
+let ASSIGNMENTS = []
+
+async function loadAssignments() {
+  const rows = await pgQ(`
+    SELECT a.assignment_id, a.title, a.type, a.track, a.brief_text, a.priority,
+           a.status, a.due_date, a.notes, a.created_at, a.composer_id,
+           c.full_name AS composer_name,
+           COALESCE((SELECT json_agg(f.filename) FROM assignment_files f
+                      WHERE f.assignment_id = a.assignment_id AND f.kind = 'source'), '[]') AS files,
+           COALESCE((SELECT json_agg(f.filename) FROM assignment_files f
+                      WHERE f.assignment_id = a.assignment_id AND f.kind = 'deliverable'), '[]') AS deliverables
+      FROM assignments a
+      JOIN composers c ON c.composer_id = a.composer_id
+     ORDER BY a.created_at DESC
+  `)
+  if (!Array.isArray(rows)) { console.error('[loadAssignments] query failed'); ASSIGNMENTS = []; renderAssignments(); return }
+  ASSIGNMENTS = rows.map(r => ({
+    id: r.assignment_id,
+    title: r.title,
+    type: r.type,
+    assignee: { id: r.composer_id, name: r.composer_name },
+    track: r.track,
+    brief: r.brief_text,
+    dueDate: r.due_date,
+    status: r.status,
+    priority: r.priority,
+    files: r.files || [],
+    deliverables: r.deliverables || [],
+    created: r.created_at,
+    notes: r.notes || ''
+  }))
+  renderAssignments()
+}
 
 let assignFilter = 'all'
 let selectedAssignId = null
@@ -14890,7 +14884,7 @@ function renderAssignments(resetDetail = true) {
   list.innerHTML = filtered.length === 0
     ? `<div class="empty" style="height:100%"><i class="ti ti-checklist"></i><p>No assignments in this filter</p></div>`
     : filtered.map(a => `
-      <div class="assign-row${selectedAssignId === a.id ? ' selected' : ''}" onclick="selectAssignment('${a.id}')">
+      <div class="assign-row${selectedAssignId === a.id ? ' selected' : ''}" onclick="selectAssignment(${a.id})">
         <div class="priority-dot ${a.priority}"></div>
         <div class="assign-info">
           <div class="assign-title">${a.title}</div>
@@ -14915,10 +14909,10 @@ function selectAssignment(id) {
 
   const statusColor = { Pending:'gray', 'In Progress':'blue', 'Needs Review':'amber', Delivered:'green' }
   const nextActions = {
-    'Pending':        `<button class="btn primary" onclick="setAssignStatus('${id}','In Progress')"><i class="ti ti-play"></i> Start</button>`,
-    'In Progress':    `<button class="btn primary" onclick="setAssignStatus('${id}','Needs Review')"><i class="ti ti-eye"></i> Submit for review</button>`,
-    'Needs Review':   `<button class="btn" onclick="setAssignStatus('${id}','In Progress')"><i class="ti ti-arrow-back"></i> Request revision</button>
-                       <button class="btn primary" style="background:var(--green);border-color:var(--green)" onclick="setAssignStatus('${id}','Delivered')"><i class="ti ti-circle-check"></i> Approve</button>`,
+    'Pending':        `<button class="btn primary" onclick="setAssignStatus(${id},'In Progress')"><i class="ti ti-play"></i> Start</button>`,
+    'In Progress':    `<button class="btn primary" onclick="setAssignStatus(${id},'Needs Review')"><i class="ti ti-eye"></i> Submit for review</button>`,
+    'Needs Review':   `<button class="btn" onclick="setAssignStatus(${id},'In Progress')"><i class="ti ti-arrow-back"></i> Request revision</button>
+                       <button class="btn primary" style="background:var(--green);border-color:var(--green)" onclick="setAssignStatus(${id},'Delivered')"><i class="ti ti-circle-check"></i> Approve</button>`,
     'Delivered':      `<span class="pill green" style="font-size:12px;padding:5px 10px"><i class="ti ti-circle-check"></i> Complete</span>`
   }
 
@@ -14932,13 +14926,13 @@ function selectAssignment(id) {
       </div>
     </div>
     <div class="detail-row"><span class="detail-label">Assignee</span><span class="detail-val">${a.assignee.name} (${a.assignee.id})</span></div>
-    <div class="detail-row"><span class="detail-label">Track</span><span class="detail-val" style="font-size:11px;font-family:monospace">${a.track}</span></div>
+    <div class="detail-row"><span class="detail-label">Track</span><span class="detail-val" style="font-size:11px;font-family:monospace">${a.track || '—'}</span></div>
     <div class="detail-row"><span class="detail-label">Due</span><span class="detail-val">${fmtDate(a.dueDate)}</span></div>
     <div class="detail-row"><span class="detail-label">Created</span><span class="detail-val">${fmtDate(a.created)}</span></div>
     ${a.notes ? `<div class="detail-row"><span class="detail-label">Notes</span><span class="detail-val" style="color:var(--amber-text)">${a.notes}</span></div>` : ''}
     <div style="margin-top:14px">
       <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:8px">Brief</div>
-      <div style="font-size:13px;color:var(--text);line-height:1.6;background:var(--bg2);padding:10px 12px;border-radius:var(--radius-sm)">${a.brief}</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.6;background:var(--bg2);padding:10px 12px;border-radius:var(--radius-sm)">${a.brief || '—'}</div>
     </div>
     <div style="margin-top:14px">
       <div style="font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.06em;margin-bottom:6px">Source files</div>
@@ -14953,9 +14947,11 @@ function selectAssignment(id) {
   `
 }
 
-function setAssignStatus(id, status) {
-  const a = ASSIGNMENTS.find(x => x.id === id)
-  if (a) { a.status = status; selectAssignment(id); renderAssignments(false) }
+async function setAssignStatus(id, status) {
+  const r = await pgQ(`UPDATE assignments SET status=$1, updated_at=now() WHERE assignment_id=$2`, [status, id])
+  if (!Array.isArray(r)) { toast('Could not update status', 'error'); return }
+  await loadAssignments()
+  selectAssignment(id)
 }
 
 function openNewAssignmentModal() {
@@ -14970,25 +14966,44 @@ function openNewAssignmentModal() {
 function closeNewAssignmentModal() {
   document.getElementById('assign-modal').style.display = 'none'
 }
-function createAssignment() {
+
+// Resolves whatever the admin typed into "Assignee (Composer ID)" -- usually a
+// team code like "R13a" -- down to the real composer_id assignments.composer_id
+// needs. Tries an exact team_id match first (the common case, since that's
+// what the placeholder/examples show), then falls back to a direct
+// composer_id match. Returns null (and lets the caller show an error) rather
+// than guessing or silently inserting something ungrounded.
+async function _resolveComposerId(input) {
+  if (!input) return null
+  const byTeam = await pgQ(`SELECT composer_full_id FROM teams WHERE team_id = $1`, [input])
+  if (Array.isArray(byTeam) && byTeam[0]) return byTeam[0].composer_full_id
+  const byComposer = await pgQ(`SELECT composer_id FROM composers WHERE composer_id = $1`, [input])
+  if (Array.isArray(byComposer) && byComposer[0]) return byComposer[0].composer_id
+  return null
+}
+
+async function createAssignment() {
   const title = document.getElementById('na-title').value.trim()
   if (!title) { toast('Title is required', 'error'); return }
-  const id = 'A' + String(ASSIGNMENTS.length + 1).padStart(3, '0')
-  ASSIGNMENTS.unshift({
-    id, title,
-    type:       document.getElementById('na-type').value,
-    priority:   document.getElementById('na-priority').value,
-    assignee:   { id: document.getElementById('na-assignee').value.trim() || '—', name: document.getElementById('na-assignee').value.trim() || '—' },
-    track:      document.getElementById('na-track').value.trim(),
-    brief:      document.getElementById('na-brief').value.trim(),
-    dueDate:    document.getElementById('na-due').value || '',
-    status:     'Pending',
-    files: [], deliverables: [],
-    created:    new Date().toISOString().split('T')[0],
-    notes: ''
-  })
+  const assigneeInput = document.getElementById('na-assignee').value.trim()
+  const composerId = await _resolveComposerId(assigneeInput)
+  if (!composerId) { toast(`No such composer or team: "${assigneeInput}"`, 'error'); return }
+
+  const r = await pgQ(`
+    INSERT INTO assignments (composer_id, title, type, track, brief_text, priority, due_date, created_by)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+  `, [
+    composerId, title,
+    document.getElementById('na-type').value,
+    document.getElementById('na-track').value.trim(),
+    document.getElementById('na-brief').value.trim(),
+    document.getElementById('na-priority').value,
+    document.getElementById('na-due').value || null,
+    currentUser?.user_id || null
+  ])
+  if (!Array.isArray(r)) { toast('Could not create assignment', 'error'); return }
   closeNewAssignmentModal()
-  renderAssignments(true)
+  await loadAssignments()
 }
 
 function fmtDate(s) {
