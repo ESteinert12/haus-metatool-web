@@ -184,12 +184,26 @@ const PORTAL_PUBLIC_ROUTES = [
   'GET /portal/auth/me'
 ]
 
+// Writer/composer portal (producer.html) -- a third identity, same isolation
+// rule as the client portal above: req.session.writerUser, never .user or
+// .portalUser, so none of the three logins can satisfy either other guard.
+const WRITER_PORTAL_PUBLIC_ROUTES = [
+  'POST /writer-portal/auth/login',
+  'GET /writer-portal/auth/me'
+]
+
 app.use('/api', (req, res, next) => {
   const sig = `${req.method} ${req.path}`
 
   if (req.path.startsWith('/portal/')) {
     if (PORTAL_PUBLIC_ROUTES.includes(sig)) return next()
     if (!req.session?.portalUser) return res.status(401).json({ ok: false, error: 'Not logged in' })
+    return next()
+  }
+
+  if (req.path.startsWith('/writer-portal/')) {
+    if (WRITER_PORTAL_PUBLIC_ROUTES.includes(sig)) return next()
+    if (!req.session?.writerUser) return res.status(401).json({ ok: false, error: 'Not logged in' })
     return next()
   }
 
@@ -685,6 +699,24 @@ async function runServerMigrations(pool) {
       )
     `)
 
+    // Writer/composer portal (producer.html) -- same shape as portal_users above,
+    // scoped by composer_id instead of client_id. composer_id is the existing
+    // "R13"/"R48"-style id in the composers table (teams.composer_full_id points
+    // at the same id), which is what already identifies a composer everywhere
+    // else in this app. producer.html's login was a fake dropdown with no
+    // password and no server check at all -- this table is what makes it real.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS writer_portal_users (
+        writer_portal_user_id  SERIAL PRIMARY KEY,
+        composer_id             VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        email                   TEXT UNIQUE NOT NULL,
+        display_name            TEXT NOT NULL,
+        password_hash           TEXT NOT NULL,
+        must_change_password    BOOLEAN NOT NULL DEFAULT true,
+        created_at               TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS briefs (
         brief_id      SERIAL PRIMARY KEY,
@@ -997,6 +1029,106 @@ app.post('/api/portal/auth/change-password', async (req, res) => {
       [_hashPassword(newPassword), pu.portal_user_id])
     req.session.portalUser.must_change_password = false
     res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ─── Writer/Composer Portal routes ──────────────────────────────────────────
+// producer.html's real backend. A writer logs in with their own email +
+// password (writer_portal_users), scoped by composer_id -- req.session.writerUser,
+// never req.session.user or .portalUser. "my-titles" is the one real, DB-backed
+// replacement for producer.html's old fake ALL_ASSIGNMENTS mock: every title
+// whose team belongs to this composer (teams.composer_full_id = composer_id),
+// with whether mix stems exist as a stand-in delivery signal. The old
+// Assignments (Pending/In Progress/Needs Review/Delivered workflow) and Ideas
+// (pitch submissions) concepts are NOT wired here -- neither has a real data
+// model anywhere in this codebase yet (even the main app's own Assignments tab
+// at index.html is a hardcoded in-memory array, not a DB table) -- so building
+// those for real is its own follow-up, not assumed here.
+app.post('/api/writer-portal/auth/login', async (req, res) => {
+  const { email, password } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const result = await pgPool.query(
+      `SELECT wpu.writer_portal_user_id, wpu.composer_id, wpu.email, wpu.display_name,
+              wpu.password_hash, wpu.must_change_password,
+              c.full_name AS composer_name
+         FROM writer_portal_users wpu
+         JOIN composers c ON c.composer_id = wpu.composer_id
+        WHERE LOWER(wpu.email) = LOWER($1)`,
+      [email]
+    )
+    const row = result.rows[0]
+    if (!row) return res.json({ ok: false, error: 'Invalid email or password' })
+    const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
+    if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (needsUpgrade) {
+      await pgPool.query(`UPDATE writer_portal_users SET password_hash=$1 WHERE writer_portal_user_id=$2`,
+        [_hashPassword(password), row.writer_portal_user_id]).catch(e => console.warn('[writer-portal-auth] rehash failed:', e.message))
+    }
+    const writerUser = {
+      writer_portal_user_id: row.writer_portal_user_id,
+      composer_id: row.composer_id,
+      email: row.email,
+      display_name: row.display_name,
+      composer_name: row.composer_name,
+      must_change_password: row.must_change_password === true
+    }
+    req.session.writerUser = writerUser
+    res.json({ ok: true, user: writerUser })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/writer-portal/auth/logout', (req, res) => {
+  req.session.destroy()
+  res.json({ ok: true })
+})
+
+app.get('/api/writer-portal/auth/me', (req, res) => {
+  res.json({ user: req.session?.writerUser || null })
+})
+
+app.post('/api/writer-portal/auth/change-password', async (req, res) => {
+  const { oldPassword, newPassword } = req.body
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const wu = req.session?.writerUser
+  if (!wu) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    if (!newPassword || String(newPassword).length < 12) {
+      return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+    }
+    const cur = await pgPool.query(`SELECT password_hash FROM writer_portal_users WHERE writer_portal_user_id=$1`, [wu.writer_portal_user_id])
+    const row = cur.rows[0]
+    if (!row || !_verifyPassword(oldPassword || '', row.password_hash).ok) {
+      return res.json({ ok: false, error: 'Current password incorrect' })
+    }
+    await pgPool.query(`UPDATE writer_portal_users SET password_hash=$1, must_change_password=false WHERE writer_portal_user_id=$2`,
+      [_hashPassword(newPassword), wu.writer_portal_user_id])
+    req.session.writerUser.must_change_password = false
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// GET /api/writer-portal/my-titles -- every title belonging to this composer's
+// team(s), scoped server-side by composer_id (never trusts anything from the
+// client about which composer to show). has_stems is a delivery stand-in --
+// whether any mix_stems row exists for the title -- since there is no real
+// per-title assignment-status column anywhere to report instead.
+app.get('/api/writer-portal/my-titles', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session?.writerUser?.composer_id
+  if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    const result = await pgPool.query(
+      `SELECT t.title_id, t.title, t.sku_root, t.genre, t.status, t.date_added,
+              tm.team_id,
+              EXISTS(SELECT 1 FROM mix_stems ms WHERE ms.title_id = t.title_id) AS has_stems
+         FROM titles t
+         JOIN teams tm ON tm.team_id = t.team_id
+        WHERE tm.composer_full_id = $1
+        ORDER BY t.date_added DESC, t.title`,
+      [composerId]
+    )
+    res.json({ ok: true, titles: result.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
