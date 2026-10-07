@@ -5,7 +5,8 @@
   "main": "api.js",
   "scripts": {
     "vercel-build": "echo 'No build step needed'",
-    "start": "node api.js"
+    "start": "node api.js",
+    "dev": "nodemon api.js"
   },
   "engines": {
     "node": "24.x"
@@ -24,5 +25,8 @@
     "pg": "^8.21.0",
     "wavefile": "^11.0.0",
     "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.14"
   }
 }
