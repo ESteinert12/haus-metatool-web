@@ -1,6 +1,20 @@
 require('dotenv').config();
 const { Pool } = require('pg');
-const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false }, keepAlive: true, max: 5 });
+
+async function queryWithRetry(sql, params, attempts = 4) {
+  let lastErr;
+  for (let i = 0; i < attempts; i++) {
+    try {
+      return await pool.query(sql, params);
+    } catch (e) {
+      lastErr = e;
+      console.log(`\n  (retrying after error: ${e.message}, attempt ${i + 1}/${attempts})`);
+      await new Promise(r => setTimeout(r, 1000 * (i + 1)));
+    }
+  }
+  throw lastErr;
+}
 
 function normTitle(s) {
   return (s || '').toUpperCase().replace(/[^A-Z0-9 ]/g, '').replace(/\s+/g, ' ').trim();
@@ -143,7 +157,7 @@ async function run() {
       vals.push(`($${base+1},$${base+2},$${base+3},$${base+4},$${base+5},$${base+6},$${base+7},$${base+8},$${base+9}::date,$${base+10})`);
       params.push(PRO_NAME, r.sku_root, r.title, r.app_status, r.match_status, r.matched_work_id, r.matched_iswc, r.matched_registration_status, r.matched_registration_date, r.confidence);
     });
-    await pool.query(`
+    await queryWithRetry(`
       INSERT INTO pro_catalog_matches (pro_name, sku_root, title, app_status, match_status, matched_work_id, matched_iswc, matched_registration_status, matched_registration_date, confidence)
       VALUES ${vals.join(',')}
     `, params);
