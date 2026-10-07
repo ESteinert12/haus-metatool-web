@@ -8289,6 +8289,31 @@ const JUP_PUBLISHERS = {
 // HAUS_PUBLISHERS / EBR_HEADERS / EBR_COL_INDEX / EBR_MAX_ORIGINAL_PUBS /
 // ebrSplitName / ebrPublisherFor now come from ebr-shared.js (see that file).
 
+let ebrState = { lotsLoaded: false, titles: [], writersByTeam: {}, stemsBySku: {} }
+
+function ebrSwitchTab(tab) {
+  ;['export', 'ack', 'gap'].forEach(t => {
+    const row = document.getElementById(`ebr-tab-btn-${t}`)
+    const content = document.getElementById(`ebr-tab-content-${t}`)
+    const active = t === tab
+    if (content) content.style.display = active ? '' : 'none'
+    if (row) {
+      row.classList.toggle('active-ebr-tab', active)
+      row.style.background = active ? '#E7F0EA' : ''
+      row.style.color = active ? '#1a1a1a' : ''
+    }
+  })
+  if (tab === 'gap' && !ebrGapState.loaded) {
+    ebrGapState.loaded = true
+    ebrOpenGapTab()
+  }
+}
+
+function ebrSetTabDot(tab, show) {
+  const dot = document.getElementById(`ebr-tab-${tab}-dot`)
+  if (dot) dot.style.display = show ? '' : 'none'
+}
+
 async function ebrLoadLots() {
   const rows = await pgQ(`SELECT lot_id, lot_name FROM lots WHERE status='active' ORDER BY lot_name`)
   return Array.isArray(rows) ? rows : []
