@@ -9171,7 +9171,16 @@ function deCamelCase(str) {
 
 function normalizeKey(k) {
   if (!k) return ''
-  k = k.replace(/maj$/i, '').trim()
+  k = k.trim()
+  // KEY_RE (above) deliberately accepts "min"/"minor"/"maj"/"major" as typed
+  // suffixes -- composers spell it every which way -- but nothing collapsed
+  // them to the single form the HAUS key list (and the Intake validator)
+  // actually recognizes. "Dmin"/"Dminor" sailed through unchanged, so every
+  // D-minor/B-minor drop guessed a key that was never valid HAUS output --
+  // visible in the Rename Preview, and shipped straight into the filename
+  // and DB for any track where the composer/key gate wasn't yet in place.
+  k = k.replace(/(minor|min)$/i, 'm')
+  k = k.replace(/(major|maj)$/i, '')
   // Normalize sharps: # → sharp (AVID can't interpret # symbol)
   k = k.replace(/#/, 'sharp')
   // Normalize text "flat" → b (b is a letter, AVID handles it fine)
