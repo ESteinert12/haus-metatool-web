@@ -84,6 +84,7 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
 #section-catalog.active{display:flex;flex-direction:column;overflow:hidden}
 #section-lots.active{display:flex;flex-direction:column;overflow:hidden}
 #section-ebr.active{display:flex;flex-direction:column;overflow:hidden}
+#section-cuesheets.active{display:flex;flex-direction:column;overflow:hidden}
 webview{flex:1;border:none}
 
 /* Cards */
@@ -415,6 +416,7 @@ webview{flex:1;border:none}
        <div class="nav-item" data-section="projects"><i class="ti ti-playlist"></i> Projects</div> -->
   <div class="nav-item" data-section="composers"><i class="ti ti-microphone-2"></i> The Team</div>
   <div class="nav-item" data-section="ebr"><i class="ti ti-file-spreadsheet"></i> EBR</div>
+  <div class="nav-item" data-section="cuesheets"><i class="ti ti-music-check"></i> Cue Sheets</div>
   <div class="nav-item" data-section="files"><i class="ti ti-folder"></i> Files</div>
 
   <div class="nav-section">Production</div>
@@ -1127,6 +1129,23 @@ webview{flex:1;border:none}
             <button class="btn btn-primary" onclick="ebrGenerateGap()"><i class="ti ti-download"></i> Generate EBR File (this batch)</button>
           </div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CUE SHEETS (added 2026-10, separate track from EBR) -->
+  <div class="section" id="section-cuesheets" style="height:100%;overflow:hidden;padding:0">
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:#C0C9CD">
+      <span style="font-size:15px;font-weight:600;color:#1a2226">Cue Sheets</span>
+      <span style="font-size:11px;color:#4b5a5e">Import cue sheets from production companies/PROs, match against the catalog, verify splits.</span>
+      <div style="flex:1"></div>
+      <input type="file" id="cuesheet-file-input" accept=".csv,.xlsx,.xlsm" style="display:none" onchange="cueSheetUpload(this.files[0])">
+      <button class="btn btn-primary" onclick="document.getElementById('cuesheet-file-input').click()"><i class="ti ti-upload"></i> Import Cue Sheet</button>
+    </div>
+    <div style="display:flex;flex:1;overflow:hidden;min-height:0">
+      <div style="width:280px;flex-shrink:0;border-right:0.5px solid var(--border);overflow-y:auto;background:#C0C9CD" id="cuesheet-list"></div>
+      <div style="flex:1;overflow-y:auto;padding:20px 24px" id="cuesheet-detail">
+        <div style="color:var(--text3);font-size:13px">Import a cue sheet, or pick one from the list, to review matches.</div>
       </div>
     </div>
   </div>
@@ -3754,7 +3773,7 @@ const SECTION_TITLES = {
   catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', qa:'Needs Eyeballs', lotmig:'Lot Migration',
   projects:'Projects', files:'Files',
   assignments:'Assignments',
-  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', settings:'Settings'
+  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', settings:'Settings'
 }
 let currentSection = 'today'
 
@@ -3790,6 +3809,7 @@ function onSectionEnter(id) {
   if (id === 'lotmig')    loadLotMig()
   if (id === 'composers') showTeamHome()
   if (id === 'ebr')       loadEbrSection()
+  if (id === 'cuesheets') loadCueSheetsSection()
   if (id === 'files')     loadFiles()
   if (id === 'lots')      loadLotsSection()
   if (id === 'projects')  loadProjects()
@@ -8811,6 +8831,173 @@ async function ebrLogExport(fileName, seq, skus) {
     `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
     [seq, fileName, skus.length, skus.join(',')]
   ).catch(() => {})
+}
+
+// ── Cue Sheets tab (added 2026-10, separate track from EBR) ────────────────
+let cueSheetsCache = []
+let currentCueSheetId = null
+
+async function loadCueSheetsSection() {
+  const r = await fetch('/api/cue-sheets').then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) {
+    document.getElementById('cuesheet-list').innerHTML = `<div style="padding:14px;color:var(--text3);font-size:12px">${r.error || 'Could not load cue sheets'}</div>`
+    return
+  }
+  cueSheetsCache = r.cueSheets
+  renderCueSheetList()
+}
+
+function renderCueSheetList() {
+  const el = document.getElementById('cuesheet-list')
+  if (!cueSheetsCache.length) {
+    el.innerHTML = `<div style="padding:14px;color:#4b5a5e;font-size:12px">No cue sheets imported yet.</div>`
+    return
+  }
+  el.innerHTML = cueSheetsCache.map(cs => {
+    const label = cs.episode || cs.program || cs.source_filename
+    const active = cs.id === currentCueSheetId
+    const warn = parseInt(cs.unmatched_count) + parseInt(cs.ambiguous_count)
+    return `
+      <div onclick="openCueSheetDetail(${cs.id})"
+        style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);${active ? 'background:#E7F0EA' : ''}">
+        <div style="font-size:12px;font-weight:600;color:#1a2226">${esc(label)}</div>
+        <div style="font-size:10px;color:#4b5a5e;margin-top:2px">${esc(cs.source_filename)} · fmt ${cs.format}</div>
+        <div style="font-size:10px;color:#4b5a5e;margin-top:4px">
+          ${cs.cue_count} cues · ${cs.confirmed_count} confirmed
+          ${warn > 0 ? `<span style="color:#c0392b"> · ${warn} need review</span>` : ''}
+        </div>
+      </div>`
+  }).join('')
+}
+
+async function cueSheetUpload(file) {
+  if (!file) return
+  const fd = new FormData()
+  fd.append('file', file)
+  const btn = document.querySelector('#section-cuesheets .btn-primary')
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…' }
+  try {
+    const r = await fetch('/api/cue-sheets/import', { method: 'POST', body: fd }).then(r => r.json())
+    if (!r.ok) { alert(r.error || 'Import failed'); return }
+    await loadCueSheetsSection()
+    openCueSheetDetail(r.cueSheetId)
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Cue Sheet' }
+    document.getElementById('cuesheet-file-input').value = ''
+  }
+}
+
+async function openCueSheetDetail(id) {
+  currentCueSheetId = id
+  renderCueSheetList()
+  const detail = document.getElementById('cuesheet-detail')
+  detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Loading…</div>`
+  const r = await fetch(`/api/cue-sheets/${id}/cues`).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { detail.innerHTML = `<div style="color:#c0392b;font-size:12px">${r.error || 'Failed to load cues'}</div>`; return }
+  renderCueSheetCues(r.cues, r.episode, r.siblingSheets)
+}
+
+function splitsMismatch(cue) {
+  // compare cue-sheet-reported parties against what's on file in team_writers
+  // -- name-level comparison (case-insensitive, trimmed); percent comparison
+  // only where the source format actually reported a percent (format A/C
+  // PRO cue sheets usually don't).
+  if (!cue.matched_sku_root) return null
+  const reported = (cue.parties || []).map(p => (p.name || '').trim().toLowerCase()).filter(Boolean)
+  const onFile = (cue.catalogWriters || []).map(w => (w.writer_name || '').trim().toLowerCase())
+  const reportedSet = new Set(reported)
+  const onFileSet = new Set(onFile)
+  const missingFromCatalog = reported.filter(n => !onFileSet.has(n))
+  const missingFromCueSheet = onFile.filter(n => !reportedSet.has(n))
+  if (!missingFromCatalog.length && !missingFromCueSheet.length) return null
+  return { missingFromCatalog, missingFromCueSheet }
+}
+
+function renderCueSheetCues(cues, episode, siblingSheets) {
+  const detail = document.getElementById('cuesheet-detail')
+  const siblingBanner = (siblingSheets && siblingSheets.length)
+    ? `<div style="background:var(--bg2);border:1px solid var(--border);border-radius:6px;padding:8px 10px;font-size:12px;color:var(--text2);margin-bottom:10px">
+         <i class="ti ti-link"></i> This episode${episode?.episode_num ? ` (${esc(episode.episode_num)})` : ''} has ${siblingSheets.length} other cue sheet source${siblingSheets.length === 1 ? '' : 's'} on file:
+         ${siblingSheets.map(s => `<a href="#" onclick="openCueSheetDetail(${s.id});return false" style="color:var(--accent)">${esc(s.source_filename)}</a>`).join(', ')}
+       </div>`
+    : ''
+  if (!cues.length) { detail.innerHTML = siblingBanner + `<div style="color:var(--text3);font-size:12px">No HAUS cues found in this sheet.</div>`; return }
+
+  const rows = cues.map(cue => {
+    const mismatch = splitsMismatch(cue)
+    const statusColor = {
+      confirmed: '#2e7d32', matched: '#2e7d32', suggested: '#b8860b',
+      ambiguous: '#c0392b', unmatched: '#c0392b', rejected: '#777',
+    }[cue.match_status] || '#777'
+    const reportedParties = (cue.parties || []).map(p =>
+      `${esc(p.name || '')} (${esc(p.role || '')}${p.pro ? ', ' + esc(p.pro) : ''}${p.split_pct != null ? ', ' + p.split_pct + '%' : ''})`
+    ).join('; ') || '<span style="color:var(--text3)">none reported</span>'
+    const onFileParties = (cue.catalogWriters || []).map(w =>
+      `${esc(w.writer_name || '')} (${esc(w.pro || '')}, ${w.split_pct}%)`
+    ).join('; ') || '<span style="color:var(--text3)">no match yet</span>'
+
+    return `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-size:11px;color:var(--text3)">${esc(cue.seq || '')}</td>
+        <td style="padding:8px;font-size:12px">
+          ${esc(cue.title_raw)}
+          ${cue.classify_confidence === 'heuristic' ? `<div style="font-size:10px;color:#b8860b" title="${esc(cue.classify_reason || '')}">heuristic match, not publisher-confirmed</div>` : ''}
+        </td>
+        <td style="padding:8px;font-size:12px">
+          ${cue.matched_title ? esc(cue.matched_title) + `<div style="font-size:10px;color:var(--text3)">${esc(cue.matched_sku_root)}</div>` : '<span style="color:var(--text3)">—</span>'}
+          <div style="margin-top:4px"><input placeholder="search to override…" style="font-size:11px;width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:4px;padding:3px 6px" oninput="cueSheetTitleSearch(this, ${cue.id})"></div>
+          <div id="cue-search-results-${cue.id}"></div>
+        </td>
+        <td style="padding:8px;font-size:11px;max-width:220px">${reportedParties}</td>
+        <td style="padding:8px;font-size:11px;max-width:220px">
+          ${onFileParties}
+          ${mismatch ? `<div style="color:#c0392b;margin-top:3px">
+            ${mismatch.missingFromCatalog.length ? 'On cue sheet, not on file: ' + mismatch.missingFromCatalog.join(', ') + '<br>' : ''}
+            ${mismatch.missingFromCueSheet.length ? 'On file, not on cue sheet: ' + mismatch.missingFromCueSheet.join(', ') : ''}
+          </div>` : (cue.matched_sku_root ? '<div style="color:#2e7d32;margin-top:3px">splits match</div>' : '')}
+        </td>
+        <td style="padding:8px;font-size:11px;font-weight:600;color:${statusColor}">${cue.match_status}</td>
+        <td style="padding:8px">
+          <button class="btn" style="font-size:11px;padding:4px 8px" onclick="confirmCueMatch(${cue.id}, ${cue.matched_sku_root ? `'${cue.matched_sku_root}'` : 'null'})" ${!cue.matched_sku_root ? 'disabled' : ''}>Confirm</button>
+        </td>
+      </tr>`
+  }).join('')
+
+  detail.innerHTML = siblingBanner + `
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
+          <th style="padding:8px">Seq</th><th style="padding:8px">Cue sheet title</th><th style="padding:8px">Matched catalog title</th>
+          <th style="padding:8px">Reported parties</th><th style="padding:8px">On file (team_writers)</th>
+          <th style="padding:8px">Status</th><th style="padding:8px"></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`
+}
+
+let cueSearchDebounce = null
+function cueSheetTitleSearch(input, cueId) {
+  clearTimeout(cueSearchDebounce)
+  const q = input.value.trim()
+  const resultsEl = document.getElementById(`cue-search-results-${cueId}`)
+  if (q.length < 2) { resultsEl.innerHTML = ''; return }
+  cueSearchDebounce = setTimeout(async () => {
+    const r = await fetch(`/api/cue-sheets/title-search?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => ({ ok: false }))
+    if (!r.ok || !r.titles.length) { resultsEl.innerHTML = `<div style="font-size:10px;color:var(--text3)">no matches</div>`; return }
+    resultsEl.innerHTML = r.titles.map(t =>
+      `<div onclick="confirmCueMatch(${cueId}, '${t.sku_root}')" style="font-size:11px;padding:3px 4px;cursor:pointer;border-radius:3px" onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background=''">${esc(t.title)} <span style="color:var(--text3)">(${t.sku_root})</span></div>`
+    ).join('')
+  }, 250)
+}
+
+async function confirmCueMatch(cueId, skuRoot) {
+  await fetch(`/api/cue-sheets/cues/${cueId}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sku_root: skuRoot })
+  }).then(r => r.json())
+  await openCueSheetDetail(currentCueSheetId)
+  await loadCueSheetsSection()
+  openCueSheetDetail(currentCueSheetId)
 }
 
 // ── Missing Registrations tab (added 2026-09-29) ────────────────────────────

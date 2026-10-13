@@ -30,6 +30,7 @@ const http       = require('http')
 const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
+const { parseCueSheetFile, matchCueToTitles, normTitle } = require('./cue-sheet-import.js')
 
 const app    = express()
 const PORT   = process.env.PORT || 9999 
@@ -863,6 +864,74 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_messages_client ON portal_messages(client_id)`)
     console.log('✅ client portal tables ready')
   } catch (e) { console.warn('[schema] client portal tables:', e.message) }
+
+  // ─── Cue sheet verification (added 2026-10, separate track from EBR) ─────
+  // Cue sheets arrive from production companies and PROs (SESAC/ASCAP/etc),
+  // listing which songs aired on a given episode. This reconciles those cues
+  // against our own titles/team_writers catalog and lets splits get verified
+  // -- it does NOT feed the EBR registration/export pipeline.
+  try {
+    // episodes is the normalized home for program/episode/episode_num/air_date --
+    // multiple cue sheets (a PRO's own export, the production company's, our
+    // internal log) can all describe the SAME episode, so they're grouped here
+    // rather than each cue_sheets row carrying its own disconnected copy of
+    // this info (the earlier flat design this replaces).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS episodes (
+        id              SERIAL PRIMARY KEY,
+        program         TEXT,
+        episode_title   TEXT,
+        episode_num     TEXT NOT NULL,
+        air_date        TEXT,
+        UNIQUE(program, episode_num)
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cue_sheets (
+        id              SERIAL PRIMARY KEY,
+        episode_id      INTEGER REFERENCES episodes(id) ON DELETE SET NULL,
+        source_filename TEXT NOT NULL,
+        format          TEXT NOT NULL,
+        cue_sheet_ref   TEXT,
+        imported_by     TEXT,
+        imported_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cue_sheet_cues (
+        id                  SERIAL PRIMARY KEY,
+        cue_sheet_id        INTEGER NOT NULL REFERENCES cue_sheets(id) ON DELETE CASCADE,
+        seq                 TEXT,
+        title_raw           TEXT NOT NULL,
+        title_normalized    TEXT,
+        usage_type          TEXT,
+        duration            TEXT,
+        is_haus_cue         BOOLEAN NOT NULL DEFAULT false,
+        classify_reason     TEXT,
+        classify_confidence TEXT,
+        match_status        TEXT NOT NULL DEFAULT 'unmatched',
+        matched_sku_root    VARCHAR REFERENCES titles(sku_root) ON DELETE SET NULL,
+        match_confidence    TEXT,
+        confirmed_by        TEXT,
+        confirmed_at        TIMESTAMPTZ
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cue_sheet_cue_parties (
+        id        SERIAL PRIMARY KEY,
+        cue_id    INTEGER NOT NULL REFERENCES cue_sheet_cues(id) ON DELETE CASCADE,
+        name      TEXT,
+        role      TEXT,
+        pro       TEXT,
+        split_pct NUMERIC
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheets_episode ON cue_sheets(episode_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cues_sheet ON cue_sheet_cues(cue_sheet_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cues_sku ON cue_sheet_cues(matched_sku_root)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cue_parties_cue ON cue_sheet_cue_parties(cue_id)`)
+    console.log('✅ cue sheet verification tables ready')
+  } catch (e) { console.warn('[schema] cue sheet tables:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -7234,6 +7303,296 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
   } catch (e) {
     res.json({ ok: false, error: e.message })
   }
+})
+
+// ─── Cue sheet verification (added 2026-10, separate track from EBR) ──────
+// Import a cue sheet (PRO CSV or production/internal xlsx), parse it with
+// cue-sheet-import.js, classify which cues are HAUS's own (via deal_publishers
+// -- NOT a hardcoded guess, and NOT including sold-to-A&E imprints like "Just
+// Call Me Angel Music" / "Escape The Ordinary Music", which are out of scope
+// for now), match each HAUS cue against the real titles catalog, and store
+// everything for review/confirmation in the Cue Sheets tab.
+// Shared by both the single-file and bulk import routes. Parses one file,
+// resolves/creates its episode, dedupes against a prior import of the same
+// file for that episode (unless replace=true), and inserts cues + parties.
+// hausPublisherNames/titlesIndex are passed in (not re-fetched per file) so a
+// bulk import of many files only hits those two tables once for the batch.
+async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesIndex, replace, importedBy) {
+  const parsed = parseCueSheetFile(filePath, origName, hausPublisherNames)
+
+  if (parsed.format === 'UNKNOWN') {
+    return { ok: false, origName, error: `Unrecognized cue sheet format for "${origName}" -- not imported. Known formats: PRO cue sheet CSV, production MUSIC FINAL xlsx, internal HAUS logs (csv/xlsx).` }
+  }
+  if (parsed.format === 'EBR_SKIP') {
+    return { ok: false, origName, error: `"${origName}" looks like an EBR registration-template export, not a cue sheet -- not imported. That belongs to the separate EBR pipeline.` }
+  }
+
+  // Resolve (or create) the episodes row this cue sheet belongs to -- keyed
+  // on (program, episode_num) so a second source for the same episode
+  // (the PRO's own export, the production company's, our internal log)
+  // links to the SAME episode instead of creating a disconnected duplicate.
+  const program = (parsed.meta.program || '').trim() || null
+  const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '')
+  const existingEpisode = await pgPool.query(
+    `SELECT id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
+    [program, episodeNum]
+  )
+  let episodeId
+  if (existingEpisode.rows.length) {
+    episodeId = existingEpisode.rows[0].id
+  } else {
+    const newEpisode = await pgPool.query(
+      `INSERT INTO episodes (program, episode_title, episode_num, air_date) VALUES ($1,$2,$3,$4) RETURNING id`,
+      [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null]
+    )
+    episodeId = newEpisode.rows[0].id
+  }
+
+  // Dedupe: re-uploading the exact same file for the same episode is an easy
+  // mistake (and the UI gives no indication a sheet was already imported) --
+  // without this a resubmit silently doubles every cue. Require an explicit
+  // replace=true to overwrite rather than failing silently or duplicating.
+  const dup = await pgPool.query(
+    `SELECT id, imported_at FROM cue_sheets WHERE episode_id = $1 AND source_filename = $2 LIMIT 1`,
+    [episodeId, origName]
+  )
+  if (dup.rows.length && !replace) {
+    return {
+      ok: false, origName,
+      error: `"${origName}" was already imported for this episode (cue sheet #${dup.rows[0].id}, imported ${dup.rows[0].imported_at}). Pass replace=true to re-import and overwrite it.`,
+      duplicateOfCueSheetId: dup.rows[0].id,
+    }
+  }
+  if (dup.rows.length && replace) {
+    // ON DELETE CASCADE on cue_sheet_cues/cue_sheet_cue_parties takes the old
+    // cues and parties with it.
+    await pgPool.query(`DELETE FROM cue_sheets WHERE id = $1`, [dup.rows[0].id])
+  }
+
+  const sheetRow = await pgPool.query(
+    `INSERT INTO cue_sheets (episode_id, source_filename, format, cue_sheet_ref, imported_by)
+     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+    [episodeId, origName, parsed.format, parsed.meta.cueSheetId || null, importedBy || null]
+  )
+  const cueSheetId = sheetRow.rows[0].id
+
+  const hausCues = parsed.cues.filter(c => c.isHaus)
+  // matchCueToTitles only ever returns 'matched' | 'ambiguous' | 'unmatched'
+  // (fuzzy/'suggested' matching was removed 2026-10 per Kyle -- see that
+  // function's own comment) -- counts here cover exactly those three.
+  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+
+  for (const cue of hausCues) {
+    const m = matchCueToTitles(cue, titlesIndex)
+    if (m.status === 'matched') matchedCount++
+    else if (m.status === 'ambiguous') ambiguousCount++
+    else unmatchedCount++
+
+    const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
+
+    const cueRow = await pgPool.query(
+      `INSERT INTO cue_sheet_cues
+         (cue_sheet_id, seq, title_raw, title_normalized, usage_type, duration,
+          is_haus_cue, classify_reason, classify_confidence, match_status,
+          matched_sku_root, match_confidence)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
+      [cueSheetId, cue.seq, cue.titleRaw, cue.titleNormalized, cue.usage || null, cue.duration || null,
+       true, cue.classifyReason || null, cue.classifyConfidence || null, m.status,
+       matchedSku, m.confidence || null]
+    )
+    const cueId = cueRow.rows[0].id
+
+    for (const p of cue.parties) {
+      await pgPool.query(
+        `INSERT INTO cue_sheet_cue_parties (cue_id, name, role, pro, split_pct)
+         VALUES ($1,$2,$3,$4,$5)`,
+        [cueId, p.name || null, p.role || null, p.pro || null, p.pct ? parseFloat(p.pct) || null : null]
+      )
+    }
+  }
+
+  return {
+    ok: true,
+    origName,
+    cueSheetId,
+    format: parsed.format,
+    totalCues: parsed.cues.length,
+    hausCues: hausCues.length,
+    matched: matchedCount,
+    ambiguous: ambiguousCount,
+    unmatched: unmatchedCount,
+  }
+}
+
+// Import a cue sheet (PRO CSV or production/internal xlsx), parse it with
+// cue-sheet-import.js, classify which cues are HAUS's own (via deal_publishers
+// -- NOT a hardcoded guess, and NOT including sold-to-A&E imprints like "Just
+// Call Me Angel Music" / "Escape The Ordinary Music", which are out of scope
+// for now), match each HAUS cue against the real titles catalog, and store
+// everything for review/confirmation in the Cue Sheets tab.
+app.post('/api/cue-sheets/import', upload.single('file'), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.file) return res.json({ ok: false, error: 'No file provided' })
+
+  try {
+    const dealPubRows = await pgPool.query(`SELECT DISTINCT publisher_name FROM deal_publishers`)
+    const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
+    const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+    const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title) }))
+
+    const origName = req.file.originalname || req.file.path
+    const replace = req.body?.replace === 'true' || req.body?.replace === '1'
+    const result = await importOneCueSheet(
+      req.file.path, origName, hausPublisherNames, titlesIndex, replace,
+      req.session?.user?.username
+    )
+    fs.unlinkSync(req.file.path)
+    res.json(result)
+  } catch (e) {
+    console.error('[cue-sheets/import]', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// Bulk import: upload several cue sheets at once (e.g. a whole folder's worth
+// of real production/PRO exports). Fetches the publisher/titles lookups ONCE
+// for the whole batch rather than once per file, and processes files one at a
+// time (not in parallel) so dedupe-vs-replace ordering within a batch stays
+// predictable. Per-file errors (unrecognized format, duplicate, bad data)
+// don't abort the batch -- every file gets its own result row in the response.
+app.post('/api/cue-sheets/import-bulk', upload.array('files', 200), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.files || !req.files.length) return res.json({ ok: false, error: 'No files provided' })
+
+  const dealPubRows = await pgPool.query(`SELECT DISTINCT publisher_name FROM deal_publishers`)
+  const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
+  const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+  const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title) }))
+  const replace = req.body?.replace === 'true' || req.body?.replace === '1'
+  const importedBy = req.session?.user?.username
+
+  const results = []
+  for (const file of req.files) {
+    const origName = file.originalname || file.path
+    try {
+      results.push(await importOneCueSheet(file.path, origName, hausPublisherNames, titlesIndex, replace, importedBy))
+    } catch (e) {
+      console.error('[cue-sheets/import-bulk]', origName, e.message)
+      results.push({ ok: false, origName, error: e.message })
+    } finally {
+      try { fs.unlinkSync(file.path) } catch {}
+    }
+  }
+
+  res.json({
+    ok: true,
+    total: results.length,
+    imported: results.filter(r => r.ok).length,
+    failed: results.filter(r => !r.ok).length,
+    results,
+  })
+})
+
+app.get('/api/cue-sheets', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const r = await pgPool.query(`
+      SELECT cs.*,
+        e.program, e.episode_title AS episode, e.episode_num, e.air_date,
+        COUNT(c.id) AS cue_count,
+        COUNT(c.id) FILTER (WHERE c.match_status = 'confirmed') AS confirmed_count,
+        COUNT(c.id) FILTER (WHERE c.match_status = 'unmatched') AS unmatched_count,
+        COUNT(c.id) FILTER (WHERE c.match_status = 'ambiguous') AS ambiguous_count
+      FROM cue_sheets cs
+      LEFT JOIN episodes e ON e.id = cs.episode_id
+      LEFT JOIN cue_sheet_cues c ON c.cue_sheet_id = cs.id
+      GROUP BY cs.id, e.program, e.episode_title, e.episode_num, e.air_date
+      ORDER BY cs.imported_at DESC
+    `)
+    res.json({ ok: true, cueSheets: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Per-cue detail: the matched title's real team_writers splits, side by side
+// with what the cue sheet itself reported, so a mismatch is visible at a glance.
+app.get('/api/cue-sheets/:id/cues', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    // Sibling cue sheets for the same episode (a PRO's own export, the
+    // production company's, our internal log can all cover one episode) --
+    // surfaced so the reviewer knows other sources exist to cross-check against.
+    const sheetMeta = await pgPool.query(
+      `SELECT cs.episode_id, e.program, e.episode_title, e.episode_num, e.air_date
+       FROM cue_sheets cs LEFT JOIN episodes e ON e.id = cs.episode_id
+       WHERE cs.id = $1`,
+      [req.params.id]
+    )
+    const episode = sheetMeta.rows[0] || null
+    const siblingSheets = episode?.episode_id
+      ? (await pgPool.query(
+          `SELECT id, source_filename, format, imported_at FROM cue_sheets
+           WHERE episode_id = $1 AND id != $2 ORDER BY imported_at`,
+          [episode.episode_id, req.params.id]
+        )).rows
+      : []
+
+    const cuesRes = await pgPool.query(
+      `SELECT c.*, t.title AS matched_title, t.team_id AS matched_team_id
+       FROM cue_sheet_cues c
+       LEFT JOIN titles t ON t.sku_root = c.matched_sku_root
+       WHERE c.cue_sheet_id = $1
+       ORDER BY c.id`,
+      [req.params.id]
+    )
+    const cueIds = cuesRes.rows.map(c => c.id)
+    const teamIds = [...new Set(cuesRes.rows.map(c => c.matched_team_id).filter(Boolean))]
+
+    const partiesRes = cueIds.length
+      ? await pgPool.query(`SELECT * FROM cue_sheet_cue_parties WHERE cue_id = ANY($1::int[]) ORDER BY id`, [cueIds])
+      : { rows: [] }
+    const writersRes = teamIds.length
+      ? await pgPool.query(`SELECT id, team_id, writer_name, pro, split_pct, ipi FROM team_writers WHERE team_id = ANY($1::text[]) ORDER BY team_id, id`, [teamIds])
+      : { rows: [] }
+
+    const partiesByCue = {}
+    for (const p of partiesRes.rows) (partiesByCue[p.cue_id] ||= []).push(p)
+    const writersByTeam = {}
+    for (const w of writersRes.rows) (writersByTeam[w.team_id] ||= []).push(w)
+
+    const cues = cuesRes.rows.map(c => ({
+      ...c,
+      parties: partiesByCue[c.id] || [],
+      catalogWriters: c.matched_team_id ? (writersByTeam[c.matched_team_id] || []) : [],
+    }))
+    res.json({ ok: true, cues, episode, siblingSheets })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Confirm (or manually override) a cue's match. body: { sku_root } -- pass
+// null/empty to mark it explicitly reviewed-and-no-match instead.
+app.post('/api/cue-sheets/cues/:id/confirm', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const { sku_root } = req.body
+    const status = sku_root ? 'confirmed' : 'rejected'
+    await pgPool.query(
+      `UPDATE cue_sheet_cues
+       SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
+       WHERE id = $4`,
+      [sku_root || null, status, req.session?.user?.username || null, req.params.id]
+    )
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Search titles for the manual-override picker (same style as other search-to-link UI in this app)
+app.get('/api/cue-sheets/title-search', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const q = `%${(req.query.q || '').trim()}%`
+    const r = await pgPool.query(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q])
+    res.json({ ok: true, titles: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
 // ─── Schema migration: Add client_id to playlists, lots, projects ──────────
