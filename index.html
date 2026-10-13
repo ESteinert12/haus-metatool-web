@@ -13687,9 +13687,48 @@ async function collectIntakeInfo() {
   const visibleIndices = intakeBatchMode
     ? intakeDrops.map((d,i) => d.guessedID === (intakeDrops[intakeIndex]?.guessedID || '') ? i : -1).filter(i => i >= 0)
     : [intakeIndex]
-  const missingKeys = visibleIndices.filter(i => !document.getElementById(`key-${i}`)?.value.trim())
-  if (missingKeys.length) {
-    missingKeys.forEach(i => { const el = document.getElementById(`key-${i}`); if (el) { el.style.border = '1.5px solid var(--red,#e53)'; el.placeholder = 'required' } })
+  // ── Validate Key + Composer before anything else touches the filesystem/DB ──
+  // Both fields are free text (the datalist is a convenience, not an enforced
+  // list), so a blank or mistyped value used to sail straight through here:
+  // an empty Composer became the literal string "UNKNOWN" and an empty or
+  // garbage Key landed unsanitized in the shipped filename and the titles
+  // row. Block on both before collectIntakeInfo hands off to step 2 / Import.
+  const VALID_KEYS = ['C','Csharp','Db','D','Dsharp','Eb','E','F','Fsharp','Gb','G','Gsharp','Ab','A','Asharp','Bb','B',
+                      'Cm','Csharpm','Dbm','Dm','Dsharpm','Ebm','Em','Fm','Fsharpm','Gbm','Gm','Gsharpm','Abm','Am','Asharpm','Bbm','Bm']
+  const _validKeySet = new Set(VALID_KEYS.map(k => k.toLowerCase()))
+  const knownComposerIds = new Set((_intakeComposers || []).map(c => (c.composer_full_id || '').toLowerCase()))
+  let blockedFields = false
+  for (const i of visibleIndices) {
+    const keyEl = document.getElementById(`key-${i}`)
+    const keyVal = keyEl?.value.trim() || ''
+    const keyOk = !!keyVal && _validKeySet.has(keyVal.toLowerCase())
+    if (keyEl) {
+      if (!keyOk) {
+        keyEl.style.border = '1.5px solid var(--red,#e53)'
+        keyEl.placeholder = keyVal ? 'unrecognized key' : 'required'
+        blockedFields = true
+      } else {
+        keyEl.style.border = ''
+      }
+    }
+
+    const idEl = document.getElementById(`id-${i}`)
+    const idVal = idEl?.value.trim() || ''
+    // If the composer list hasn't loaded yet, don't false-positive-block on
+    // "unrecognized" -- still require the field to be non-blank.
+    const idOk = !!idVal && (knownComposerIds.size === 0 || knownComposerIds.has(idVal.toLowerCase()))
+    if (idEl) {
+      if (!idOk) {
+        idEl.style.border = '1.5px solid var(--red,#e53)'
+        idEl.placeholder = idVal ? 'unrecognized composer' : 'required'
+        blockedFields = true
+      } else {
+        idEl.style.border = ''
+      }
+    }
+  }
+  if (blockedFields) {
+    toast('Fix the highlighted Key/Composer field(s) before continuing — a blank or unrecognized value here lands straight in the shipped filename and database.', 'error')
     return
   }
 
@@ -13849,7 +13888,12 @@ function buildHausName(filename, title, info) {
   const version = detectVersion(filename)
   const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
   const prefix = info.isJup ? 'HAUSJUP' : 'HAUS'
-  return `${prefix}_${titleCamel}_${info.key}_${info.id}_${version}.${ext}`
+  // Defense-in-depth: collectIntakeInfo() now blocks a blank/unrecognized Key
+  // or Composer before this is ever reached, but key/id are still free-text
+  // form values -- never interpolate them unsanitized into a filesystem path.
+  const keyClean = String(info.key || '').replace(/[^a-zA-Z0-9]/g, '')
+  const idClean = String(info.id || '').replace(/[^a-zA-Z0-9]/g, '')
+  return `${prefix}_${titleCamel}_${keyClean}_${idClean}_${version}.${ext}`
 }
 
 // Deduplicate renamed files within a batch.
