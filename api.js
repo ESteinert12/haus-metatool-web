@@ -762,6 +762,26 @@ async function runServerMigrations(pool) {
     `)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_assignment_files_assignment ON assignment_files(assignment_id)`)
 
+    // In-app notifications for the writer/composer portal. No email/Slack
+    // sending capability exists anywhere in this app yet (confirmed: no smtp/
+    // nodemailer/slack-webhook code anywhere in api.js) -- this is the real,
+    // buildable-today piece: a composer sees new-assignment notices when they
+    // log in. Email/Slack delivery is a separate follow-up that needs a
+    // sending method and credentials decided first, same open item as the
+    // long-standing "Kyle notification" feature in engineering_notes.md.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS writer_notifications (
+        notification_id  SERIAL PRIMARY KEY,
+        composer_id       VARCHAR(10) NOT NULL REFERENCES composers(composer_id) ON DELETE CASCADE,
+        assignment_id     INTEGER REFERENCES assignments(assignment_id) ON DELETE CASCADE,
+        type              TEXT NOT NULL DEFAULT 'new_assignment',
+        message           TEXT NOT NULL,
+        read_at           TIMESTAMPTZ,
+        created_at        TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_writer_notifications_composer ON writer_notifications(composer_id, read_at)`)
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS briefs (
         brief_id      SERIAL PRIMARY KEY,
@@ -1210,6 +1230,49 @@ app.post('/api/writer-portal/assignments/:id/status', async (req, res) => {
       [status, req.params.id]
     )
     res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// GET /api/writer-portal/notifications -- this composer's notifications,
+// newest first, scoped server-side off the session. Includes an
+// unread_count convenience field so the frontend can show a badge without a
+// second round trip.
+app.get('/api/writer-portal/notifications', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session?.writerUser?.composer_id
+  if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    const result = await pgPool.query(
+      `SELECT notification_id, assignment_id, type, message, read_at, created_at
+         FROM writer_notifications
+        WHERE composer_id = $1
+        ORDER BY created_at DESC
+        LIMIT 100`,
+      [composerId]
+    )
+    const unread = await pgPool.query(
+      `SELECT COUNT(*)::int AS n FROM writer_notifications WHERE composer_id = $1 AND read_at IS NULL`,
+      [composerId]
+    )
+    res.json({ ok: true, notifications: result.rows, unread_count: unread.rows[0].n })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// POST /api/writer-portal/notifications/:id/read -- ownership re-checked via
+// the WHERE clause itself (composer_id = session's own), not assumed from
+// what the composer was shown.
+app.post('/api/writer-portal/notifications/:id/read', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const composerId = req.session?.writerUser?.composer_id
+  if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
+  try {
+    const result = await pgPool.query(
+      `UPDATE writer_notifications SET read_at = now()
+        WHERE notification_id = $1 AND composer_id = $2 AND read_at IS NULL
+        RETURNING notification_id`,
+      [req.params.id, composerId]
+    )
+    res.json({ ok: true, updated: result.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
