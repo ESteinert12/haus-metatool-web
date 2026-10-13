@@ -14982,26 +14982,55 @@ async function _resolveComposerId(input) {
   return null
 }
 
+// Creates one assignment per composer (so each one's status is tracked
+// independently -- composer A finishing doesn't change composer B's row),
+// and one writer_notifications row per assignment so each sees it at their
+// next login (producer.html isn't wired to display these yet -- see
+// handoff notes -- but the data is real and waiting for it). "All" is not a
+// separate code path: it's just every composer code typed in, comma- (or
+// whitespace-) separated -- from one name to the whole list, same field.
 async function createAssignment() {
   const title = document.getElementById('na-title').value.trim()
   if (!title) { toast('Title is required', 'error'); return }
   const assigneeInput = document.getElementById('na-assignee').value.trim()
-  const composerId = await _resolveComposerId(assigneeInput)
-  if (!composerId) { toast(`No such composer or team: "${assigneeInput}"`, 'error'); return }
+  if (!assigneeInput) { toast('Assignee is required', 'error'); return }
 
-  const r = await pgQ(`
-    INSERT INTO assignments (composer_id, title, type, track, brief_text, priority, due_date, created_by)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-  `, [
-    composerId, title,
-    document.getElementById('na-type').value,
-    document.getElementById('na-track').value.trim(),
-    document.getElementById('na-brief').value.trim(),
-    document.getElementById('na-priority').value,
-    document.getElementById('na-due').value || null,
-    currentUser?.user_id || null
-  ])
-  if (!Array.isArray(r)) { toast('Could not create assignment', 'error'); return }
+  const tokens = [...new Set(assigneeInput.split(/[,\s]+/).map(t => t.trim()).filter(Boolean))]
+  const resolved = []
+  const failed = []
+  for (const tok of tokens) {
+    const composerId = await _resolveComposerId(tok)
+    if (composerId) resolved.push({ input: tok, composerId })
+    else failed.push(tok)
+  }
+  if (resolved.length === 0) { toast(`No such composer or team: "${tokens.join(', ')}"`, 'error'); return }
+
+  const type     = document.getElementById('na-type').value
+  const track    = document.getElementById('na-track').value.trim()
+  const brief     = document.getElementById('na-brief').value.trim()
+  const priority  = document.getElementById('na-priority').value
+  const due       = document.getElementById('na-due').value || null
+  const createdBy = currentUser?.user_id || null
+
+  let created = 0
+  for (const { composerId } of resolved) {
+    const r = await pgQ(`
+      INSERT INTO assignments (composer_id, title, type, track, brief_text, priority, due_date, created_by)
+      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+      RETURNING assignment_id
+    `, [composerId, title, type, track, brief, priority, due, createdBy])
+    if (!Array.isArray(r) || !r[0]) continue
+    created++
+    await pgQ(`
+      INSERT INTO writer_notifications (composer_id, assignment_id, type, message)
+      VALUES ($1, $2, 'new_assignment', $3)
+    `, [composerId, r[0].assignment_id, `New assignment: ${title}`])
+  }
+
+  if (created === 0) { toast('Could not create assignment', 'error'); return }
+  const parts = [`Created ${created} assignment${created === 1 ? '' : 's'}`]
+  if (failed.length) parts.push(`could not resolve: ${failed.join(', ')}`)
+  toast(parts.join(' — '), failed.length ? 'info' : 'success')
   closeNewAssignmentModal()
   await loadAssignments()
 }
