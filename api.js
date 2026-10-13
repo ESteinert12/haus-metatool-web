@@ -30,12 +30,20 @@ const http       = require('http')
 const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
+const IntakeIntegration = require('./intake-integration.js')
+
+const compression = require('compression')
 
 const app    = express()
 const PORT   = process.env.PORT || 9999 
 const upload = multer({ dest: os.tmpdir() })
 
 // ─── Middleware ────────────────────────────────────────────────────────────
+// Gzip/deflate every compressible response. index.html alone is ~1MB of inline
+// JS served with no-cache below (so every load re-transfers it); this was the
+// single largest fix for "the app is slow to load" -- confirmed by direct read,
+// there was no compression anywhere in this codebase before this line existed.
+app.use(compression())
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -125,25 +133,28 @@ app.use(session({
 }))
 if (secureCookie) app.set('trust proxy', 1)   // Vercel/Cloudflare terminate TLS upstream
 
-// Disable caching for all files
+// Always revalidate with the server (never serve a stale copy from the
+// browser's cache without asking first), but allow a conditional GET so an
+// unchanged file gets a 304 (no body) instead of the full bytes every time.
+// This used to be "no-store" (no caching at all, ever) -- changed because
+// index.html alone is ~1MB and was being fully re-transferred on every single
+// load/refresh with no compression and no way to skip re-sending unchanged
+// bytes. res.sendFile() below already sets ETag/Last-Modified by default, so
+// the browser still asks on every request; it just doesn't pay for a full
+// re-download when nothing changed.
 app.use((req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate')
   res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
   next()
 })
 
-// Never cache index.html or haus-api.js so changes are always picked up
 app.get('/', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
   res.sendFile(path.join(__dirname, 'index.html'))
 })
 app.get('/index.html', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
   res.sendFile(path.join(__dirname, 'index.html'))
 })
 app.get('/haus-api.js', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
   res.sendFile(path.join(__dirname, 'haus-api.js'))
 })
 
@@ -7102,7 +7113,20 @@ app.get('/api/intake/metadata', async (req, res) => {
 // Import metadata from .md file and move to shipping
 app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
-  if (!intakeIntegration) return res.json({ ok: false, error: 'Intake system not initialized' })
+
+  // intakeIntegration was never required/instantiated anywhere in this file --
+  // every reference below used to throw a ReferenceError before any response was
+  // sent, so this route hung on every call. Built fresh per request (same pattern
+  // as the rest of this file's cfg reads) so it always sees the current pgPool
+  // and current on-disk config, rather than a reference captured once at startup
+  // that would go stale across a pool reconnect.
+  let intakeIntegration
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
+    intakeIntegration = new IntakeIntegration({ query: (...a) => pgPool.query(...a) }, { cfg })
+  } catch (e) {
+    return res.json({ ok: false, error: 'Intake system not initialized: ' + e.message })
+  }
 
   try {
     const { id } = req.params
