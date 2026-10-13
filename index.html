@@ -9330,15 +9330,26 @@ async function scanStagingForClient(clientName) {
     return
   }
 
+  // Was: one readDir per non-drop subfolder, awaited one at a time in a loop.
+  // Each readDir is a round trip to the server (fs.readdir on what is often a
+  // Dropbox CloudStorage folder) -- sequential awaits here meant N subfolders
+  // cost N round-trips' worth of latency stacked up, instead of running
+  // concurrently. The lot-folder sub-reads are now fired together with
+  // Promise.all (confirmed root cause of "clicking a show takes ~10 seconds",
+  // 2026-10-13); results are still assembled in the original itemsArr order
+  // below so the on-screen list order is unchanged.
   let folders = []
   const itemsArr = Array.from(items)
-  for (let ii = 0; ii < itemsArr.length; ii++) {
-    const item = itemsArr[ii]
-    if (!item.isDirectory) continue
+  const dirItems = itemsArr.filter(item => item.isDirectory)
+  const subResults = await Promise.all(dirItems.map(item =>
+    isDropFolder(item.name) ? null : window.haus.fs.readDir(item.path)
+  ))
+  for (let ii = 0; ii < dirItems.length; ii++) {
+    const item = dirItems[ii]
     if (isDropFolder(item.name)) {
       folders.push({ name: item.name, path: item.path, isDirectory: true, lotFolder: null })
     } else {
-      const sub = await window.haus.fs.readDir(item.path)
+      const sub = subResults[ii]
       if (sub && !sub.error) {
         const subArr = Array.from(sub)
         for (let si = 0; si < subArr.length; si++) {
@@ -9349,9 +9360,14 @@ async function scanStagingForClient(clientName) {
     }
   }
 
+  // Was: one readDir per discovered drop folder, awaited one at a time in a
+  // loop -- the other half of the same sequential-round-trip problem above.
+  // Fired in parallel with Promise.all instead.
+  const fileLists = await Promise.all(folders.map(f => window.haus.fs.readDir(f.path)))
   intakeDrops = []
-  for (const f of folders) {
-    const files = await window.haus.fs.readDir(f.path)
+  for (let fi = 0; fi < folders.length; fi++) {
+    const f = folders[fi]
+    const files = fileLists[fi]
     const audioFiles = (files || []).filter ? files.filter(i => ['.wav','.mp3','.aiff','.aif'].includes(i.ext)).map(i => i.name) : []
     const parsed = parseFolderName(f.name)
     let guessedKey = parsed.key

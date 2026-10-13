@@ -1815,23 +1815,35 @@ app.post('/api/ebr/auto-export-lot', async (req, res) => {
 })
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
-app.post('/api/fs/read-dir', (req, res) => {
+app.post('/api/fs/read-dir', async (req, res) => {
   const dirPath = _safeRead(req.body.dirPath)
   if (!dirPath) return res.json({ error: 'Path not allowed' })
   try {
-    const items = fs.readdirSync(dirPath, { withFileTypes: true })
-    const result = items
-      .filter(item => !item.name.startsWith('.'))
-      .map(item => {
-        const fullPath = path.join(dirPath, item.name)
-        let size = 0
-        try { if (!item.isDirectory()) size = fs.statSync(fullPath).size } catch {}
-        return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
-      })
-      .sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        return a.name.localeCompare(b.name)
-      })
+    // Was fs.readdirSync/statSync -- synchronous calls block Node's entire
+    // event loop for every other request (all users, all routes) while they
+    // run. dirPath here is frequently a Dropbox CloudStorage folder, where a
+    // single directory listing is not guaranteed instant (placeholder/metadata
+    // resolution), and the Intake browser calls this route many times in a
+    // row per click (see scanStagingForClient in index.html) -- confirmed
+    // root cause of "clicking a show takes ~10 seconds" (2026-10-13). Switched
+    // to the async fs.promises API (same libuv threadpool, but non-blocking
+    // for the rest of the server, and lets concurrent requests actually
+    // overlap instead of queueing behind one blocking call). Return shape is
+    // unchanged -- every existing caller keeps working as-is.
+    const items = await fs.promises.readdir(dirPath, { withFileTypes: true })
+    const visible = items.filter(item => !item.name.startsWith('.'))
+    const result = await Promise.all(visible.map(async item => {
+      const fullPath = path.join(dirPath, item.name)
+      let size = 0
+      if (!item.isDirectory()) {
+        try { size = (await fs.promises.stat(fullPath)).size } catch {}
+      }
+      return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
+    }))
+    result.sort((a, b) => {
+      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+      return a.name.localeCompare(b.name)
+    })
     res.json(result)
   } catch (e) { res.json({ error: e.message }) }
 })
