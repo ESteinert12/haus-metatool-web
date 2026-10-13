@@ -73,6 +73,26 @@ try {
       connectionTimeoutMillis: 10000
     })
     sessionPool.on('error', err => console.warn('[session-pool] error:', err.message))
+    // connect-pg-simple makes ONE attempt per session lookup. When Neon has dropped a
+    // pooled connection ("Connection terminated unexpectedly" / ECONNRESET) that single
+    // attempt fails and the request dies with an HTML error page, even though a fresh
+    // connection would work. Retry once on those transient errors. Session queries are
+    // idempotent (SELECT, upsert, DELETE), so a repeat is safe.
+    {
+      const _sessQuery = sessionPool.query.bind(sessionPool)
+      sessionPool.query = async function (...args) {
+        if (typeof args[args.length - 1] === 'function') return _sessQuery(...args)  // callback style: leave alone
+        try {
+          return await _sessQuery(...args)
+        } catch (e) {
+          if (/Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE/i.test(e?.message || '')) {
+            console.warn('[session-pool] transient error, retrying once:', e.message)
+            return _sessQuery(...args)
+          }
+          throw e
+        }
+      }
+    }
     sessionStore = new PgSession({
       pool: sessionPool,
       tableName: 'user_sessions',

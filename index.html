@@ -2375,7 +2375,22 @@ async function pgQ(sql, params = [], retries = 2) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql, params })
       })
-      const data = await r.json()
+      const raw = await r.text()
+      let data
+      try { data = JSON.parse(raw) }
+      catch (_) {
+        // The server answered with an HTML error page (Express error handler, e.g. the
+        // session store losing its Postgres connection before the route runs) instead of
+        // JSON. Same transient family as ECONNRESET. Retry READS only: an error page can
+        // arrive after a write already went through, and re-sending an INSERT would
+        // duplicate rows.
+        if (i < retries && /^\s*select\b/i.test(sql)) {
+          await new Promise(resolve => setTimeout(resolve, 500))
+          continue
+        }
+        console.error('[pgQ] non-JSON response (HTTP ' + r.status + '):', raw.slice(0, 200))
+        return pgFail('the server returned an error page (HTTP ' + r.status + ') -- try again')
+      }
 
       if (!data.ok) {
         if (i < retries && (data.error?.includes('ECONNRESET') || data.error?.includes('terminated'))) {

@@ -124,6 +124,63 @@ Tick these off. 30 lots.
         create-stems inserted 154 rows, 0 ambiguous. verify-lot record=1:
         filesFullyVerified 154/154, 0 failures, 0 warnings.
         work_queue: 30 rows resolved, resolved_by='lot-upload-251028-SOHO4-12'.
+    [x] SOHO4_13  (ad hoc folder in 2. ATMOS_Shipping; DB lot "INTAKE LOT_251106_SOHO4_13 Mixed (EX)")
+        27 folders / 189 files -- PASS 2026-10-07. verify-lot record=1: recorded 189, 0 failures.
+        source_lot tag in mix_stems is 'SOHO4_13' (the ?lot= value), NOT the DB lot name.
+        Run by hand with base=.../2. ATMOS_Shipping (lot_pipeline.py cannot pass base=).
+        What happened (all checked against code/output, not assumed):
+        - Dry run blocked on S73r1124 Baddies: folder was "S73r1124 Baddies_Ebm"
+          (space, not underscore) so the SKU read as "S73r1124 Baddies". Renamed.
+        - Live upload-lot: 201 uploaded, 30 already there, 1 transient B2 connection
+          refused; re-run cleared it (232 files total). The first live attempts
+          also hit the session-store "Connection terminated unexpectedly" error
+          (see engineering_notes 2026-10-07); a server restart cleared it.
+        - verify-lot FAILED (161 missing from DB). Cause: for 28 songs Neon already
+          had mix_stems rows keyed to OLDER B2 folder names (e.g. ..._C_VOX,
+          ...-CLT, ..._SoHoEDM) where the objects were <1KB STUBS. upload-lot keys
+          by the local Dropbox folder name, so the real audio went to differently
+          named folders and the rows kept pointing at stubs.
+          Fix (Erik chose option A): repoint_stub_rows.js (dry run, then --live)
+          updated mix_stems.b2_key on 121 rows whose current key was a stub, only
+          where exactly one real B2 object of the same filename AND same size as
+          the local file existed. Compare-and-swap on the old key. Plan saved as
+          repoint-plan-*.json.
+        - Nested duplicate folder "R48a_SNAKE IN THE MIRROR" sat inside the R48a3954
+          Club Wreckage lot folder; upload-lot keys by filename so 8 Snake files
+          landed in the Club Wreckage B2 folder and create-stems attached 3 rows
+          (ids 628242-628244). cleanup_snake_dupe.js deleted those 3 rows and HID
+          (never deleted) the 8 B2 objects. Erik deletes the nested local folder.
+        - 5 songs had two REAL B2 folders (Neon already healthy at the older name,
+          lot-named copy a duplicate): R48a3934, R48a3944, R48a3954, R48a3994,
+          S73r1134. Erik moved them out of the SOHO4_13 folder (not deleted;
+          destination folder name not recorded here). Their lot-named duplicate objects still exist in B2 and
+          will show as ambiguous in future create-stems scans until hidden.
+        - 4 songs were genuinely new to Neon: R48a3974, R73a8904, R73a8954,
+          S80a2554 (rows created by create-stems).
+        UPDATE 2026-10-07 (later): the 20 stub FULL.mp3 rows are FIXED. Each song
+          already had a healthy FULL.wav in the lot's current folder; only the mp3
+          row pointed at an old stub folder. repoint_stub_mp3s.js (dry run, then
+          --live) moved 19 rows to sit beside the real wav (S73r1124's was already
+          there), then GET /api/b2/regen-mp3?apply=1 transcoded the wavs to 320k mp3
+          at those keys. Erik spot-listened: plays fine.
+        STILL OPEN from this lot:
+        - 4 stub rows with no local copy: S73r1124 BUMPERa/STINGa and S73r1144
+          ALT/ALTa.
+        - Old stub objects at the previous keys are still in B2 (orphans, harmless).
+        work_queue SQL: see engineering_notes 2026-10-07 entry.
+    [x] INTAKE LOT_251113_SOHO4_14_MIXED(EX)  (ad hoc folder in 2. ATMOS_Shipping)  3 folders / 19 files
+        PASS 2026-10-07, record=1 recorded 19. Songs: R48a4044 (Nocturnal),
+        R48a4094 (Stolen Secrets), S80a2564 (Pushing Your Way Through).
+        Erik's brief was "files in B2 but not linked to Neon", but the checks showed
+        otherwise: create-stems dry run (with base=...ATMOS_Shipping) had rowsToCreate 0,
+        alreadyRecorded 19, ambiguous 0; verify-lot (read-only) was already PASS with
+        19/19 fully verified and 19 dbSizeUnrecorded warnings (sizes not yet recorded).
+        So NO upload-lot, NO create-stems live and NO repoint were needed -- order used:
+        create-stems dry run first (read-only), then verify-lot, then verify-lot record=1.
+        (Uploading first would risk duplicate copies under local folder names, which is
+        what made SOHO4_13 ambiguous.) Use base= on every call for ATMOS_Shipping lots;
+        lot_pipeline.py has no base= support.
+        work_queue: preview count was 0 open rows for these 3 SKUs, so no UPDATE was needed.
     [x] INTAKE LOT_251113_SNAPPED_46   30 folders / 181 files / 2.04 GB
         PASS 2026-09-16. First upload pass: 180/181 uploaded, 1 file failed
         with a B2-side transient error ("incident id"). Re-ran upload-lot
