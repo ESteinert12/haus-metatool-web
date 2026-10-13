@@ -9312,62 +9312,13 @@ async function pickClient(name) {
   await scanStagingForClient(name)
 }
 
-async function scanStagingForClient(clientName) {
-  const staging = cfg.staging || cfg.intake
-  const isDropFolder = name => /^[A-Z]\d{2}[a-zA-Z]/i.test(name)
-
-  let rootPath
-  if (clientName === '__loose__') {
-    rootPath = staging
-  } else {
-    rootPath = staging + '/' + clientName
-  }
-
-  const items = await window.haus.fs.readDir(rootPath)
-  if (!items || items.error) {
-    intakeDrops = []
-    renderTrackList()
-    return
-  }
-
-  // Was: one readDir per non-drop subfolder, awaited one at a time in a loop.
-  // Each readDir is a round trip to the server (fs.readdir on what is often a
-  // Dropbox CloudStorage folder) -- sequential awaits here meant N subfolders
-  // cost N round-trips' worth of latency stacked up, instead of running
-  // concurrently. The lot-folder sub-reads are now fired together with
-  // Promise.all (confirmed root cause of "clicking a show takes ~10 seconds",
-  // 2026-10-13); results are still assembled in the original itemsArr order
-  // below so the on-screen list order is unchanged.
-  let folders = []
-  const itemsArr = Array.from(items)
-  const dirItems = itemsArr.filter(item => item.isDirectory)
-  const subResults = await Promise.all(dirItems.map(item =>
-    isDropFolder(item.name) ? null : window.haus.fs.readDir(item.path)
-  ))
-  for (let ii = 0; ii < dirItems.length; ii++) {
-    const item = dirItems[ii]
-    if (isDropFolder(item.name)) {
-      folders.push({ name: item.name, path: item.path, isDirectory: true, lotFolder: null })
-    } else {
-      const sub = subResults[ii]
-      if (sub && !sub.error) {
-        const subArr = Array.from(sub)
-        for (let si = 0; si < subArr.length; si++) {
-          const s = subArr[si]
-          if (s.isDirectory && isDropFolder(s.name)) folders.push({ name: s.name, path: s.path, isDirectory: true, lotFolder: item.name })
-        }
-      }
-    }
-  }
-
-  // Was: one readDir per discovered drop folder, awaited one at a time in a
-  // loop -- the other half of the same sequential-round-trip problem above.
-  // Fired in parallel with Promise.all instead.
-  const fileLists = await Promise.all(folders.map(f => window.haus.fs.readDir(f.path)))
-  intakeDrops = []
-  for (let fi = 0; fi < folders.length; fi++) {
-    const f = folders[fi]
-    const files = fileLists[fi]
+// Builds the display-ready intakeDrops list from a flat {name, path, lotFolder,
+// files} folder list -- shared by both the bulk-scan path and the per-folder
+// fallback path below, so the actual row-building logic exists exactly once.
+function _buildIntakeDropsFromFolders(folders) {
+  const out = []
+  for (const f of folders) {
+    const files = f.files
     const audioFiles = (files || []).filter ? files.filter(i => ['.wav','.mp3','.aiff','.aif'].includes(i.ext)).map(i => i.name) : []
     const parsed = parseFolderName(f.name)
     let guessedKey = parsed.key
@@ -9380,7 +9331,7 @@ async function scanStagingForClient(clientName) {
         }
       }
     }
-    intakeDrops.push({
+    out.push({
       name: f.name, path: f.path,
       lotFolder: f.lotFolder || null,
       files: audioFiles,
@@ -9391,6 +9342,78 @@ async function scanStagingForClient(clientName) {
       guessedBpm: parsed.bpm || ''
     })
   }
+  return out
+}
+
+// Pre-2026-10-13 fallback: one readDir per lot-folder + one readDir per drop
+// folder, all fired concurrently with Promise.all (still far better than the
+// original sequential-loop version, but still N+1 separate HTTP requests).
+// Used only when window.haus.fs.scanFolders isn't available -- i.e. the
+// Electron build, whose preload.js/main.js don't have the matching bulk IPC
+// handler yet.
+async function _scanStagingForClientPerFolder(rootPath, isDropFolder) {
+  const items = await window.haus.fs.readDir(rootPath)
+  if (!items || items.error) return []
+
+  let folders = []
+  const itemsArr = Array.from(items)
+  const dirItems = itemsArr.filter(item => item.isDirectory)
+  const subResults = await Promise.all(dirItems.map(item =>
+    isDropFolder(item.name) ? null : window.haus.fs.readDir(item.path)
+  ))
+  for (let ii = 0; ii < dirItems.length; ii++) {
+    const item = dirItems[ii]
+    if (isDropFolder(item.name)) {
+      folders.push({ name: item.name, path: item.path, lotFolder: null })
+    } else {
+      const sub = subResults[ii]
+      if (sub && !sub.error) {
+        const subArr = Array.from(sub)
+        for (let si = 0; si < subArr.length; si++) {
+          const s = subArr[si]
+          if (s.isDirectory && isDropFolder(s.name)) folders.push({ name: s.name, path: s.path, lotFolder: item.name })
+        }
+      }
+    }
+  }
+
+  const fileLists = await Promise.all(folders.map(f => window.haus.fs.readDir(f.path)))
+  return folders.map((f, fi) => ({ ...f, files: fileLists[fi] }))
+}
+
+async function scanStagingForClient(clientName) {
+  const staging = cfg.staging || cfg.intake
+  const isDropFolder = name => /^[A-Z]\d{2}[a-zA-Z]/i.test(name)
+
+  let rootPath
+  if (clientName === '__loose__') {
+    rootPath = staging
+  } else {
+    rootPath = staging + '/' + clientName
+  }
+
+  // One request for the whole client/show tree (lot folders, drop folders,
+  // and every drop folder's file list) instead of one request per folder.
+  // Confirmed root cause of "clicking a show takes ~10 seconds" even after
+  // parallelizing the per-folder calls: each of those calls still carries its
+  // own express-session lookup against a 3-connection DB pool, so 100+
+  // concurrent requests queue up on that pool regardless of how fast the
+  // underlying filesystem reads are (2026-10-13). Falls back to the older
+  // per-folder path when this bulk endpoint isn't available (Electron build).
+  let folders
+  if (typeof window.haus.fs.scanFolders === 'function') {
+    const scanned = await window.haus.fs.scanFolders(rootPath)
+    if (!scanned || scanned.error) {
+      intakeDrops = []
+      renderTrackList()
+      return
+    }
+    folders = scanned
+  } else {
+    folders = await _scanStagingForClientPerFolder(rootPath, isDropFolder)
+  }
+
+  intakeDrops = _buildIntakeDropsFromFolders(folders)
 
   renderIntakeBrowserTracks()
   updateIntakeBadge(intakeDrops.length)

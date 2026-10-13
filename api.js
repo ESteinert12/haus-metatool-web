@@ -1815,6 +1815,26 @@ app.post('/api/ebr/auto-export-lot', async (req, res) => {
 })
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
+// Shared by /api/fs/read-dir and /api/intake/scan-folders. Returns the same
+// shape read-dir has always returned: [{name, isDirectory, path, size, ext}].
+async function _readDirEntries(dirPath) {
+  const items = await fs.promises.readdir(dirPath, { withFileTypes: true })
+  const visible = items.filter(item => !item.name.startsWith('.'))
+  const result = await Promise.all(visible.map(async item => {
+    const fullPath = path.join(dirPath, item.name)
+    let size = 0
+    if (!item.isDirectory()) {
+      try { size = (await fs.promises.stat(fullPath)).size } catch {}
+    }
+    return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
+  }))
+  result.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+  return result
+}
+
 app.post('/api/fs/read-dir', async (req, res) => {
   const dirPath = _safeRead(req.body.dirPath)
   if (!dirPath) return res.json({ error: 'Path not allowed' })
@@ -1830,20 +1850,58 @@ app.post('/api/fs/read-dir', async (req, res) => {
     // for the rest of the server, and lets concurrent requests actually
     // overlap instead of queueing behind one blocking call). Return shape is
     // unchanged -- every existing caller keeps working as-is.
-    const items = await fs.promises.readdir(dirPath, { withFileTypes: true })
-    const visible = items.filter(item => !item.name.startsWith('.'))
-    const result = await Promise.all(visible.map(async item => {
-      const fullPath = path.join(dirPath, item.name)
-      let size = 0
-      if (!item.isDirectory()) {
-        try { size = (await fs.promises.stat(fullPath)).size } catch {}
+    res.json(await _readDirEntries(dirPath))
+  } catch (e) { res.json({ error: e.message }) }
+})
+
+// One request instead of 1 + (lot folders) + (drop folders) -- confirmed via
+// direct timing (2026-10-13) that the raw filesystem reads are fast (0.038s
+// to list a 148-entry show folder on the real Dropbox mount) but the Intake
+// browser was still firing one HTTP request per drop folder. Every one of
+// those requests carries express-session's own per-request lookup against
+// the Postgres session store, whose pool caps at 3 connections (see
+// sessionPool max:3 above) -- 148 concurrent requests all contending for 3
+// DB connections just to read the session is a real, confirmed queuing
+// bottleneck, separate from and in addition to the filesystem cost. This
+// route does the entire client-folder walk (lot folders -> drop folders ->
+// each drop folder's file list) in one request, so only ONE session lookup
+// and ONE HTTP round trip happens no matter how many folders a show has.
+// Mirrors scanStagingForClient's traversal exactly (same isDropFolder regex,
+// same lotFolder tagging, same result order) so the client-side rewrite can
+// swap this in without changing what gets displayed.
+const _isDropFolderName = name => /^[A-Z]\d{2}[a-zA-Z]/i.test(name)
+
+app.post('/api/intake/scan-folders', async (req, res) => {
+  const rootPath = _safeRead(req.body.rootPath)
+  if (!rootPath) return res.json({ error: 'Path not allowed' })
+  try {
+    const rootEntries = await _readDirEntries(rootPath)
+    const dirEntries = rootEntries.filter(e => e.isDirectory)
+
+    // One sub-listing per non-drop ("lot") folder, all fired together.
+    const subScans = await Promise.all(dirEntries.map(e =>
+      _isDropFolderName(e.name) ? null : _readDirEntries(e.path).catch(() => [])
+    ))
+
+    let folders = []
+    for (let i = 0; i < dirEntries.length; i++) {
+      const e = dirEntries[i]
+      if (_isDropFolderName(e.name)) {
+        folders.push({ name: e.name, path: e.path, lotFolder: null })
+      } else {
+        const sub = subScans[i] || []
+        for (const s of sub) {
+          if (s.isDirectory && _isDropFolderName(s.name)) {
+            folders.push({ name: s.name, path: s.path, lotFolder: e.name })
+          }
+        }
       }
-      return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
-    }))
-    result.sort((a, b) => {
-      if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-      return a.name.localeCompare(b.name)
-    })
+    }
+
+    // One file-listing per drop folder, all fired together.
+    const fileLists = await Promise.all(folders.map(f => _readDirEntries(f.path).catch(() => [])))
+    const result = folders.map((f, i) => ({ ...f, files: fileLists[i] }))
+
     res.json(result)
   } catch (e) { res.json({ error: e.message }) }
 })

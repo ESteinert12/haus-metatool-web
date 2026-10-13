@@ -26,6 +26,14 @@
     readFile:    (p)       => _post('/api/fs/read-file',    { filePath: p }),
     writeFile:   (p, c)    => _post('/api/fs/write-file',   { filePath: p, content: c }),
     folderStats: (p)       => _post('/api/fs/folder-stats', { dirPath: p }),
+    // One request for an entire client/show folder's lot-folders + drop-folders
+    // + each drop-folder's file list, instead of one readDir per folder. Added
+    // 2026-10-13 -- the Intake browser was making 100+ individual readDir round
+    // trips for a single show, each paying its own express-session lookup
+    // against a 3-connection DB pool. Only used in web mode (this file); the
+    // Electron preload.js path doesn't have the matching main-process IPC
+    // handler yet, so index.html feature-checks for this before using it.
+    scanFolders: (rootPath) => _post('/api/intake/scan-folders', { rootPath }),
   }
 
   // ── Shell ───────────────────────────────────────────────────────────────
