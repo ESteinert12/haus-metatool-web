@@ -8669,12 +8669,28 @@ async function openCueSheetDetail(id) {
 }
 
 function splitsMismatch(cue) {
-  // compare cue-sheet-reported parties against what's on file in team_writers
-  // -- name-level comparison (case-insensitive, trimmed); percent comparison
-  // only where the source format actually reported a percent (format A/C
-  // PRO cue sheets usually don't).
+  // compare cue-sheet-reported WRITER parties against what's on file in
+  // team_writers -- name-level comparison (case-insensitive, trimmed);
+  // percent comparison only where the source format actually reported a
+  // percent (format A/C PRO cue sheets usually don't).
+  // IMPORTANT: cue.parties includes BOTH writer rows (role 'C', per
+  // cue-sheet-import.js) and publisher/entity rows (role 'E' -- e.g. "HAUS
+  // Collection Music", "SDNYC Music", "SDBK Music"). team_writers only ever
+  // holds people, never publisher entities, so a publisher row can never
+  // match it -- comparing all parties indiscriminately made every cue with a
+  // publisher row on the sheet show a permanent false-positive "not on file"
+  // (fixed 2026-10-14, caught by Erik seeing exactly that). Filter to
+  // writer-role parties only before comparing.
   if (!cue.matched_sku_root) return null
-  const reported = (cue.parties || []).map(p => (p.name || '').trim().toLowerCase()).filter(Boolean)
+  // Exclude publisher/entity rows (role 'E') rather than allow-listing only
+  // 'C' -- Format A (raw PRO CSV) copies whatever string is in the file's own
+  // "Role" column verbatim, and some real PRO exports use other writer-side
+  // codes (e.g. 'A' for author/lyricist) that should still be compared, not
+  // silently dropped. 'E' is the one role every parser in cue-sheet-import.js
+  // consistently uses for publishers, so exclude that specifically.
+  const reported = (cue.parties || [])
+    .filter(p => (p.role || '').trim().toUpperCase() !== 'E')
+    .map(p => (p.name || '').trim().toLowerCase()).filter(Boolean)
   const onFile = (cue.catalogWriters || []).map(w => (w.writer_name || '').trim().toLowerCase())
   const reportedSet = new Set(reported)
   const onFileSet = new Set(onFile)
