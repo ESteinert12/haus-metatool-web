@@ -105,3 +105,17 @@ files rather than assuming:
   should reconcile with `deal_publishers`. Also: generic one-word titles ("LOGO", "STING", "BUMPER")
   will produce a lot of `ambiguous` matches at real bulk-import volume -- operational cost of staying
   exact-match-only, not a bug, but worth expecting before running a big batch.
+
+## Update: bulk-confirm for repeated titles within a statement
+Confirmed on real data that the same song commonly appears dozens-to-hundreds of times in one
+statement (one BMI file: 5,566 of 9,893 distinct title/show/episode combos repeat, each occurrence
+a separate per-platform line -- Hulu, Amazon Channels, Apple Channels, etc -- not a duplicate).
+Added `sameTitleUnresolvedCount` to `GET /api/royalties/:id/lines` and an `applyToAllInStatement`
+flag on `POST /api/royalties/lines/:id/confirm` so resolving a title once can optionally apply to
+every other still-unresolved line with that title in the same statement, without touching any line
+someone already confirmed/rejected separately. UI shows a "Confirm + N more" button when applicable.
+
+Also regenerated `royalty-report-by-song.csv` with a corrected normTitle (hyphens/underscores now
+convert to spaces before stripping punctuation, matching the production parser) -- this merged a
+few titles that had been incorrectly split (e.g. "American Pickers-Cues" and "American Pickers
+Cues" were two separate rows before, now one at $61,380.05). 6,775 -> 6,770 distinct titles.
