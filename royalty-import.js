@@ -315,9 +315,24 @@ function parseRoyaltyStatementFile(filePath) {
   return { format, ...parsed };
 }
 
+// Same posture as cue-sheet-import.js's matchCueToTitles(): exact
+// normalized-title match only, never fuzzy. Multiple candidates -> ambiguous,
+// human picks; zero -> unmatched, human can search/override. A wrong
+// automatic match here means money attributed to the wrong song.
+function matchLineToTitles(line, titlesIndex) {
+  const norm = line.titleNormalized
+  if (norm) {
+    const exact = titlesIndex.filter(t => t.normTitle === norm)
+    if (exact.length === 1) return { status: 'matched', candidates: exact, confidence: 'exact' }
+    if (exact.length > 1) return { status: 'ambiguous', candidates: exact, confidence: 'exact-multiple' }
+  }
+  return { status: 'unmatched', candidates: [] }
+}
+
 module.exports = {
   sniffFormat,
   parseRoyaltyStatementFile,
+  matchLineToTitles,
   normTitle,
   titleToCamelKey,
 };
