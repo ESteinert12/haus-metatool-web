@@ -7962,25 +7962,72 @@ app.get('/api/royalties/:id/lines', async (req, res) => {
        ORDER BY l.amount DESC, l.id`,
       [req.params.id]
     )
-    res.json({ ok: true, lines: linesRes.rows })
+    // Same song in the same statement commonly repeats across many lines
+    // (confirmed on real BMI data -- one title split across many per-
+    // platform rows). Count OTHER still-unresolved lines sharing each line's
+    // title so the UI can offer "apply this match to all N of them" instead
+    // of requiring one confirm click per occurrence.
+    const unresolvedCountByTitle = {}
+    for (const l of linesRes.rows) {
+      if (l.match_status === 'unmatched' || l.match_status === 'ambiguous') {
+        unresolvedCountByTitle[l.title_normalized] = (unresolvedCountByTitle[l.title_normalized] || 0) + 1
+      }
+    }
+    const lines = linesRes.rows.map(l => ({
+      ...l,
+      sameTitleUnresolvedCount: Math.max(0, (unresolvedCountByTitle[l.title_normalized] || 0) - (l.match_status === 'unmatched' || l.match_status === 'ambiguous' ? 1 : 0)),
+    }))
+    res.json({ ok: true, lines })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
 // Confirm (or manually override) a line's match -- same semantics as
 // cue-sheets/cues/:id/confirm: pass null/empty sku_root for explicit
 // reviewed-and-no-match. Never auto-write a confirmed status.
+// Optional body.applyToAllInStatement: true also applies the SAME match to
+// every OTHER line in the same statement that shares this line's
+// title_normalized and is still unmatched/ambiguous (never touches a line
+// someone already confirmed or rejected -- that was a separate human
+// decision, not overwritten by a bulk action on a different line). This
+// exists because the same song routinely appears dozens-to-hundreds of
+// times in one statement (confirmed on real BMI data: one title repeated
+// across many separate per-platform lines -- Hulu, Amazon Channels, Apple
+// Channels, etc, each its own row) -- without this, resolving one title
+// meant re-confirming it by hand once per occurrence.
 app.post('/api/royalties/lines/:id/confirm', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const { sku_root } = req.body
+    const { sku_root, applyToAllInStatement } = req.body
     const status = sku_root ? 'confirmed' : 'rejected'
+    const confirmedBy = req.session?.user?.username || null
+
+    const lineRes = await pgPool.query(
+      `SELECT statement_id, title_normalized FROM royalty_statement_lines WHERE id = $1`,
+      [req.params.id]
+    )
+    if (!lineRes.rows.length) return res.json({ ok: false, error: 'Line not found' })
+    const { statement_id, title_normalized } = lineRes.rows[0]
+
     await pgPool.query(
       `UPDATE royalty_statement_lines
        SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
        WHERE id = $4`,
-      [sku_root || null, status, req.session?.user?.username || null, req.params.id]
+      [sku_root || null, status, confirmedBy, req.params.id]
     )
-    res.json({ ok: true })
+
+    let appliedToCount = 0
+    if (applyToAllInStatement && title_normalized) {
+      const applyRes = await pgPool.query(
+        `UPDATE royalty_statement_lines
+         SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
+         WHERE statement_id = $4 AND title_normalized = $5 AND id != $6
+           AND match_status IN ('unmatched', 'ambiguous')`,
+        [sku_root || null, status, confirmedBy, statement_id, title_normalized, req.params.id]
+      )
+      appliedToCount = applyRes.rowCount
+    }
+
+    res.json({ ok: true, appliedToCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 

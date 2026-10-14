@@ -8899,7 +8899,9 @@ function renderRoyaltyLines(lines) {
         </td>
         <td style="padding:8px;font-size:11px;font-weight:600;color:${statusColor}">${line.match_status}</td>
         <td style="padding:8px">
-          <button class="btn" style="font-size:11px;padding:4px 8px" onclick="confirmRoyaltyMatch(${line.id}, ${line.matched_sku_root ? `'${line.matched_sku_root}'` : 'null'})" ${!line.matched_sku_root ? 'disabled' : ''}>Confirm</button>
+          <button class="btn" style="font-size:11px;padding:4px 8px" onclick="confirmRoyaltyMatch(${line.id}, ${line.matched_sku_root ? `'${line.matched_sku_root}'` : 'null'}, false)" ${!line.matched_sku_root ? 'disabled' : ''}>Confirm</button>
+          ${line.sameTitleUnresolvedCount > 0 ? `
+          <button class="btn" style="font-size:11px;padding:4px 8px;margin-top:3px" onclick="confirmRoyaltyMatch(${line.id}, ${line.matched_sku_root ? `'${line.matched_sku_root}'` : 'null'}, true)" ${!line.matched_sku_root ? 'disabled' : ''} title="This title appears ${line.sameTitleUnresolvedCount} more time${line.sameTitleUnresolvedCount === 1 ? '' : 's'} in this statement, still unresolved -- apply this same match to all of them too.">Confirm + ${line.sameTitleUnresolvedCount} more</button>` : ''}
         </td>
       </tr>`
   }).join('')
@@ -8934,12 +8936,22 @@ function royaltyTitleSearch(input, lineId) {
   }, 250)
 }
 
-async function confirmRoyaltyMatch(lineId, skuRoot) {
-  await fetch(`/api/royalties/lines/${lineId}/confirm`, {
-    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sku_root: skuRoot })
+async function confirmRoyaltyMatch(lineId, skuRoot, applyToAllInStatement) {
+  const r = await fetch(`/api/royalties/lines/${lineId}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sku_root: skuRoot, applyToAllInStatement: !!applyToAllInStatement })
   }).then(r => r.json())
   await loadRoyaltiesSection()
   openRoyaltyDetail(currentRoyaltyStatementId)
+  if (applyToAllInStatement && r.ok && r.appliedToCount) {
+    // Lightweight confirmation -- openRoyaltyDetail already re-renders the
+    // table with updated statuses, this just surfaces the count.
+    const detail = document.getElementById('royalty-detail')
+    const banner = document.createElement('div')
+    banner.style.cssText = 'background:#E7F0EA;border:1px solid #2e7d32;border-radius:6px;padding:8px 10px;font-size:12px;color:#2e7d32;margin-bottom:10px'
+    banner.textContent = `Applied this match to ${r.appliedToCount} other line${r.appliedToCount === 1 ? '' : 's'} with the same title.`
+    detail.prepend(banner)
+  }
 }
 
 // ── Missing Registrations tab (added 2026-09-29) ────────────────────────────
