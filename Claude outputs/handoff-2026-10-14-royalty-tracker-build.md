@@ -78,3 +78,30 @@ Per Kyle's direction this session ("make reasonable assumptions, flag for Erik")
 2. Decide the open questions above rather than inheriting the assumptions silently.
 3. Decide on access/permissions for a feature that shows real payment amounts.
 4. Then: bulk import, then any aggregate reconciliation/reporting view on top (expected vs. received).
+
+## Update: foreseeable data-quality risks reviewed and addressed (same session)
+After the initial build, went through likely failure modes and verified several against the real
+files rather than assuming:
+
+- **Confirmed non-issues**: BMI's header is byte-identical across both quarters on file. SOCAN's
+  `PAYMENT DUE` = `ORIGINAL AMT x CONTRACT RATE` exactly (checked 2,000 rows, zero mismatches) --
+  `CONVERSION RATE` is disclosed metadata only, not something to multiply in ourselves. No
+  parenthetical-negative or minus-sign amounts found anywhere sampled.
+- **Fixed**: `sniffFormat` now validates the full header (exact field names, exact positions) for
+  every format instead of 2-3 anchor columns -- a PRO changing their export next quarter now falls
+  back to `UNKNOWN` instead of silently misreading the wrong column into the wrong field. Re-verified
+  all 16 real files still parse identically after tightening this.
+- **Fixed**: dedup is now keyed on `(source, format, period)` parsed from file content, not just
+  `source_filename` -- ASCAP's own export tool names files with opaque batch IDs that carry no
+  period at all, so a re-download of the same quarter would otherwise get a new filename and
+  silently double-count that quarter.
+- **Fixed**: BMI's bonus/adjustment columns are now captured as a separate `bonus_amount` column,
+  deliberately NOT folded into `amount` -- every real BMI row on file has these at 0.00, so whether
+  they're additive or already-included has never been observable. Needs verification (BMI docs or
+  Erik) before ever treating this as real money.
+- **Fixed**: all 5 parsers now skip blank-title rows (stray subtotal/footer lines).
+- **Still open, not fixable without more information**: whether multiple HAUS entities (e.g. SDNYC
+  MUSIC #1158285 vs HAUS COLLECTION MUSIK #4395147) ever report overlapping data, and how that
+  should reconcile with `deal_publishers`. Also: generic one-word titles ("LOGO", "STING", "BUMPER")
+  will produce a lot of `ambiguous` matches at real bulk-import volume -- operational cost of staying
+  exact-match-only, not a bug, but worth expecting before running a big batch.
