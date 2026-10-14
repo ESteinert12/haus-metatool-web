@@ -79,6 +79,54 @@ function stripQuotes(s) {
 // 'UNKNOWN'. Never guessed from the filename alone (BMI/SESAC filenames do
 // encode useful metadata -- participant #, period -- but classification
 // itself goes by header content, same discipline as cue sheets).
+// Full expected header shapes, by exact field name AND position, for every
+// confirmed real format. sniffFormat() validates the WHOLE header against
+// these -- not just a couple of anchor columns -- because every parser below
+// reads fields by fixed position (f[19], f[29], etc). If a PRO ever changes
+// their export (adds/reorders/renames a column), checking only 2-3 anchor
+// fields would still happily classify the file and then silently read the
+// WRONG column for every other field -- wrong money, no error raised. Full-
+// header validation turns that into an UNKNOWN (surfaced, nothing imported)
+// instead of a silent misread. If a real file ever legitimately changes
+// shape, this needs a new format tag (e.g. BMI_V2), never a loosened check.
+const EXPECTED_HEADERS = {
+  BMI: ['PERIOD', 'W OR P', 'PARTICIPANT NAME', 'PARTICIPANT #', 'IP #', 'TITLE NAME', 'TITLE #',
+        'PERF SOURCE', 'COUNTRY OF PERFORMANCE', 'SHOW NAME', 'EPISODE NAME', 'SHOW #', 'USE CODE',
+        'TIMING', 'PARTICIPANT %', 'PERF COUNT', 'BONUS LEVEL', 'ROYALTY AMOUNT', 'WITHHOLD',
+        'PERF PERIOD', 'CURRENT ACTIVITY AMT', 'HITS SONG OR TV NET SUPER USAGE BONUS',
+        'STANDARDS OR TV NET THEME BONUS', 'FOREIGN SOCIETY ADJUSTMENT', 'COMPANY CODE',
+        'COMPANY NAME', 'PERF DATE'],
+  ASCAP_DOM: ['DISTRIBUTIONYEAR', 'DISTRIBUTION QUARTER', 'STATEMENT RECIPIENT ID',
+        'STATEMENT RECIPIENT NAME', 'PARTY ID', 'PARTY NAME', 'LEGAL EARNER PARTY ID',
+        'LEGAL EARNER PARTY NAME', 'PERFORMANCE SOURCE/BROADCAST MEDIUM', 'MUSIC USER GENRE',
+        'MUSIC USER', 'NETWORK SERVICE', 'PERFORMANCE START DATE', 'PERFORMANCE END DATE',
+        'SURVEY TYPE', 'DAY PART CODE', 'SERIES OR FILM/ATTRACTION', 'PROGRAM NAME', 'WORK ID',
+        'WORK TITLE', 'CA%', 'CLASSIFICATION CODE', 'NUMBER OF PLAYS', 'PERFORMANCE TYPE (USAGE)',
+        'DURATION', 'PERFORMING ARTIST', 'COMPOSER NAME', 'EE SHARE', 'CREDITS', 'DOLLARS',
+        'PREMIUM CREDITS', 'PREMIUM DOLLARS', 'ADJUSTMENT INDICATOR', 'ADJUSTMENT REASON CODE',
+        'ORIGINAL DISTRIBUTION DATE', 'ROLE TYPE', 'TYPE OF RIGHT', 'TERRITORY', 'LICENSOR',
+        'PROGRAM CODE', 'PERFORMANCE QUARTER'],
+  ASCAP_FOR: ['FILE TYPE', 'STATEMENT RECIPIENT NAME', 'STATEMENT RECIPIENT ID', 'PARTY NAME',
+        'PARTY ID', 'LEGAL EARNER PARTY ID', 'LEGAL EARNER PARTY NAME', 'DISTRIBUTION DATE',
+        'COUNTRY NAME', 'LICENSOR', 'LICENSOR CODE', 'PERFORMANCE START DATE',
+        'PERFORMANCE END DATE', 'WORK TITLE', 'WORK ID', 'MEMBER SHARE', 'SERIES NAME',
+        'PROGRAM NAME', 'REVENUE CLASS CODE', 'REVENUE CLASS DESCRIPTION', '$ AMOUNT',
+        'ADJUSTMENT DISTRIBUTION DATE', 'ADJUSTMENT INDICATOR', 'ROLE TYPE', 'TYPE OF RIGHT',
+        'TERRITORY'],
+  SOCAN: ['RIGHTS OWNER', 'PERFORMER OR SERIES (FILM)', 'PRODUCT OR EPISODE TITLE', 'WORK TITLE',
+        'AUTHOR / COMPOSER', 'SHARE COLLECTED', 'PMT SOCIETY', 'PMT SOCIETY PERIOD',
+        'EARNINGS PERIOD', 'PERF-COUNT', 'USAGE', 'DURATION', 'PMT SOURCE', 'TERRITORY',
+        'ORIGINAL AMT', 'CONTRACT RATE', 'PAYMENT DUE', 'CONVERSION RATE'],
+}
+
+function headerMatches(headerFields, expected) {
+  if (headerFields.length < expected.length) return false
+  for (let i = 0; i < expected.length; i++) {
+    if (headerFields[i] !== expected[i]) return false
+  }
+  return true
+}
+
 function sniffFormat(filePath) {
   const fullText = fs.readFileSync(filePath, 'utf8');
   const lines = fullText.split(/\r?\n/);
@@ -86,34 +134,29 @@ function sniffFormat(filePath) {
 
   // SESAC: starts with a few "Key: Value" metadata lines, including a
   // distinctive literal "SESAC QUARTERLY Royalty Statement" line, before the
-  // real CSV header further down.
-  if (/^SESAC QUARTERLY Royalty Statement/i.test(firstLine)) return 'SESAC';
+  // real CSV header further down -- validate THAT header row fully too, not
+  // just the literal metadata line, same reasoning as the other formats.
+  if (/^SESAC QUARTERLY Royalty Statement/i.test(firstLine)) {
+    const headerLine = lines.find(l => l.startsWith('Year,Qtr,Song #,Song Title'))
+    if (!headerLine) return 'UNKNOWN'
+    const sesacHeaderFields = splitCsvLine(headerLine).map(f => stripQuotes(f).trim().toUpperCase())
+    return headerMatches(sesacHeaderFields, SESAC_HEADER) ? 'SESAC' : 'UNKNOWN'
+  }
 
-  // BMI: flat CSV, header starts with PERIOD,W OR P,PARTICIPANT NAME,...
   const headerFields = splitCsvLine(firstLine).map(f => stripQuotes(f).trim().toUpperCase());
-  if (headerFields[0] === 'PERIOD' && headerFields[1] === 'W OR P' && headerFields.includes('ROYALTY AMOUNT')) {
-    return 'BMI';
-  }
-
-  // ASCAP domestic: header starts DistributionYear,Distribution Quarter,...
-  if (headerFields[0] === 'DISTRIBUTIONYEAR' && headerFields[1] === 'DISTRIBUTION QUARTER') {
-    return 'ASCAP_DOM';
-  }
-
-  // ASCAP foreign: header starts File Type,Statement Recipient Name,... and
-  // carries a Licensor column (the reciprocal foreign PRO -- APRA/PRS/GEMA/etc)
-  if (headerFields[0] === 'FILE TYPE' && headerFields.includes('LICENSOR') && headerFields.includes('$ AMOUNT')) {
-    return 'ASCAP_FOR';
-  }
-
-  // SOCAN: direct Canadian PRO statement, header starts RIGHTS OWNER,
-  // PERFORMER OR SERIES (FILM),PRODUCT OR EPISODE TITLE,WORK TITLE,...
-  if (headerFields[0] === 'RIGHTS OWNER' && headerFields.includes('WORK TITLE') && headerFields.includes('PAYMENT DUE')) {
-    return 'SOCAN';
-  }
+  if (headerMatches(headerFields, EXPECTED_HEADERS.BMI)) return 'BMI';
+  if (headerMatches(headerFields, EXPECTED_HEADERS.ASCAP_DOM)) return 'ASCAP_DOM';
+  if (headerMatches(headerFields, EXPECTED_HEADERS.ASCAP_FOR)) return 'ASCAP_FOR';
+  if (headerMatches(headerFields, EXPECTED_HEADERS.SOCAN)) return 'SOCAN';
 
   return 'UNKNOWN';
 }
+
+const SESAC_HEADER = ['YEAR', 'QTR', 'SONG #', 'SONG TITLE', '%SHARES', 'PRODUCTION TITLE',
+  'EPISODE TITLE', 'EPISODE NUMBER', 'PERF/AIR DATE', 'NETWORK', 'ESTABLISHMENT/SOURCE',
+  'ALBUM TITLE', 'ARTIST', 'PAYMENT TYPE', 'CHART', 'POSITION', 'PAY #', 'SYND', 'STRIP',
+  'END AIR DT', 'MEDIUM', 'COVERAGE', 'PAY CODE', 'DAY PART', 'PERF CATEGORY', 'PERF TYPE',
+  'PERF DURATION', 'PERFORMANCE', 'OCCUR', 'SOCIETY ABBRV', 'SOCIETY COUNTRY', 'EARNINGS']
 
 // ── Parsers: each returns { meta, lines } where lines is an array of
 // { titleRaw, titleNormalized, payeeName, payeeRole, amount, usageType,
@@ -130,6 +173,7 @@ function parseBMI(filePath) {
     const f = splitCsvLine(rows[i]).map(stripQuotes);
     if (f.length < 18) continue;
     period = period || f[0];
+    if (!f[5] || !f[5].trim()) continue; // stray subtotal/footer rows
     const amount = num(f[17]);
     lines.push({
       titleRaw: f[5],
@@ -149,6 +193,14 @@ function parseBMI(filePath) {
       // (streaming/digital), which is normal, not a parse failure.
       showName: f[9] || null,
       episodeName: f[10] || null,
+      // Captured separately, NOT folded into `amount` -- every real BMI row
+      // seen so far (both quarters on file) has these at 0.00, so whether
+      // they're additive-on-top-of ROYALTY AMOUNT or already included in it
+      // has never actually been observable yet. Guessing wrong here means
+      // wrong money the moment a bonus-tier song shows up. Verify with BMI's
+      // own statement documentation or Erik before ever adding this into the
+      // reconciled total.
+      bonusAmount: num(f[21]) + num(f[22]) + num(f[23]),
     });
     statementTotal += amount;
   }
@@ -173,6 +225,7 @@ function parseSESAC(filePath) {
     if (!rows[i]) continue;
     const f = splitCsvLine(rows[i]).map(stripQuotes);
     if (f.length < 32) continue;
+    if (!f[3] || !f[3].trim()) continue; // stray subtotal/footer rows with enough commas to pass the length check
     const amount = num(f[31]);
     lines.push({
       titleRaw: f[3],
@@ -218,6 +271,7 @@ function parseASCAP_DOM(filePath) {
     if (f.length < 32) continue;
     year = year || f[0];
     quarter = quarter || f[1];
+    if (!f[19] || !f[19].trim()) continue; // stray subtotal/footer rows
     const amount = num(f[29]) + num(f[31]); // Dollars + Premium Dollars
     lines.push({
       titleRaw: f[19],
@@ -256,6 +310,7 @@ function parseASCAP_FOR(filePath) {
     const f = splitCsvLine(rows[i]).map(stripQuotes);
     if (f.length < 21) continue;
     distDate = distDate || f[7];
+    if (!f[13] || !f[13].trim()) continue; // stray subtotal/footer rows
     const amount = num(f[20]);
     lines.push({
       titleRaw: f[13],
@@ -296,6 +351,7 @@ function parseSOCAN(filePath) {
     // PAYMENT DUE is the net amount actually owed (ORIGINAL AMT x CONTRACT
     // RATE, already converted) -- ORIGINAL AMT is gross/pre-rate and would
     // overstate what HAUS is actually due.
+    if (!f[3] || !f[3].trim()) continue; // stray subtotal/footer rows
     const amount = num(f[16]);
     lines.push({
       titleRaw: f[3], // WORK TITLE -- distinct from f[2] PRODUCT OR EPISODE TITLE
