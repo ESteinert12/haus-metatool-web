@@ -8945,6 +8945,7 @@ function renderCueSheetCues(cues, episode, siblingSheets) {
         </td>
         <td style="padding:8px;font-size:12px">
           ${cue.matched_title ? esc(cue.matched_title) + `<div style="font-size:10px;color:var(--text3)">${esc(cue.matched_sku_root)}</div>` : '<span style="color:var(--text3)">—</span>'}
+          ${(cue.match_confidence || '').startsWith('filename') ? `<div style="font-size:10px;color:#6a5acd" title="No separate title field in this cue sheet -- matched by decoding the HAUS shipped-filename convention instead of title text.">matched via filename, not title text</div>` : ''}
           <div style="margin-top:4px"><input placeholder="search to override…" style="font-size:11px;width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:4px;padding:3px 6px" oninput="cueSheetTitleSearch(this, ${cue.id})"></div>
           <div id="cue-search-results-${cue.id}"></div>
         </td>

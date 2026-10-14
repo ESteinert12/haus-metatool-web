@@ -42,6 +42,53 @@ function normTitle(raw) {
   return s;
 }
 
+// Forward-transform a catalog title into the same camelCase, no-separator
+// form buildHausName() (index.html) uses to build a shipped filename's title
+// segment -- e.g. "Deadly Delight" -> "DeadlyDelight". Kept byte-for-byte in
+// sync with that function's own transform so a filename-derived title
+// segment can be compared against this as an EXACT match, never a guessed
+// reversal (ported 2026-10-14, see parseHausFilenameTitle below).
+function titleToCamelKey(title) {
+  if (!title) return '';
+  return String(title)
+    .replace(/[^a-zA-Z0-9 _]/g, '')
+    .split(/[\s_]+/)
+    .filter(Boolean)
+    .map(w => w.charAt(0).toUpperCase() + w.slice(1))
+    .join('');
+}
+
+// Composer-id and musical-key shapes buildHausName()/detectVersion() use in a
+// shipped filename -- copied here (not re-derived) so this stays an exact
+// structural match, not a guess. See index.html's own COMP_RE/KEY_RE2.
+const HAUS_FILENAME_COMPOSER_RE = /^[A-Z]\d{2,3}[a-z]$/i;
+const HAUS_FILENAME_KEY_RE = /^[A-Ga-g](?:sharp|flat|##?|bb?)?m?$/i;
+
+// A HAUS-shipped filename is always HAUS[JUP]_<TitleCamel>_<Key>_<ComposerId>_
+// <Version>.<ext> (buildHausName(), index.html). Several cue sheet formats
+// (D, D2, D3, B2, H, I -- see their own parsers above) have no separate title
+// field at all and use this filename AS titleRaw, so normTitle() alone never
+// recovers a real title from it ("HAUS_DeadlyDelight_Dm_R13a1591_FULL" does
+// not normalize anywhere near "Deadly Delight"). This pulls just the
+// TitleCamel segment back out -- structurally, by requiring an exact 5-part
+// shape with a recognizable key and composer-id segment either side of it --
+// so it can be compared against titleToCamelKey(realTitle) as an exact match.
+// Returns null (no guess) if the string doesn't match that exact shape.
+// NOT YET VERIFIED against the real cue sheet file corpus -- Kyle to confirm
+// via a real import before this is trusted in production.
+function parseHausFilenameTitle(raw) {
+  if (!raw) return null;
+  const noExt = String(raw).replace(/\.[^.]+$/, '');
+  const parts = noExt.split('_');
+  if (parts.length !== 5) return null;
+  const [prefix, titleCamel, key, composerId, /* version, unused */] = parts;
+  if (!/^(HAUS|AETNHAUS)(JUP)?$/i.test(prefix)) return null;
+  if (!HAUS_FILENAME_KEY_RE.test(key)) return null;
+  if (!HAUS_FILENAME_COMPOSER_RE.test(composerId)) return null;
+  if (!titleCamel) return null;
+  return titleCamel;
+}
+
 // token-overlap score for fuzzy fallback matching, 0..1
 function tokenOverlapScore(a, b) {
   const ta = new Set(a.split(' ').filter(Boolean));
@@ -693,6 +740,9 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 
   for (const cue of cues) {
     cue.titleNormalized = normTitle(cue.titleRaw);
+    // null when titleRaw isn't a recognizable HAUS-convention filename --
+    // see parseHausFilenameTitle's own comment.
+    cue.filenameCamelKey = parseHausFilenameTitle(cue.titleRaw);
     if (format === 'C') {
       cue.isHaus = true;
       cue.classifyReason = 'pre-filtered source (already HAUS-only)';
@@ -719,17 +769,29 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 // through the manual search-to-confirm picker in the UI instead of a guess.
 function matchCueToTitles(cue, titlesIndex) {
   const norm = cue.titleNormalized;
-  if (!norm) return { status: 'unmatched', candidates: [] };
+  if (norm) {
+    const exact = titlesIndex.filter(t => t.normTitle === norm);
+    if (exact.length === 1) return { status: 'matched', candidates: exact, confidence: 'exact' };
+    if (exact.length > 1) return { status: 'ambiguous', candidates: exact, confidence: 'exact-multiple' };
+  }
 
-  const exact = titlesIndex.filter(t => t.normTitle === norm);
-  if (exact.length === 1) return { status: 'matched', candidates: exact, confidence: 'exact' };
-  if (exact.length > 1) return { status: 'ambiguous', candidates: exact, confidence: 'exact-multiple' };
+  // Fallback for cues whose only title text IS a HAUS-shipped filename
+  // (formats D/D2/D3/B2/H/I -- see parseHausFilenameTitle above). Still an
+  // exact match -- against a second, precomputed key (titlesIndex[].camelKey,
+  // set wherever titlesIndex is built in api.js) -- never a fuzzy guess.
+  if (cue.filenameCamelKey) {
+    const camelExact = titlesIndex.filter(t => t.camelKey === cue.filenameCamelKey);
+    if (camelExact.length === 1) return { status: 'matched', candidates: camelExact, confidence: 'filename-exact' };
+    if (camelExact.length > 1) return { status: 'ambiguous', candidates: camelExact, confidence: 'filename-exact-multiple' };
+  }
 
   return { status: 'unmatched', candidates: [] };
 }
 
 module.exports = {
   normTitle,
+  titleToCamelKey,
+  parseHausFilenameTitle,
   tokenOverlapScore,
   sniffFormat,
   parseCueSheetFile,
