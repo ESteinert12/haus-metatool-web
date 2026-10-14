@@ -417,6 +417,7 @@ webview{flex:1;border:none}
   <div class="nav-item" data-section="composers"><i class="ti ti-microphone-2"></i> The Team</div>
   <div class="nav-item" data-section="ebr"><i class="ti ti-file-spreadsheet"></i> EBR</div>
   <div class="nav-item" data-section="cuesheets"><i class="ti ti-music-check"></i> Cue Sheets</div>
+  <div class="nav-item" data-section="royalties"><i class="ti ti-cash"></i> Royalties</div>
   <div class="nav-item" data-section="files"><i class="ti ti-folder"></i> Files</div>
 
   <div class="nav-section">Production</div>
@@ -1146,6 +1147,23 @@ webview{flex:1;border:none}
       <div style="width:280px;flex-shrink:0;border-right:0.5px solid var(--border);overflow-y:auto;background:#C0C9CD" id="cuesheet-list"></div>
       <div style="flex:1;overflow-y:auto;padding:20px 24px" id="cuesheet-detail">
         <div style="color:var(--text3);font-size:13px">Import a cue sheet, or pick one from the list, to review matches.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROYALTIES (added 2026-10, separate track from EBR and cue sheets) -->
+  <div class="section" id="section-royalties" style="height:100%;overflow:hidden;padding:0">
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:#C0C9CD">
+      <span style="font-size:15px;font-weight:600;color:#1a2226">Royalties</span>
+      <span style="font-size:11px;color:#4b5a5e">Import PRO royalty statements (BMI/SESAC/ASCAP/SOCAN), match against the catalog.</span>
+      <div style="flex:1"></div>
+      <input type="file" id="royalty-file-input" accept=".csv" style="display:none" onchange="royaltyUpload(this.files[0])">
+      <button class="btn btn-primary" onclick="document.getElementById('royalty-file-input').click()"><i class="ti ti-upload"></i> Import Statement</button>
+    </div>
+    <div style="display:flex;flex:1;overflow:hidden;min-height:0">
+      <div style="width:300px;flex-shrink:0;border-right:0.5px solid var(--border);overflow-y:auto;background:#C0C9CD" id="royalty-list"></div>
+      <div style="flex:1;overflow-y:auto;padding:20px 24px" id="royalty-detail">
+        <div style="color:var(--text3);font-size:13px">Import a royalty statement, or pick one from the list, to review matches.</div>
       </div>
     </div>
   </div>
@@ -3789,7 +3807,7 @@ const SECTION_TITLES = {
   catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', qa:'Needs Eyeballs', lotmig:'Lot Migration',
   projects:'Projects', files:'Files',
   assignments:'Assignments',
-  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', settings:'Settings'
+  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', royalties:'Royalties', settings:'Settings'
 }
 let currentSection = 'today'
 
@@ -3826,6 +3844,7 @@ function onSectionEnter(id) {
   if (id === 'composers') showTeamHome()
   if (id === 'ebr')       loadEbrSection()
   if (id === 'cuesheets') loadCueSheetsSection()
+  if (id === 'royalties') loadRoyaltiesSection()
   if (id === 'files')     loadFiles()
   if (id === 'lots')      loadLotsSection()
   if (id === 'projects')  loadProjects()
@@ -8786,6 +8805,134 @@ async function confirmCueMatch(cueId, skuRoot) {
   await openCueSheetDetail(currentCueSheetId)
   await loadCueSheetsSection()
   openCueSheetDetail(currentCueSheetId)
+}
+
+// ── Royalties tab (added 2026-10, separate track from EBR/cue sheets) ──────
+let royaltyStatementsCache = []
+let currentRoyaltyStatementId = null
+
+async function loadRoyaltiesSection() {
+  const r = await fetch('/api/royalties').then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) {
+    document.getElementById('royalty-list').innerHTML = `<div style="padding:14px;color:var(--text3);font-size:12px">${r.error || 'Could not load royalty statements'}</div>`
+    return
+  }
+  royaltyStatementsCache = r.statements
+  renderRoyaltyList()
+}
+
+function renderRoyaltyList() {
+  const el = document.getElementById('royalty-list')
+  if (!royaltyStatementsCache.length) {
+    el.innerHTML = `<div style="padding:14px;color:#4b5a5e;font-size:12px">No royalty statements imported yet.</div>`
+    return
+  }
+  el.innerHTML = royaltyStatementsCache.map(rs => {
+    const active = rs.id === currentRoyaltyStatementId
+    const warn = parseInt(rs.unmatched_count) + parseInt(rs.ambiguous_count)
+    return `
+      <div onclick="openRoyaltyDetail(${rs.id})"
+        style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);${active ? 'background:#E7F0EA' : ''}">
+        <div style="font-size:12px;font-weight:600;color:#1a2226">${esc(rs.source)} ${esc(rs.period || '')}</div>
+        <div style="font-size:10px;color:#4b5a5e;margin-top:2px">${esc(rs.source_filename)} · fmt ${rs.format}</div>
+        <div style="font-size:10px;color:#4b5a5e;margin-top:4px">
+          ${rs.line_count} lines · $${parseFloat(rs.lines_total).toFixed(2)} · ${rs.confirmed_count} confirmed
+          ${warn > 0 ? `<span style="color:#c0392b"> · ${warn} need review</span>` : ''}
+        </div>
+      </div>`
+  }).join('')
+}
+
+async function royaltyUpload(file) {
+  if (!file) return
+  const fd = new FormData()
+  fd.append('file', file)
+  const btn = document.querySelector('#section-royalties .btn-primary')
+  if (btn) { btn.disabled = true; btn.textContent = 'Importing…' }
+  try {
+    const r = await fetch('/api/royalties/import', { method: 'POST', body: fd }).then(r => r.json())
+    if (!r.ok) { alert(r.error || 'Import failed'); return }
+    await loadRoyaltiesSection()
+    openRoyaltyDetail(r.statementId)
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Statement' }
+    document.getElementById('royalty-file-input').value = ''
+  }
+}
+
+async function openRoyaltyDetail(id) {
+  currentRoyaltyStatementId = id
+  renderRoyaltyList()
+  const detail = document.getElementById('royalty-detail')
+  detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Loading…</div>`
+  const r = await fetch(`/api/royalties/${id}/lines`).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { detail.innerHTML = `<div style="color:#c0392b;font-size:12px">${r.error || 'Failed to load lines'}</div>`; return }
+  renderRoyaltyLines(r.lines)
+}
+
+function renderRoyaltyLines(lines) {
+  const detail = document.getElementById('royalty-detail')
+  if (!lines.length) { detail.innerHTML = `<div style="color:var(--text3);font-size:12px">No lines in this statement.</div>`; return }
+
+  const rows = lines.map(line => {
+    const statusColor = {
+      confirmed: '#2e7d32', matched: '#2e7d32',
+      ambiguous: '#c0392b', unmatched: '#c0392b', rejected: '#777',
+    }[line.match_status] || '#777'
+    return `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-size:12px">${esc(line.title_raw)}</td>
+        <td style="padding:8px;font-size:11px">${esc(line.payee_name || '')}${line.payee_role ? ` <span style="color:var(--text3)">(${esc(line.payee_role)})</span>` : ''}</td>
+        <td style="padding:8px;font-size:12px;text-align:right">$${parseFloat(line.amount).toFixed(2)}</td>
+        <td style="padding:8px;font-size:11px">${esc(line.usage_type || '')}</td>
+        <td style="padding:8px;font-size:12px">
+          ${line.matched_title ? esc(line.matched_title) + `<div style="font-size:10px;color:var(--text3)">${esc(line.matched_sku_root)}</div>` : '<span style="color:var(--text3)">—</span>'}
+          <div style="margin-top:4px"><input placeholder="search to override…" style="font-size:11px;width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:4px;padding:3px 6px" oninput="royaltyTitleSearch(this, ${line.id})"></div>
+          <div id="royalty-search-results-${line.id}"></div>
+        </td>
+        <td style="padding:8px;font-size:11px;font-weight:600;color:${statusColor}">${line.match_status}</td>
+        <td style="padding:8px">
+          <button class="btn" style="font-size:11px;padding:4px 8px" onclick="confirmRoyaltyMatch(${line.id}, ${line.matched_sku_root ? `'${line.matched_sku_root}'` : 'null'})" ${!line.matched_sku_root ? 'disabled' : ''}>Confirm</button>
+        </td>
+      </tr>`
+  }).join('')
+
+  const total = lines.reduce((s, l) => s + parseFloat(l.amount), 0)
+  detail.innerHTML = `
+    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">${lines.length} lines · $${total.toFixed(2)} total</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
+          <th style="padding:8px">Statement title</th><th style="padding:8px">Payee</th><th style="padding:8px;text-align:right">Amount</th>
+          <th style="padding:8px">Usage</th><th style="padding:8px">Matched catalog title</th>
+          <th style="padding:8px">Status</th><th style="padding:8px"></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`
+}
+
+let royaltySearchDebounce = null
+function royaltyTitleSearch(input, lineId) {
+  clearTimeout(royaltySearchDebounce)
+  const q = input.value.trim()
+  const resultsEl = document.getElementById(`royalty-search-results-${lineId}`)
+  if (q.length < 2) { resultsEl.innerHTML = ''; return }
+  royaltySearchDebounce = setTimeout(async () => {
+    const r = await fetch(`/api/royalties/title-search?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => ({ ok: false }))
+    if (!r.ok || !r.titles.length) { resultsEl.innerHTML = `<div style="font-size:10px;color:var(--text3)">no matches</div>`; return }
+    resultsEl.innerHTML = r.titles.map(t =>
+      `<div onclick="confirmRoyaltyMatch(${lineId}, '${t.sku_root}')" style="font-size:11px;padding:3px 4px;cursor:pointer;border-radius:3px" onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background=''">${esc(t.title)} <span style="color:var(--text3)">(${t.sku_root})</span></div>`
+    ).join('')
+  }, 250)
+}
+
+async function confirmRoyaltyMatch(lineId, skuRoot) {
+  await fetch(`/api/royalties/lines/${lineId}/confirm`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sku_root: skuRoot })
+  }).then(r => r.json())
+  await loadRoyaltiesSection()
+  openRoyaltyDetail(currentRoyaltyStatementId)
 }
 
 // ── Missing Registrations tab (added 2026-09-29) ────────────────────────────

@@ -32,6 +32,7 @@ const { Pool }   = require('pg')
 const multer     = require('multer')
 const IntakeIntegration = require('./intake-integration.js')
 const { parseCueSheetFile, matchCueToTitles, normTitle, titleToCamelKey } = require('./cue-sheet-import.js')
+const { parseRoyaltyStatementFile, matchLineToTitles } = require('./royalty-import.js')
 
 const compression = require('compression')
 
@@ -977,6 +978,51 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cue_parties_cue ON cue_sheet_cue_parties(cue_id)`)
     console.log('✅ cue sheet verification tables ready')
   } catch (e) { console.warn('[schema] cue sheet tables:', e.message) }
+
+  // ─── Royalty tracker/importer (added 2026-10) ───────────────────────────
+  // Ingests actual PAYMENT data -- PRO royalty statements (BMI/SESAC/ASCAP/
+  // SOCAN, domestic and foreign/reciprocal) -- and reconciles dollars
+  // received against titles/writers on file. Distinct from EBR export (sends
+  // registration data OUT) and cue sheet verification (reconciles aired vs
+  // catalog, no money). Own try/catch, same reasoning as cue sheets above.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS royalty_statements (
+        id              SERIAL PRIMARY KEY,
+        source          TEXT NOT NULL,        -- 'BMI' | 'SESAC' | 'ASCAP' | 'SOCAN'
+        format          TEXT NOT NULL,        -- sniffFormat tag: BMI | SESAC | ASCAP_DOM | ASCAP_FOR | SOCAN
+        period          TEXT,                 -- e.g. '2024Q3' -- payment/distribution period, not earnings period
+        source_filename TEXT NOT NULL,
+        statement_total NUMERIC(14,2),        -- the statement's own reported total, for a sanity check
+        imported_by     TEXT,
+        imported_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS royalty_statement_lines (
+        id                SERIAL PRIMARY KEY,
+        statement_id      INTEGER NOT NULL REFERENCES royalty_statements(id) ON DELETE CASCADE,
+        title_raw         TEXT NOT NULL,
+        title_normalized  TEXT,
+        payee_name        TEXT,               -- writer or publisher name AS REPORTED on the statement
+        payee_role        TEXT,               -- 'writer' | 'publisher' | NULL (only BMI reports this reliably --
+                                               -- see royalty-import.js's parseBMI comment. NEVER compare a mixed
+                                               -- bag of writer+publisher rows against team_writers -- the exact
+                                               -- bug splitsMismatch() had on cue sheets, worse here since it's money)
+        amount            NUMERIC(14,2) NOT NULL,
+        usage_type        TEXT,
+        country            TEXT,
+        work_id           TEXT,
+        match_status      TEXT NOT NULL DEFAULT 'unmatched',
+        matched_sku_root  VARCHAR REFERENCES titles(sku_root) ON DELETE SET NULL,
+        confirmed_by      TEXT,
+        confirmed_at      TIMESTAMPTZ
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_royalty_lines_statement ON royalty_statement_lines(statement_id)`)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_royalty_lines_sku ON royalty_statement_lines(matched_sku_root)`)
+    console.log('✅ royalty tracker tables ready')
+  } catch (e) { console.warn('[schema] royalty tracker tables:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -7736,6 +7782,179 @@ app.post('/api/cue-sheets/cues/:id/confirm', async (req, res) => {
 
 // Search titles for the manual-override picker (same style as other search-to-link UI in this app)
 app.get('/api/cue-sheets/title-search', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const q = `%${(req.query.q || '').trim()}%`
+    const r = await pgPool.query(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q])
+    res.json({ ok: true, titles: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ─── Royalty tracker/importer (added 2026-10) ──────────────────────────────
+// Imports a PRO royalty statement (BMI/SESAC/ASCAP/SOCAN), matches each line
+// against the titles catalog, and stores it for review/confirmation -- same
+// shape as importOneCueSheet, manual-confirm only (this one involves real
+// money, so there is an even stronger case than cue sheets to never
+// silently write a confirmed match without a human in the loop).
+async function importOneRoyaltyStatement(filePath, origName, titlesIndex, importedBy) {
+  const parsed = parseRoyaltyStatementFile(filePath)
+
+  if (parsed.format === 'UNKNOWN') {
+    return { ok: false, origName, error: `Unrecognized royalty statement format for "${origName}" -- not imported. Known formats: BMI, SESAC (domestic/international), ASCAP (domestic/foreign), SOCAN.` }
+  }
+
+  const dup = await pgPool.query(
+    `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 LIMIT 1`,
+    [origName]
+  )
+  if (dup.rows.length) {
+    return {
+      ok: false, origName,
+      error: `"${origName}" was already imported (statement #${dup.rows[0].id}, imported ${dup.rows[0].imported_at}). Delete it first to re-import.`,
+      duplicateOfStatementId: dup.rows[0].id,
+    }
+  }
+
+  const statementRow = await pgPool.query(
+    `INSERT INTO royalty_statements (source, format, period, source_filename, statement_total, imported_by)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+    [parsed.meta.source, parsed.format, parsed.meta.period || null, origName, parsed.meta.statementTotal || 0, importedBy || null]
+  )
+  const statementId = statementRow.rows[0].id
+
+  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+
+  for (const line of parsed.lines) {
+    const m = matchLineToTitles(line, titlesIndex)
+    if (m.status === 'matched') matchedCount++
+    else if (m.status === 'ambiguous') ambiguousCount++
+    else unmatchedCount++
+
+    const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
+
+    await pgPool.query(
+      `INSERT INTO royalty_statement_lines
+         (statement_id, title_raw, title_normalized, payee_name, payee_role, amount,
+          usage_type, country, work_id, match_status, matched_sku_root)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+      [statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
+       line.usageType || null, line.country || null, line.workId || null, m.status, matchedSku]
+    )
+  }
+
+  return {
+    ok: true,
+    origName,
+    statementId,
+    format: parsed.format,
+    totalLines: parsed.lines.length,
+    matched: matchedCount,
+    ambiguous: ambiguousCount,
+    unmatched: unmatchedCount,
+    statementTotal: parsed.meta.statementTotal,
+  }
+}
+
+app.post('/api/royalties/import', upload.single('file'), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.file) return res.json({ ok: false, error: 'No file provided' })
+  try {
+    const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+    const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
+    const origName = req.file.originalname || req.file.path
+    const result = await importOneRoyaltyStatement(req.file.path, origName, titlesIndex, req.session?.user?.username)
+    fs.unlinkSync(req.file.path)
+    res.json(result)
+  } catch (e) {
+    console.error('[royalties/import]', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+// Bulk import -- same per-file-error-tolerant pattern as cue-sheets/import-bulk.
+app.post('/api/royalties/import-bulk', upload.array('files', 200), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.files || !req.files.length) return res.json({ ok: false, error: 'No files provided' })
+
+  const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+  const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
+  const importedBy = req.session?.user?.username
+
+  const results = []
+  for (const file of req.files) {
+    const origName = file.originalname || file.path
+    try {
+      results.push(await importOneRoyaltyStatement(file.path, origName, titlesIndex, importedBy))
+    } catch (e) {
+      console.error('[royalties/import-bulk]', origName, e.message)
+      results.push({ ok: false, origName, error: e.message })
+    } finally {
+      try { fs.unlinkSync(file.path) } catch {}
+    }
+  }
+
+  res.json({
+    ok: true,
+    total: results.length,
+    imported: results.filter(r => r.ok).length,
+    failed: results.filter(r => !r.ok).length,
+    results,
+  })
+})
+
+app.get('/api/royalties', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const r = await pgPool.query(`
+      SELECT rs.*,
+        COUNT(l.id) AS line_count,
+        COUNT(l.id) FILTER (WHERE l.match_status = 'confirmed') AS confirmed_count,
+        COUNT(l.id) FILTER (WHERE l.match_status = 'unmatched') AS unmatched_count,
+        COUNT(l.id) FILTER (WHERE l.match_status = 'ambiguous') AS ambiguous_count,
+        COALESCE(SUM(l.amount), 0) AS lines_total
+      FROM royalty_statements rs
+      LEFT JOIN royalty_statement_lines l ON l.statement_id = rs.id
+      GROUP BY rs.id
+      ORDER BY rs.imported_at DESC
+    `)
+    res.json({ ok: true, statements: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.get('/api/royalties/:id/lines', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const linesRes = await pgPool.query(
+      `SELECT l.*, t.title AS matched_title
+       FROM royalty_statement_lines l
+       LEFT JOIN titles t ON t.sku_root = l.matched_sku_root
+       WHERE l.statement_id = $1
+       ORDER BY l.amount DESC, l.id`,
+      [req.params.id]
+    )
+    res.json({ ok: true, lines: linesRes.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Confirm (or manually override) a line's match -- same semantics as
+// cue-sheets/cues/:id/confirm: pass null/empty sku_root for explicit
+// reviewed-and-no-match. Never auto-write a confirmed status.
+app.post('/api/royalties/lines/:id/confirm', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const { sku_root } = req.body
+    const status = sku_root ? 'confirmed' : 'rejected'
+    await pgPool.query(
+      `UPDATE royalty_statement_lines
+       SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
+       WHERE id = $4`,
+      [sku_root || null, status, req.session?.user?.username || null, req.params.id]
+    )
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.get('/api/royalties/title-search', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const q = `%${(req.query.q || '').trim()}%`
