@@ -1,0 +1,12 @@
+{
+  "watch": [
+    "api.js",
+    "services_B2Service.js",
+    "intake-integration.js",
+    "ebr-lot-export.js",
+    "generate-ebr-export.js",
+    "ebr-shared.js"
+  ],
+  "ext": "js",
+  "delay": "500"
+}

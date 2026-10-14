@@ -1467,6 +1467,7 @@ webview{flex:1;border:none}
   </div>
 </div>
 
+<script src="ebr-shared.js"></script>
 <script>
 // ─── XSS PROTECTION ────────────────────────────────────────
 // Helper function to safely set HTML content
@@ -2393,7 +2394,22 @@ async function pgQ(sql, params = [], retries = 2) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sql, params })
       })
-      const data = await r.json()
+      const raw = await r.text()
+      let data
+      try { data = JSON.parse(raw) }
+      catch (_) {
+        // The server answered with an HTML error page (Express error handler, e.g. the
+        // session store losing its Postgres connection before the route runs) instead of
+        // JSON. Same transient family as ECONNRESET. Retry READS only: an error page can
+        // arrive after a write already went through, and re-sending an INSERT would
+        // duplicate rows.
+        if (i < retries && /^\s*select\b/i.test(sql)) {
+          await new Promise(resolve => setTimeout(resolve, 500))
+          continue
+        }
+        console.error('[pgQ] non-JSON response (HTTP ' + r.status + '):', raw.slice(0, 200))
+        return pgFail('the server returned an error page (HTTP ' + r.status + ') -- try again')
+      }
 
       if (!data.ok) {
         if (i < retries && (data.error?.includes('ECONNRESET') || data.error?.includes('terminated'))) {
@@ -8305,241 +8321,8 @@ const JUP_PUBLISHERS = {
   'BMI':   { name: 'Undercover Cues', pro: 'BMI',   ipi: '815954318'  },
   'SESAC': { name: 'Beat Street Cues',pro: 'SESAC', ipi: '01265083848'},
 }
-const HAUS_PUBLISHERS = {
-  'ASCAP': { name: 'HAUS Collection Musik', pro: 'ASCAP', ipi: '770983501' },
-  'BMI':   { name: 'SDNYC Music',           pro: 'BMI',   ipi: '554507939' },
-  'SESAC': { name: 'SDBK Music',            pro: 'SESAC', ipi: '555590134' },
-}
-
-// ─── EBR (MusicMark Electronic Batch Registration) export ─────────────────
-// Header order is copied verbatim from HAUS's last accepted MusicMark
-// submission (EB263700H03_707.xlsx) — MusicMark's importer matches column
-// names exactly, so do not reorder/rename these.
-const EBR_HEADERS = [
-  "Work Title",
-  "Submitter Work ID",
-  "ISWC",
-  "ISRC",
-  "Work Title Duration (HHMMSS)",
-  "Alt Title 1",
-  "Alt Title 2",
-  "Alt Title 3",
-  "Alt Title 4",
-  "Alt Title 5",
-  "Alt Title 6",
-  "Alt Title 7",
-  "Alt Title 8",
-  "Alt Title 9",
-  "Alt Title 10",
-  "Artist LN 1",
-  "Artist FN 1",
-  "Artist LN 2",
-  "Artist FN 2",
-  "Artist LN 3",
-  "Artist FN 3",
-  "Artist LN 4",
-  "Artist FN 4",
-  "Artist LN 5",
-  "Artist FN 5",
-  "Artist LN 6",
-  "Artist FN 6",
-  "Artist LN 7",
-  "Artist FN 7",
-  "Artist LN 8",
-  "Artist FN 8",
-  "Artist LN 9",
-  "Artist FN 9",
-  "Artist LN 10",
-  "Artist FN 10",
-  "Intended Purpose",
-  "Production Title",
-  "Library",
-  "CD Identifier",
-  "Work Title CD Cut#",
-  "Arrangement of PD Work (Y/N)",
-  "Original PD Title",
-  "Original PD Writer LN 1",
-  "Original PD Writer FN 1",
-  "Original PD Writer LN 2",
-  "Original PD Writer FN 2",
-  "Writer LN 1",
-  "Writer FN 1",
-  "Writer Role Code 1",
-  "Writer PR Affiliation 1",
-  "Writer Share 1",
-  "Writer Internal ID 1",
-  "Writer IPI Name# 1",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 1",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 1",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 1",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 1",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 1",
-  "Writer LN 2",
-  "Writer FN 2",
-  "Writer Role Code 2",
-  "Writer PR Affiliation 2",
-  "Writer Share 2",
-  "Writer Internal ID 2",
-  "Writer IPI Name# 2",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 2",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 2",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 2",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 2",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 2",
-  "Writer LN 3",
-  "Writer FN 3",
-  "Writer Role Code 3",
-  "Writer PR Affiliation 3",
-  "Writer Share 3",
-  "Writer Internal ID 3",
-  "Writer IPI Name# 3",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 3",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 3",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 3",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 3",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 3",
-  "Writer LN 4",
-  "Writer FN 4",
-  "Writer Role Code 4",
-  "Writer PR Affiliation 4",
-  "Writer Share 4",
-  "Writer Internal ID 4",
-  "Writer IPI Name# 4",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 4",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 4",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 4",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 4",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 4",
-  "Writer LN 5",
-  "Writer FN 5",
-  "Writer Role Code 5",
-  "Writer PR Affiliation 5",
-  "Writer Share 5",
-  "Writer Internal ID 5",
-  "Writer IPI Name# 5",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 5",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 5",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 5",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 5",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 5",
-  "Writer LN 6",
-  "Writer FN 6",
-  "Writer Role Code 6",
-  "Writer PR Affiliation 6",
-  "Writer Share 6",
-  "Writer Internal ID 6",
-  "Writer IPI Name# 6",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 6",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 6",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 6",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 6",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 6",
-  "Writer LN 7",
-  "Writer FN 7",
-  "Writer Role Code 7",
-  "Writer PR Affiliation 7",
-  "Writer Share 7",
-  "Writer Internal ID 7",
-  "Writer IPI Name# 7",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 7",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 7",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 7",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 7",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 7",
-  "Writer LN 8",
-  "Writer FN 8",
-  "Writer Role Code 8",
-  "Writer PR Affiliation 8",
-  "Writer Share 8",
-  "Writer Internal ID 8",
-  "Writer IPI Name# 8",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 8",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 8",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 8",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 8",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 8",
-  "Writer LN 9",
-  "Writer FN 9",
-  "Writer Role Code 9",
-  "Writer PR Affiliation 9",
-  "Writer Share 9",
-  "Writer Internal ID 9",
-  "Writer IPI Name# 9",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 9",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 9",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 9",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 9",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 9",
-  "Writer LN 10",
-  "Writer FN 10",
-  "Writer Role Code 10",
-  "Writer PR Affiliation 10",
-  "Writer Share 10",
-  "Writer Internal ID 10",
-  "Writer IPI Name# 10",
-  "1st Controlled Pub IPI Name# or Internal ID for Writer 10",
-  "2nd Controlled Pub IPI Name# or Internal ID for Writer 10",
-  "3rd Controlled Pub IPI Name# or Internal ID for Writer 10",
-  "4th Controlled Pub IPI Name# or Internal ID for Writer 10",
-  "5th Controlled Pub IPI Name# or Internal ID for Writer 10",
-  "Original Pub Name 1",
-  "Original Pub PR Affiliation 1",
-  "Original Pub World Own Share 1",
-  "Original Pub IPI Name# 1",
-  "Original Pub Controlled (Y/N) 1",
-  "Original Pub Name 2",
-  "Original Pub PR Affiliation 2",
-  "Original Pub World Own Share 2",
-  "Original Pub Internal ID 2",
-  "Original Pub IPI Name# 2",
-  "Original Pub Controlled (Y/N) 2",
-  "Original Pub Name 3",
-  "Original Pub PR Affiliation 3",
-  "Original Pub World Own Share 3",
-  "Original Pub Internal ID 3",
-  "Original Pub IPI Name# 3",
-  "Original Pub Controlled (Y/N) 3",
-  "Original Pub Name 4",
-  "Original Pub PR Affiliation 4",
-  "Original Pub World Own Share 4",
-  "Original Pub Internal ID 4",
-  "Original Pub IPI Name# 4",
-  "Original Pub Controlled (Y/N) 4",
-  "1st AM/Sub Pub Name 1",
-  "3rd AM/Sub Pub Name 1",
-  "3rd AM/Sub Pub Role Code 1",
-  "3rd AM/Sub Pub PR Affiliation 1",
-  "3rd AM/Sub Pub Territory Code 1",
-  "3rd AM/Sub Pub Collect Share 1",
-  "3rd AM/Sub Pub Internal ID 1",
-  "3rd AM/Sub Pub IPI Name# 1",
-  "4th AM/Sub Pub Name 1",
-  "4th AM/Sub Pub Role Code 1",
-  "4th AM/Sub Pub PR Affiliation 1",
-  "4th AM/Sub Pub Territory Code 1",
-  "4th AM/Sub Pub Collect Share 1",
-  "4th AM/Sub Pub Internal ID 1",
-  "4th AM/Sub Pub IPI Name# 1",
-  "5th AM/Sub Pub Name 1",
-  "5th AM/Sub Pub Role Code 1",
-  "5th AM/Sub Pub PR Affiliation 1",
-  "5th AM/Sub Pub Territory Code 1",
-  "5th AM/Sub Pub Collect Share 1",
-  "5th AM/Sub Pub Internal ID 1",
-  "5th AM/Sub Pub IPI Name# 1",
-  "6th AM/Sub Pub Name 1",
-  "6th AM/Sub Pub Role Code 1",
-  "6th AM/Sub Pub PR Affiliation 1",
-  "6th AM/Sub Pub Territory Code 1",
-  "6th AM/Sub Pub Collect Share 1",
-  "6th AM/Sub Pub Internal ID 1",
-  "6th AM/Sub Pub IPI Name# 1"
-]
-const EBR_COL_INDEX = Object.fromEntries(EBR_HEADERS.map((h, i) => [h, i]))
-// Only 4 Original Pub slots exist in this template even though there are 10
-// Writer slots — a work with 5+ controlled writers can't fully round-trip
-// through this file. Flagged in the UI rather than silently dropped.
-const EBR_MAX_ORIGINAL_PUBS = 4
+// HAUS_PUBLISHERS / EBR_HEADERS / EBR_COL_INDEX / EBR_MAX_ORIGINAL_PUBS /
+// ebrSplitName / ebrPublisherFor now come from ebr-shared.js (see that file).
 
 let ebrState = { lotsLoaded: false, titles: [], writersByTeam: {}, stemsBySku: {} }
 
@@ -8564,18 +8347,6 @@ function ebrSwitchTab(tab) {
 function ebrSetTabDot(tab, show) {
   const dot = document.getElementById(`ebr-tab-${tab}-dot`)
   if (dot) dot.style.display = show ? '' : 'none'
-}
-
-function ebrSplitName(fullName) {
-  const parts = (fullName || '').trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return { first: '', last: '' }
-  if (parts.length === 1) return { first: parts[0], last: '' }
-  return { first: parts.slice(0, -1).join(' '), last: parts[parts.length - 1] }
-}
-
-function ebrPublisherFor(pro) {
-  const key = pro === 'BMI' ? 'BMI' : (pro === 'SESAC' ? 'SESAC' : 'ASCAP')
-  return HAUS_PUBLISHERS[key] || HAUS_PUBLISHERS['ASCAP']
 }
 
 async function ebrLoadLots() {
@@ -9588,7 +9359,16 @@ function deCamelCase(str) {
 
 function normalizeKey(k) {
   if (!k) return ''
-  k = k.replace(/maj$/i, '').trim()
+  k = k.trim()
+  // KEY_RE (above) deliberately accepts "min"/"minor"/"maj"/"major" as typed
+  // suffixes -- composers spell it every which way -- but nothing collapsed
+  // them to the single form the HAUS key list (and the Intake validator)
+  // actually recognizes. "Dmin"/"Dminor" sailed through unchanged, so every
+  // D-minor/B-minor drop guessed a key that was never valid HAUS output --
+  // visible in the Rename Preview, and shipped straight into the filename
+  // and DB for any track where the composer/key gate wasn't yet in place.
+  k = k.replace(/(minor|min)$/i, 'm')
+  k = k.replace(/(major|maj)$/i, '')
   // Normalize sharps: # → sharp (AVID can't interpret # symbol)
   k = k.replace(/#/, 'sharp')
   // Normalize text "flat" → b (b is a letter, AVID handles it fine)
@@ -9729,46 +9509,13 @@ async function pickClient(name) {
   await scanStagingForClient(name)
 }
 
-async function scanStagingForClient(clientName) {
-  const staging = cfg.staging || cfg.intake
-  const isDropFolder = name => /^[A-Z]\d{2}[a-zA-Z]/i.test(name)
-
-  let rootPath
-  if (clientName === '__loose__') {
-    rootPath = staging
-  } else {
-    rootPath = staging + '/' + clientName
-  }
-
-  const items = await window.haus.fs.readDir(rootPath)
-  if (!items || items.error) {
-    intakeDrops = []
-    renderTrackList()
-    return
-  }
-
-  let folders = []
-  const itemsArr = Array.from(items)
-  for (let ii = 0; ii < itemsArr.length; ii++) {
-    const item = itemsArr[ii]
-    if (!item.isDirectory) continue
-    if (isDropFolder(item.name)) {
-      folders.push({ name: item.name, path: item.path, isDirectory: true, lotFolder: null })
-    } else {
-      const sub = await window.haus.fs.readDir(item.path)
-      if (sub && !sub.error) {
-        const subArr = Array.from(sub)
-        for (let si = 0; si < subArr.length; si++) {
-          const s = subArr[si]
-          if (s.isDirectory && isDropFolder(s.name)) folders.push({ name: s.name, path: s.path, isDirectory: true, lotFolder: item.name })
-        }
-      }
-    }
-  }
-
-  intakeDrops = []
+// Builds the display-ready intakeDrops list from a flat {name, path, lotFolder,
+// files} folder list -- shared by both the bulk-scan path and the per-folder
+// fallback path below, so the actual row-building logic exists exactly once.
+function _buildIntakeDropsFromFolders(folders) {
+  const out = []
   for (const f of folders) {
-    const files = await window.haus.fs.readDir(f.path)
+    const files = f.files
     const audioFiles = (files || []).filter ? files.filter(i => ['.wav','.mp3','.aiff','.aif'].includes(i.ext)).map(i => i.name) : []
     const parsed = parseFolderName(f.name)
     let guessedKey = parsed.key
@@ -9781,7 +9528,7 @@ async function scanStagingForClient(clientName) {
         }
       }
     }
-    intakeDrops.push({
+    out.push({
       name: f.name, path: f.path,
       lotFolder: f.lotFolder || null,
       files: audioFiles,
@@ -9792,6 +9539,78 @@ async function scanStagingForClient(clientName) {
       guessedBpm: parsed.bpm || ''
     })
   }
+  return out
+}
+
+// Pre-2026-10-13 fallback: one readDir per lot-folder + one readDir per drop
+// folder, all fired concurrently with Promise.all (still far better than the
+// original sequential-loop version, but still N+1 separate HTTP requests).
+// Used only when window.haus.fs.scanFolders isn't available -- i.e. the
+// Electron build, whose preload.js/main.js don't have the matching bulk IPC
+// handler yet.
+async function _scanStagingForClientPerFolder(rootPath, isDropFolder) {
+  const items = await window.haus.fs.readDir(rootPath)
+  if (!items || items.error) return []
+
+  let folders = []
+  const itemsArr = Array.from(items)
+  const dirItems = itemsArr.filter(item => item.isDirectory)
+  const subResults = await Promise.all(dirItems.map(item =>
+    isDropFolder(item.name) ? null : window.haus.fs.readDir(item.path)
+  ))
+  for (let ii = 0; ii < dirItems.length; ii++) {
+    const item = dirItems[ii]
+    if (isDropFolder(item.name)) {
+      folders.push({ name: item.name, path: item.path, lotFolder: null })
+    } else {
+      const sub = subResults[ii]
+      if (sub && !sub.error) {
+        const subArr = Array.from(sub)
+        for (let si = 0; si < subArr.length; si++) {
+          const s = subArr[si]
+          if (s.isDirectory && isDropFolder(s.name)) folders.push({ name: s.name, path: s.path, lotFolder: item.name })
+        }
+      }
+    }
+  }
+
+  const fileLists = await Promise.all(folders.map(f => window.haus.fs.readDir(f.path)))
+  return folders.map((f, fi) => ({ ...f, files: fileLists[fi] }))
+}
+
+async function scanStagingForClient(clientName) {
+  const staging = cfg.staging || cfg.intake
+  const isDropFolder = name => /^[A-Z]\d{2}[a-zA-Z]/i.test(name)
+
+  let rootPath
+  if (clientName === '__loose__') {
+    rootPath = staging
+  } else {
+    rootPath = staging + '/' + clientName
+  }
+
+  // One request for the whole client/show tree (lot folders, drop folders,
+  // and every drop folder's file list) instead of one request per folder.
+  // Confirmed root cause of "clicking a show takes ~10 seconds" even after
+  // parallelizing the per-folder calls: each of those calls still carries its
+  // own express-session lookup against a 3-connection DB pool, so 100+
+  // concurrent requests queue up on that pool regardless of how fast the
+  // underlying filesystem reads are (2026-10-13). Falls back to the older
+  // per-folder path when this bulk endpoint isn't available (Electron build).
+  let folders
+  if (typeof window.haus.fs.scanFolders === 'function') {
+    const scanned = await window.haus.fs.scanFolders(rootPath)
+    if (!scanned || scanned.error) {
+      intakeDrops = []
+      renderTrackList()
+      return
+    }
+    folders = scanned
+  } else {
+    folders = await _scanStagingForClientPerFolder(rootPath, isDropFolder)
+  }
+
+  intakeDrops = _buildIntakeDropsFromFolders(folders)
 
   renderIntakeBrowserTracks()
   updateIntakeBadge(intakeDrops.length)
@@ -14065,9 +13884,48 @@ async function collectIntakeInfo() {
   const visibleIndices = intakeBatchMode
     ? intakeDrops.map((d,i) => d.guessedID === (intakeDrops[intakeIndex]?.guessedID || '') ? i : -1).filter(i => i >= 0)
     : [intakeIndex]
-  const missingKeys = visibleIndices.filter(i => !document.getElementById(`key-${i}`)?.value.trim())
-  if (missingKeys.length) {
-    missingKeys.forEach(i => { const el = document.getElementById(`key-${i}`); if (el) { el.style.border = '1.5px solid var(--red,#e53)'; el.placeholder = 'required' } })
+  // ── Validate Key + Composer before anything else touches the filesystem/DB ──
+  // Both fields are free text (the datalist is a convenience, not an enforced
+  // list), so a blank or mistyped value used to sail straight through here:
+  // an empty Composer became the literal string "UNKNOWN" and an empty or
+  // garbage Key landed unsanitized in the shipped filename and the titles
+  // row. Block on both before collectIntakeInfo hands off to step 2 / Import.
+  const VALID_KEYS = ['C','Csharp','Db','D','Dsharp','Eb','E','F','Fsharp','Gb','G','Gsharp','Ab','A','Asharp','Bb','B',
+                      'Cm','Csharpm','Dbm','Dm','Dsharpm','Ebm','Em','Fm','Fsharpm','Gbm','Gm','Gsharpm','Abm','Am','Asharpm','Bbm','Bm']
+  const _validKeySet = new Set(VALID_KEYS.map(k => k.toLowerCase()))
+  const knownComposerIds = new Set((_intakeComposers || []).map(c => (c.composer_full_id || '').toLowerCase()))
+  let blockedFields = false
+  for (const i of visibleIndices) {
+    const keyEl = document.getElementById(`key-${i}`)
+    const keyVal = keyEl?.value.trim() || ''
+    const keyOk = !!keyVal && _validKeySet.has(keyVal.toLowerCase())
+    if (keyEl) {
+      if (!keyOk) {
+        keyEl.style.border = '1.5px solid var(--red,#e53)'
+        keyEl.placeholder = keyVal ? 'unrecognized key' : 'required'
+        blockedFields = true
+      } else {
+        keyEl.style.border = ''
+      }
+    }
+
+    const idEl = document.getElementById(`id-${i}`)
+    const idVal = idEl?.value.trim() || ''
+    // If the composer list hasn't loaded yet, don't false-positive-block on
+    // "unrecognized" -- still require the field to be non-blank.
+    const idOk = !!idVal && (knownComposerIds.size === 0 || knownComposerIds.has(idVal.toLowerCase()))
+    if (idEl) {
+      if (!idOk) {
+        idEl.style.border = '1.5px solid var(--red,#e53)'
+        idEl.placeholder = idVal ? 'unrecognized composer' : 'required'
+        blockedFields = true
+      } else {
+        idEl.style.border = ''
+      }
+    }
+  }
+  if (blockedFields) {
+    toast('Fix the highlighted Key/Composer field(s) before continuing — a blank or unrecognized value here lands straight in the shipped filename and database.', 'error')
     return
   }
 
@@ -14227,7 +14085,12 @@ function buildHausName(filename, title, info) {
   const version = detectVersion(filename)
   const titleCamel = title.replace(/[^a-zA-Z0-9 _]/g,'').split(/[\s_]+/).filter(Boolean).map(w => w.charAt(0).toUpperCase() + w.slice(1)).join('')
   const prefix = info.isJup ? 'HAUSJUP' : 'HAUS'
-  return `${prefix}_${titleCamel}_${info.key}_${info.id}_${version}.${ext}`
+  // Defense-in-depth: collectIntakeInfo() now blocks a blank/unrecognized Key
+  // or Composer before this is ever reached, but key/id are still free-text
+  // form values -- never interpolate them unsanitized into a filesystem path.
+  const keyClean = String(info.key || '').replace(/[^a-zA-Z0-9]/g, '')
+  const idClean = String(info.id || '').replace(/[^a-zA-Z0-9]/g, '')
+  return `${prefix}_${titleCamel}_${keyClean}_${idClean}_${version}.${ext}`
 }
 
 // Deduplicate renamed files within a batch.

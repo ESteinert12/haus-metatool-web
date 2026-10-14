@@ -30,13 +30,21 @@ const http       = require('http')
 const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
+const IntakeIntegration = require('./intake-integration.js')
 const { parseCueSheetFile, matchCueToTitles, normTitle, titleToCamelKey } = require('./cue-sheet-import.js')
+
+const compression = require('compression')
 
 const app    = express()
 const PORT   = process.env.PORT || 9999 
 const upload = multer({ dest: os.tmpdir() })
 
 // ─── Middleware ────────────────────────────────────────────────────────────
+// Gzip/deflate every compressible response. index.html alone is ~1MB of inline
+// JS served with no-cache below (so every load re-transfers it); this was the
+// single largest fix for "the app is slow to load" -- confirmed by direct read,
+// there was no compression anywhere in this codebase before this line existed.
+app.use(compression())
 app.use(express.json({ limit: '50mb' }))
 app.use(express.urlencoded({ extended: true }))
 
@@ -74,6 +82,26 @@ try {
       connectionTimeoutMillis: 10000
     })
     sessionPool.on('error', err => console.warn('[session-pool] error:', err.message))
+    // connect-pg-simple makes ONE attempt per session lookup. When Neon has dropped a
+    // pooled connection ("Connection terminated unexpectedly" / ECONNRESET) that single
+    // attempt fails and the request dies with an HTML error page, even though a fresh
+    // connection would work. Retry once on those transient errors. Session queries are
+    // idempotent (SELECT, upsert, DELETE), so a repeat is safe.
+    {
+      const _sessQuery = sessionPool.query.bind(sessionPool)
+      sessionPool.query = async function (...args) {
+        if (typeof args[args.length - 1] === 'function') return _sessQuery(...args)  // callback style: leave alone
+        try {
+          return await _sessQuery(...args)
+        } catch (e) {
+          if (/Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE/i.test(e?.message || '')) {
+            console.warn('[session-pool] transient error, retrying once:', e.message)
+            return _sessQuery(...args)
+          }
+          throw e
+        }
+      }
+    }
     sessionStore = new PgSession({
       pool: sessionPool,
       tableName: 'user_sessions',
@@ -106,25 +134,28 @@ app.use(session({
 }))
 if (secureCookie) app.set('trust proxy', 1)   // Vercel/Cloudflare terminate TLS upstream
 
-// Disable caching for all files
+// Always revalidate with the server (never serve a stale copy from the
+// browser's cache without asking first), but allow a conditional GET so an
+// unchanged file gets a 304 (no body) instead of the full bytes every time.
+// This used to be "no-store" (no caching at all, ever) -- changed because
+// index.html alone is ~1MB and was being fully re-transferred on every single
+// load/refresh with no compression and no way to skip re-sending unchanged
+// bytes. res.sendFile() below already sets ETag/Last-Modified by default, so
+// the browser still asks on every request; it just doesn't pay for a full
+// re-download when nothing changed.
 app.use((req, res, next) => {
-  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate')
+  res.setHeader('Cache-Control', 'no-cache, must-revalidate')
   res.setHeader('Pragma', 'no-cache')
-  res.setHeader('Expires', '0')
   next()
 })
 
-// Never cache index.html or haus-api.js so changes are always picked up
 app.get('/', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
   res.sendFile(path.join(__dirname, 'index.html'))
 })
 app.get('/index.html', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
   res.sendFile(path.join(__dirname, 'index.html'))
 })
 app.get('/haus-api.js', (req, res) => {
-  res.setHeader('Cache-Control', 'no-store')
   res.sendFile(path.join(__dirname, 'haus-api.js'))
 })
 
@@ -133,7 +164,7 @@ app.get('/haus-api.js', (req, res) => {
 // backup and GET /api.js returned this file, connection string and all. Serve only
 // the handful of things the browser actually asks for.
 app.use('/assets', express.static(path.join(__dirname, 'assets')))
-for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'producer.html', 'client-portal.html']) {
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'ebr-shared.js', 'producer.html', 'client-portal.html']) {
   app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
 }
 
@@ -1529,17 +1560,26 @@ app.get('/api/portal/playlists', async (req, res) => {
          FROM portal_playlists WHERE client_id=$1 ORDER BY created_at DESC`,
       [req.session.portalUser.client_id]
     )
-    const withTracks = await Promise.all(playlists.rows.map(async pl => {
-      const tracks = await pgPool.query(
-        `SELECT t.sku_root, t.title, t.key, t.bpm
+    // Was one query per playlist (N+1, via Promise.all). One query for every
+    // playlist's tracks instead, grouped here in JS -- same output shape,
+    // same per-playlist ordering, one round trip to Neon instead of N.
+    const playlistIds = playlists.rows.map(pl => pl.playlist_id)
+    const tracksByPlaylist = {}
+    if (playlistIds.length) {
+      const allTracks = await pgPool.query(
+        `SELECT ppt.playlist_id, t.sku_root, t.title, t.key, t.bpm
            FROM portal_playlist_tracks ppt
            JOIN titles t ON t.sku_root = ppt.sku_root
-          WHERE ppt.playlist_id=$1
-          ORDER BY ppt.sort_order`,
-        [pl.playlist_id]
+          WHERE ppt.playlist_id = ANY($1::int[])
+          ORDER BY ppt.playlist_id, ppt.sort_order`,
+        [playlistIds]
       )
-      return { ...pl, tracks: tracks.rows }
-    }))
+      for (const row of allTracks.rows) {
+        const { playlist_id, ...track } = row
+        ;(tracksByPlaylist[playlist_id] ||= []).push(track)
+      }
+    }
+    const withTracks = playlists.rows.map(pl => ({ ...pl, tracks: tracksByPlaylist[pl.playlist_id] || [] }))
     res.json({ ok: true, playlists: withTracks })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -1844,23 +1884,93 @@ app.post('/api/ebr/auto-export-lot', async (req, res) => {
 })
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
-app.post('/api/fs/read-dir', (req, res) => {
+// Shared by /api/fs/read-dir and /api/intake/scan-folders. Returns the same
+// shape read-dir has always returned: [{name, isDirectory, path, size, ext}].
+async function _readDirEntries(dirPath) {
+  const items = await fs.promises.readdir(dirPath, { withFileTypes: true })
+  const visible = items.filter(item => !item.name.startsWith('.'))
+  const result = await Promise.all(visible.map(async item => {
+    const fullPath = path.join(dirPath, item.name)
+    let size = 0
+    if (!item.isDirectory()) {
+      try { size = (await fs.promises.stat(fullPath)).size } catch {}
+    }
+    return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
+  }))
+  result.sort((a, b) => {
+    if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
+    return a.name.localeCompare(b.name)
+  })
+  return result
+}
+
+app.post('/api/fs/read-dir', async (req, res) => {
   const dirPath = _safeRead(req.body.dirPath)
   if (!dirPath) return res.json({ error: 'Path not allowed' })
   try {
-    const items = fs.readdirSync(dirPath, { withFileTypes: true })
-    const result = items
-      .filter(item => !item.name.startsWith('.'))
-      .map(item => {
-        const fullPath = path.join(dirPath, item.name)
-        let size = 0
-        try { if (!item.isDirectory()) size = fs.statSync(fullPath).size } catch {}
-        return { name: item.name, isDirectory: item.isDirectory(), path: fullPath, size, ext: path.extname(item.name).toLowerCase() }
-      })
-      .sort((a, b) => {
-        if (a.isDirectory !== b.isDirectory) return a.isDirectory ? -1 : 1
-        return a.name.localeCompare(b.name)
-      })
+    // Was fs.readdirSync/statSync -- synchronous calls block Node's entire
+    // event loop for every other request (all users, all routes) while they
+    // run. dirPath here is frequently a Dropbox CloudStorage folder, where a
+    // single directory listing is not guaranteed instant (placeholder/metadata
+    // resolution), and the Intake browser calls this route many times in a
+    // row per click (see scanStagingForClient in index.html) -- confirmed
+    // root cause of "clicking a show takes ~10 seconds" (2026-10-13). Switched
+    // to the async fs.promises API (same libuv threadpool, but non-blocking
+    // for the rest of the server, and lets concurrent requests actually
+    // overlap instead of queueing behind one blocking call). Return shape is
+    // unchanged -- every existing caller keeps working as-is.
+    res.json(await _readDirEntries(dirPath))
+  } catch (e) { res.json({ error: e.message }) }
+})
+
+// One request instead of 1 + (lot folders) + (drop folders) -- confirmed via
+// direct timing (2026-10-13) that the raw filesystem reads are fast (0.038s
+// to list a 148-entry show folder on the real Dropbox mount) but the Intake
+// browser was still firing one HTTP request per drop folder. Every one of
+// those requests carries express-session's own per-request lookup against
+// the Postgres session store, whose pool caps at 3 connections (see
+// sessionPool max:3 above) -- 148 concurrent requests all contending for 3
+// DB connections just to read the session is a real, confirmed queuing
+// bottleneck, separate from and in addition to the filesystem cost. This
+// route does the entire client-folder walk (lot folders -> drop folders ->
+// each drop folder's file list) in one request, so only ONE session lookup
+// and ONE HTTP round trip happens no matter how many folders a show has.
+// Mirrors scanStagingForClient's traversal exactly (same isDropFolder regex,
+// same lotFolder tagging, same result order) so the client-side rewrite can
+// swap this in without changing what gets displayed.
+const _isDropFolderName = name => /^[A-Z]\d{2}[a-zA-Z]/i.test(name)
+
+app.post('/api/intake/scan-folders', async (req, res) => {
+  const rootPath = _safeRead(req.body.rootPath)
+  if (!rootPath) return res.json({ error: 'Path not allowed' })
+  try {
+    const rootEntries = await _readDirEntries(rootPath)
+    const dirEntries = rootEntries.filter(e => e.isDirectory)
+
+    // One sub-listing per non-drop ("lot") folder, all fired together.
+    const subScans = await Promise.all(dirEntries.map(e =>
+      _isDropFolderName(e.name) ? null : _readDirEntries(e.path).catch(() => [])
+    ))
+
+    let folders = []
+    for (let i = 0; i < dirEntries.length; i++) {
+      const e = dirEntries[i]
+      if (_isDropFolderName(e.name)) {
+        folders.push({ name: e.name, path: e.path, lotFolder: null })
+      } else {
+        const sub = subScans[i] || []
+        for (const s of sub) {
+          if (s.isDirectory && _isDropFolderName(s.name)) {
+            folders.push({ name: s.name, path: s.path, lotFolder: e.name })
+          }
+        }
+      }
+    }
+
+    // One file-listing per drop folder, all fired together.
+    const fileLists = await Promise.all(folders.map(f => _readDirEntries(f.path).catch(() => [])))
+    const result = folders.map((f, i) => ({ ...f, files: fileLists[i] }))
+
     res.json(result)
   } catch (e) { res.json({ error: e.message }) }
 })
@@ -7142,7 +7252,20 @@ app.get('/api/intake/metadata', async (req, res) => {
 // Import metadata from .md file and move to shipping
 app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
-  if (!intakeIntegration) return res.json({ ok: false, error: 'Intake system not initialized' })
+
+  // intakeIntegration was never required/instantiated anywhere in this file --
+  // every reference below used to throw a ReferenceError before any response was
+  // sent, so this route hung on every call. Built fresh per request (same pattern
+  // as the rest of this file's cfg reads) so it always sees the current pgPool
+  // and current on-disk config, rather than a reference captured once at startup
+  // that would go stale across a pool reconnect.
+  let intakeIntegration
+  try {
+    const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
+    intakeIntegration = new IntakeIntegration({ query: (...a) => pgPool.query(...a) }, { cfg })
+  } catch (e) {
+    return res.json({ ok: false, error: 'Intake system not initialized: ' + e.message })
+  }
 
   try {
     const { id } = req.params
@@ -7280,7 +7403,13 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
     const lines = csv.trim().split('\n')
     const headers = lines[0].split(',').map(h => h.trim())
 
-    let inserted = 0
+    // Was one INSERT per CSV line in a sequential loop (N+1, plus any mid-loop
+    // failure left a partial import with no rollback). Parse all valid rows
+    // first, then insert them in a single batched statement via unnest() --
+    // same pattern already used elsewhere in this file for batch updates.
+    // `inserted` still counts attempted (parsed, non-blank) rows, matching the
+    // previous behavior, not actual rows affected by ON CONFLICT DO NOTHING.
+    const pks = [], names = [], cities = [], states = [], countries = [], contacts = []
     for (let i = 1; i < lines.length; i++) {
       const parts = lines[i].split(',')
       const obj = {}
@@ -7289,14 +7418,20 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
       const { PK, CLIENT, CITY, State, Country, Contact } = obj
       if (!PK || !CLIENT) continue
 
+      pks.push(PK); names.push(CLIENT)
+      cities.push(CITY || null); states.push(State || null)
+      countries.push(Country || null); contacts.push(Contact || null)
+    }
+
+    if (pks.length) {
       await pgPool.query(
         `INSERT INTO clients (fm_pk, name, city, state, country, contact, active)
-         VALUES ($1, $2, $3, $4, $5, $6, true)
+         SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], array_fill(true, ARRAY[array_length($1::text[],1)]))
          ON CONFLICT (fm_pk) DO NOTHING`,
-        [PK, CLIENT, CITY || null, State || null, Country || null, Contact || null]
+        [pks, names, cities, states, countries, contacts]
       )
-      inserted++
     }
+    const inserted = pks.length
 
     fs.unlinkSync(req.file.path)
     res.json({ ok: true, count: inserted })
