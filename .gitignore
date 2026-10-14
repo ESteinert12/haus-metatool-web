@@ -49,3 +49,6 @@ B2Fix/
 *.psv
 *.gz
 b2-*-inventory*.txt
+
+# Local demo DB for cue-sheet-import.js testing (regenerate with demo-import.js)
+demo_cue_sheets.sqlite*
