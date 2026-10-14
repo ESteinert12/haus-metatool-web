@@ -1015,6 +1015,11 @@ async function runServerMigrations(pool) {
         work_id           TEXT,
         show_name         TEXT,         -- display-only context for resolving an
         episode_name      TEXT,         -- unmatched/ambiguous line -- never used for matching itself
+        bonus_amount      NUMERIC(14,2), -- BMI hit-bonus/foreign-society-adjustment columns, captured
+                                          -- SEPARATELY, never folded into the amount column -- every real
+                                          -- BMI row seen so far is 0.00, so whether it's additive-on-top-of
+                                          -- or already-included-in amount has never been observable.
+                                          -- Verify before ever adding this into a reconciled total.
         match_status      TEXT NOT NULL DEFAULT 'unmatched',
         matched_sku_root  VARCHAR REFERENCES titles(sku_root) ON DELETE SET NULL,
         confirmed_by      TEXT,
@@ -7805,6 +7810,28 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
     return { ok: false, origName, error: `Unrecognized royalty statement format for "${origName}" -- not imported. Known formats: BMI, SESAC (domestic/international), ASCAP (domestic/foreign), SOCAN.` }
   }
 
+  // Dedupe on (source, format, period), NOT filename. ASCAP's own export
+  // tool names files with an opaque batch ID that carries no period at all
+  // (confirmed on real files: "36077668.csv" tells you nothing about which
+  // quarter it covers -- only the file's own content does). A re-download of
+  // the SAME quarter gets a brand-new random filename, so filename-only dedup
+  // would silently let the same money get imported twice under two
+  // statement rows. Still also check filename as a secondary guard (catches
+  // a literal re-upload of the identical file before its period is even
+  // parsed out, and catches formats where period parsing might fail/be null).
+  const dupByPeriod = parsed.meta.period
+    ? await pgPool.query(
+        `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 LIMIT 1`,
+        [parsed.meta.source, parsed.format, parsed.meta.period]
+      )
+    : { rows: [] }
+  if (dupByPeriod.rows.length) {
+    return {
+      ok: false, origName,
+      error: `A ${parsed.meta.source} ${parsed.format} statement for period ${parsed.meta.period} was already imported as "${dupByPeriod.rows[0].source_filename}" (statement #${dupByPeriod.rows[0].id}, imported ${dupByPeriod.rows[0].imported_at}). If this is a genuine re-export of the same period (not a new period), delete the existing statement first -- re-importing both would double-count that period's money.`,
+      duplicateOfStatementId: dupByPeriod.rows[0].id,
+    }
+  }
   const dup = await pgPool.query(
     `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 LIMIT 1`,
     [origName]
@@ -7837,11 +7864,11 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
     await pgPool.query(
       `INSERT INTO royalty_statement_lines
          (statement_id, title_raw, title_normalized, payee_name, payee_role, amount,
-          usage_type, country, work_id, show_name, episode_name, match_status, matched_sku_root)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
+          usage_type, country, work_id, show_name, episode_name, bonus_amount, match_status, matched_sku_root)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
       [statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
        line.usageType || null, line.country || null, line.workId || null, line.showName || null, line.episodeName || null,
-       m.status, matchedSku]
+       line.bonusAmount || null, m.status, matchedSku]
     )
   }
 
