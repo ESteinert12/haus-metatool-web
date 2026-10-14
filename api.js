@@ -85,21 +85,35 @@ try {
     // connect-pg-simple makes ONE attempt per session lookup. When Neon has dropped a
     // pooled connection ("Connection terminated unexpectedly" / ECONNRESET) that single
     // attempt fails and the request dies with an HTML error page, even though a fresh
-    // connection would work. Retry once on those transient errors. Session queries are
-    // idempotent (SELECT, upsert, DELETE), so a repeat is safe.
+    // connection would work. Session queries are idempotent (SELECT, upsert, DELETE), so
+    // a repeat is safe.
+    //
+    // 2026-10-14: this used to retry only ONCE, immediately, with no delay -- which still
+    // failed in production when Neon needed a moment to actually come back (autosuspend/
+    // cold-start "starting up", not just a one-off dropped socket), because the instant
+    // retry landed on a connection that still wasn't ready. Brought up to the same
+    // resilience as the main pool's _pgRetry: several attempts with exponential backoff,
+    // and the same broadened transient-error match (also catches "starting up"/"shutting
+    // down"/ENOTFOUND/timeout/socket, not just the four exact strings this used to check).
     {
       const _sessQuery = sessionPool.query.bind(sessionPool)
+      const SESSION_POOL_ATTEMPTS = 4
       sessionPool.query = async function (...args) {
         if (typeof args[args.length - 1] === 'function') return _sessQuery(...args)  // callback style: leave alone
-        try {
-          return await _sessQuery(...args)
-        } catch (e) {
-          if (/Connection terminated|ECONNRESET|ETIMEDOUT|EPIPE/i.test(e?.message || '')) {
-            console.warn('[session-pool] transient error, retrying once:', e.message)
-            return _sessQuery(...args)
+        let lastErr
+        for (let attempt = 0; attempt < SESSION_POOL_ATTEMPTS; attempt++) {
+          try {
+            return await _sessQuery(...args)
+          } catch (e) {
+            lastErr = e
+            const transient = /terminated|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|Connection|socket|starting up|shutting down|timeout/i.test(e?.message || '')
+            if (!transient || attempt === SESSION_POOL_ATTEMPTS - 1) throw e
+            const wait = 1000 * Math.pow(2, attempt)
+            console.warn(`[session-pool] transient error (${e.message}) -- retry ${attempt + 1}/${SESSION_POOL_ATTEMPTS - 1} in ${wait}ms`)
+            await new Promise(r => setTimeout(r, wait))
           }
-          throw e
         }
+        throw lastErr
       }
     }
     sessionStore = new PgSession({
