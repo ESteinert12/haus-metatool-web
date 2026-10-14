@@ -1013,6 +1013,8 @@ async function runServerMigrations(pool) {
         usage_type        TEXT,
         country            TEXT,
         work_id           TEXT,
+        show_name         TEXT,         -- display-only context for resolving an
+        episode_name      TEXT,         -- unmatched/ambiguous line -- never used for matching itself
         match_status      TEXT NOT NULL DEFAULT 'unmatched',
         matched_sku_root  VARCHAR REFERENCES titles(sku_root) ON DELETE SET NULL,
         confirmed_by      TEXT,
@@ -7835,10 +7837,11 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
     await pgPool.query(
       `INSERT INTO royalty_statement_lines
          (statement_id, title_raw, title_normalized, payee_name, payee_role, amount,
-          usage_type, country, work_id, match_status, matched_sku_root)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,
+          usage_type, country, work_id, show_name, episode_name, match_status, matched_sku_root)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
       [statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
-       line.usageType || null, line.country || null, line.workId || null, m.status, matchedSku]
+       line.usageType || null, line.country || null, line.workId || null, line.showName || null, line.episodeName || null,
+       m.status, matchedSku]
     )
   }
 

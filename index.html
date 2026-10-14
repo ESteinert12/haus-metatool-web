@@ -8879,9 +8879,16 @@ function renderRoyaltyLines(lines) {
       confirmed: '#2e7d32', matched: '#2e7d32',
       ambiguous: '#c0392b', unmatched: '#c0392b', rejected: '#777',
     }[line.match_status] || '#777'
+    // show_name/episode_name are display-only context for a human resolving
+    // an unmatched/ambiguous line -- not used for matching. Often blank for
+    // non-TV usage (streaming/digital) -- that's normal, not missing data.
+    const episodeContext = (line.show_name || line.episode_name)
+      ? `${esc(line.show_name || '')}${line.show_name && line.episode_name ? ' — ' : ''}${esc(line.episode_name || '')}`
+      : '<span style="color:var(--text3)">—</span>'
     return `
       <tr style="border-bottom:1px solid var(--border)">
         <td style="padding:8px;font-size:12px">${esc(line.title_raw)}</td>
+        <td style="padding:8px;font-size:11px">${episodeContext}</td>
         <td style="padding:8px;font-size:11px">${esc(line.payee_name || '')}${line.payee_role ? ` <span style="color:var(--text3)">(${esc(line.payee_role)})</span>` : ''}</td>
         <td style="padding:8px;font-size:12px;text-align:right">$${parseFloat(line.amount).toFixed(2)}</td>
         <td style="padding:8px;font-size:11px">${esc(line.usage_type || '')}</td>
@@ -8903,7 +8910,7 @@ function renderRoyaltyLines(lines) {
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
-          <th style="padding:8px">Statement title</th><th style="padding:8px">Payee</th><th style="padding:8px;text-align:right">Amount</th>
+          <th style="padding:8px">Statement title</th><th style="padding:8px">Show / episode</th><th style="padding:8px">Payee</th><th style="padding:8px;text-align:right">Amount</th>
           <th style="padding:8px">Usage</th><th style="padding:8px">Matched catalog title</th>
           <th style="padding:8px">Status</th><th style="padding:8px"></th>
         </tr>

@@ -144,6 +144,11 @@ function parseBMI(filePath) {
       usageType: f[12] || null,
       country: f[8] || null,
       workId: f[6] || null,
+      // Display-only context for a human resolving an unmatched/ambiguous
+      // line -- NOT used for matching itself. Often blank for non-TV usage
+      // (streaming/digital), which is normal, not a parse failure.
+      showName: f[9] || null,
+      episodeName: f[10] || null,
     });
     statementTotal += amount;
   }
@@ -182,6 +187,11 @@ function parseSESAC(filePath) {
       usageType: f[25] || f[24] || null, // Perf Type / Perf Category
       country: f[30] || null, // Society Country
       workId: f[2] || null, // Song #
+      // Display-only -- not used for matching. Episode Number (f[7]) folded
+      // into episodeName when present since Episode Title alone is often
+      // generic/repeated across a series.
+      showName: f[5] || null, // Production Title
+      episodeName: [f[6], f[7] ? `(Ep ${f[7]})` : null].filter(Boolean).join(' ') || null,
     });
     statementTotal += amount;
   }
@@ -222,6 +232,10 @@ function parseASCAP_DOM(filePath) {
       usageType: f[23] || null, // Performance Type (Usage)
       country: f[37] || null, // Territory
       workId: f[18] || null,
+      // Display-only -- not used for matching. Often blank for non-TV usage
+      // (e.g. Pandora/digital streaming rows), which is normal.
+      showName: f[16] && f[16].trim() ? f[16] : null, // Series or Film/Attraction
+      episodeName: f[17] && f[17].trim() ? f[17] : null, // Program Name
     });
     statementTotal += amount;
   }
@@ -256,6 +270,9 @@ function parseASCAP_FOR(filePath) {
       // GEMA/SACEM/etc) -- distinct from "source" (ASCAP), which is who's
       // passing it through to us.
       foreignSociety: f[9] || null,
+      // Display-only -- not used for matching.
+      showName: f[16] && f[16].trim() && f[16] !== '-' ? f[16] : null, // Series Name
+      episodeName: f[17] && f[17].trim() ? f[17] : null, // Program Name (seen holding a date range, not always a real episode title)
     });
     statementTotal += amount;
   }
@@ -293,6 +310,9 @@ function parseSOCAN(filePath) {
       country: f[13] || null, // TERRITORY
       workId: null, // SOCAN doesn't carry its own work ID in this export
       earningsPeriod: f[8] || null, // can differ from the payment period above
+      // Display-only -- not used for matching.
+      showName: f[1] || null, // PERFORMER OR SERIES (FILM)
+      episodeName: f[2] || null, // PRODUCT OR EPISODE TITLE
     });
     statementTotal += amount;
   }
