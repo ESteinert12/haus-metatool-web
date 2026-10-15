@@ -2759,6 +2759,7 @@ async function selectLot(lotId) {
         <button onclick="saveLotMeta(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-check"></i> Save</button>
         <button onclick="showAddTrackToLotModal(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-plus"></i> Add Track</button>
         <button onclick="downloadForAVID(${lotId}, '${esc(lot.lot_name)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-download"></i> Download for AVID</button>
+        <button onclick="downloadLotFromB2(${lotId}, '${esc(lot.lot_name)}')" title="Download every stem in this lot from B2 to your Downloads folder" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-cloud-download"></i> Download Lot</button>
         <button onclick="ebrAutoRunForLot(${lotId}, '${esc(lot.lot_name)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'" title="Runs the same EBR export the lot would trigger automatically on hitting its track limit — safe to click more than once, already-exported titles are skipped"><i class="ti ti-file-spreadsheet"></i> Run EBR</button>
         <button onclick="deleteLot(${lotId}, '${esc(lot.lot_name)}')" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-trash"></i> Delete</button>
       </div>
@@ -3170,6 +3171,151 @@ async function downloadForAVID(lotId, lotName) {
     console.error('AVID download error:', e)
     toast('Error downloading files: ' + e.message, 'error')
   }
+}
+
+// ─── Download a whole lot's stems from B2 → ~/Downloads/<lot>/<SKU_Title>/ ───
+// Pulls every stem that has a b2_key for the songs in the lot, using the same
+// lot→title join the Lot screen lists. One folder per song, matching the
+// shipping layout. B2 keys are URL-encoded per path segment: a raw '#' (e.g.
+// ".../_C#m/...") would otherwise be read as a URL fragment and fetch the
+// wrong object. Failures are listed, never only logged.
+function _lotDlSafe(s) { return String(s ?? '').replace(/[\/\\:*?"<>|]/g, '_').trim() || '_' }
+function _lotDlBytes(n) {
+  if (!n) return '0 B'
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++ }
+  return (i ? n.toFixed(1) : String(n)) + ' ' + u[i]
+}
+
+async function downloadLotFromB2(lotId, lotName) {
+  if (!window.haus?.b2?.downloadFile) { toast('Downloading a lot needs the desktop app.', 'error'); return }
+
+  const FROM = `
+    FROM lot_titles lt
+    JOIN titles t ON t.sku_root = lt.sku_root
+      OR (length(lt.sku_root) = 7 AND t.sku_root LIKE lt.sku_root || '_')
+    JOIN mix_stems ms ON ms.sku_root = t.sku_root
+    WHERE lt.lot_id = $1`
+  const [rows, missing] = await Promise.all([
+    pgQ(`SELECT DISTINCT ON (ms.sku_root, ms.filename)
+                ms.sku_root, t.title, ms.stem_name, ms.filename, ms.b2_key, ms.size_bytes
+         ${FROM} AND ms.b2_key IS NOT NULL
+         ORDER BY ms.sku_root, ms.filename`, [lotId]),
+    pgQ(`SELECT count(DISTINCT ms.mix_stem_id) AS n ${FROM} AND ms.b2_key IS NULL`, [lotId])
+  ])
+  if (!rows || rows.error) { toast('Could not read this lot\'s stems — the query failed. Try again.', 'error'); return }
+  if (!rows.length) { toast(`No downloadable stems found for "${lotName}".`, 'info'); return }
+
+  const files = rows
+  if (!b2Connected || !b2DownloadUrl) await b2AutoConnect()
+  if (!b2Connected || !b2DownloadUrl) { toast('B2 not connected — check Settings → Backblaze B2 credentials.', 'error'); return }
+
+  // Songs logged through intake have no size_bytes in mix_stems. Read the real
+  // sizes from B2 (one listing per song folder) so the total is true, and so
+  // stub-sized files and keys that don't exist in B2 are flagged before download.
+  const sizeByKey = new Map(), listedPrefixes = new Set()
+  const unsized = files.filter(f => !(Number(f.size_bytes) > 0))
+  if (unsized.length && window.haus.b2.listFiles && b2BucketId) {
+    const prefixes = [...new Set(unsized.map(f => String(f.b2_key).replace(/[^\/]+$/, '')))]
+    for (const pre of prefixes) {
+      try {
+        const lr = await window.haus.b2.listFiles(b2BucketId, pre, 1000)
+        if (lr?.ok) {
+          listedPrefixes.add(pre)
+          for (const bf of lr.files || []) { const n = bf.contentLength ?? bf.size; if (n != null) sizeByKey.set(bf.fileName, Number(n)) }
+        }
+      } catch (e) { console.warn('[lot download] size listing failed for', pre, e.message) }
+    }
+  }
+  let total = 0, unknown = 0, stubs = 0, notInB2 = 0
+  for (const f of files) {
+    const dbSize = Number(f.size_bytes)
+    const pre = String(f.b2_key).replace(/[^\/]+$/, '')
+    if (dbSize > 0) { f._size = dbSize; f._known = true }
+    else if (sizeByKey.has(f.b2_key)) { f._size = sizeByKey.get(f.b2_key); f._known = true }
+    else { f._size = 0; f._known = false; if (listedPrefixes.has(pre)) { f._missing = true; notInB2++ } }
+    if (f._missing) continue
+    if (!f._known) unknown++
+    else if (f._size < 1024) stubs++
+    else total += f._size
+  }
+  const songs = new Set(files.map(f => f.sku_root)).size
+  const noKey = Number(missing?.[0]?.n || 0)
+  const home = await getHomeDir()
+  const lotDir = `${home}/Downloads/${_lotDlSafe(lotName)}`
+
+  const msg = `Download "${lotName}" from B2?\n\n` +
+    `${songs} song${songs !== 1 ? 's' : ''} · ${files.length} files · about ${_lotDlBytes(total)}` +
+    (unknown ? ` (plus ${unknown} file${unknown !== 1 ? 's' : ''} of unknown size)` : '') +
+    `\n\nSaves to:\n${lotDir}/<SKU_Title>/` +
+    (noKey ? `\n\n${noKey} stem${noKey !== 1 ? 's have' : ' has'} no B2 file recorded and will be skipped.` : '') +
+    (stubs ? `\n\nWARNING: ${stubs} file${stubs !== 1 ? 's are' : ' is'} under 1 KB in B2 (stub-sized) and will be reported as failed.` : '') +
+    (notInB2 ? `\n\nWARNING: ${notInB2} file${notInB2 !== 1 ? 's are' : ' is'} recorded in the database but not found in B2 at that key.` : '') +
+    `\n\nFiles already in that folder with the same name will be overwritten.`
+  if (!confirm(msg)) return
+
+  if (!b2Connected || !b2DownloadUrl) await b2AutoConnect()
+  if (!b2Connected || !b2DownloadUrl) { toast('B2 not connected — check Settings → Backblaze B2 credentials.', 'error'); return }
+
+  // Progress modal
+  const modal = document.createElement('div')
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.55);z-index:9999;display:flex;align-items:center;justify-content:center'
+  modal.innerHTML = `
+    <div style="background:var(--bg2);border:0.5px solid var(--border);border-radius:8px;width:520px;max-height:85vh;overflow-y:auto;padding:24px;display:flex;flex-direction:column;gap:14px">
+      <b style="font-size:14px">Downloading lot</b>
+      <div class="lotdl-name" style="font-size:12px;color:var(--text3)"></div>
+      <div class="lotdl-status" style="font-size:12px;color:var(--text3)">Starting…</div>
+      <div style="height:4px;background:var(--bg3);border-radius:2px;overflow:hidden"><div class="lotdl-bar" style="height:100%;background:var(--accent,#0a84ff);width:0%;transition:width 0.3s"></div></div>
+      <div class="lotdl-result" style="display:none;font-size:11px;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all"></div>
+      <div style="display:flex;gap:8px;justify-content:flex-end">
+        <button class="btn lotdl-cancel">Cancel</button>
+        <button class="btn lotdl-open" style="display:none;background:var(--green,#30d158);color:#fff">Open Folder</button>
+      </div>
+    </div>`
+  document.body.appendChild(modal)
+  const q = s => modal.querySelector(s)
+  q('.lotdl-name').textContent = lotDir
+  let cancelled = false, finished = false
+  q('.lotdl-cancel').onclick = () => { if (finished) modal.remove(); else { cancelled = true; q('.lotdl-cancel').disabled = true; q('.lotdl-status').textContent = 'Cancelling after this file…' } }
+  q('.lotdl-open').onclick = () => window.haus.shell.showInFinder(lotDir)
+
+  const failed = [], differs = []
+  let ok = 0, i = 0
+  for (const f of files) {
+    if (cancelled) break
+    i++
+    q('.lotdl-status').textContent = `Downloading ${i} / ${files.length} — ${f.filename}`
+    q('.lotdl-bar').style.width = Math.round(((i - 1) / files.length) * 100) + '%'
+    const keyPath = String(f.b2_key).split('/').map(encodeURIComponent).join('/')
+    const url = `${b2DownloadUrl}/file/${cfg.b2Bucket}/${keyPath}`
+    const dest = `${lotDir}/${_lotDlSafe(f.sku_root + '_' + f.title)}/${_lotDlSafe(f.filename)}`
+    try {
+      const res = await window.haus.b2.downloadFile(url, dest)
+      if (!res.ok) { failed.push(`${f.filename}: ${res.error}`); console.error('[lot download] failed:', f.b2_key, res.error); continue }
+      // Verify what landed on disk: empty / stub-sized files are failures.
+      const st = await window.haus.shell.exec(`stat -f%z '${dest.replace(/'/g, "'\\''")}'`)
+      const got = parseInt((st.stdout || '').trim(), 10)
+      if (!(got >= 1024)) { failed.push(`${f.filename}: came down empty or stub-sized (${isNaN(got) ? 'size unreadable' : got + ' bytes'})`); console.error('[lot download] stub/empty:', f.b2_key, got); continue }
+      const want = f._known ? f._size : 0
+      if (want > 0 && got !== want) differs.push(`${f.filename}: ${got} bytes on disk, B2 says ${want}`)
+      ok++
+    } catch (e) {
+      failed.push(`${f.filename}: ${e.message}`); console.error('[lot download] error:', f.b2_key, e)
+    }
+  }
+
+  finished = true
+  q('.lotdl-bar').style.width = cancelled ? q('.lotdl-bar').style.width : '100%'
+  q('.lotdl-status').textContent = (cancelled ? `Cancelled — ${ok} of ${files.length} files downloaded` : `Done — ${ok} of ${files.length} files downloaded`) +
+    (failed.length ? ` · ${failed.length} failed` : '')
+  q('.lotdl-cancel').disabled = false
+  q('.lotdl-cancel').textContent = 'Close'
+  q('.lotdl-open').style.display = ''
+  const out = []
+  if (failed.length) out.push(`FAILED (${failed.length}):\n` + failed.join('\n'))
+  if (differs.length) out.push(`SIZE DIFFERS FROM B2 (${differs.length}) — files were saved, worth a look:\n` + differs.join('\n'))
+  if (out.length) { const r = q('.lotdl-result'); r.style.display = ''; r.textContent = out.join('\n\n') }
+  console.log(`[lot download] ${lotName}: ${ok}/${files.length} ok, ${failed.length} failed, ${differs.length} size-differs`)
 }
 
 // Derive the full filesystem path for a track's files from DB data.
@@ -4611,6 +4757,7 @@ async function selectClientLot(lotId, lotName) {
           <button onclick="saveLotMeta(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-check"></i> Save</button>
           <button onclick="showAddTrackToLotModal(${lotId})" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-plus"></i> Add Track</button>
           <button onclick="downloadForAVID(${lotId}, '${esc(lotName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-download"></i> Download for AVID</button>
+          <button onclick="downloadLotFromB2(${lotId}, '${esc(lotName)}')" title="Download every stem in this lot from B2 to your Downloads folder" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#8FAF9B;color:#fff;cursor:pointer;font-family:inherit;font-weight:500" onmouseover="this.style.background='#6F927E'" onmouseout="this.style.background='#8FAF9B'"><i class="ti ti-cloud-download"></i> Download Lot</button>
           <button onclick="exportAvidComments(${lotId}, '${esc(lotName)}')" style="display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-download"></i> AVID Comments</button>
           <button onclick="deleteLot(${lotId}, '${esc(lotName)}')" style="margin-left:auto;display:inline-flex;align-items:center;gap:5px;padding:5px 13px;font-size:12px;border:none;border-radius:var(--radius-sm);background:#C17A5E;color:#fff;cursor:pointer;font-family:inherit;font-weight:500"><i class="ti ti-trash"></i> Delete</button>
         </div>
