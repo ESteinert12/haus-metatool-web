@@ -119,3 +119,21 @@ Also regenerated `royalty-report-by-song.csv` with a corrected normTitle (hyphen
 convert to spaces before stripping punctuation, matching the production parser) -- this merged a
 few titles that had been incorrectly split (e.g. "American Pickers-Cues" and "American Pickers
 Cues" were two separate rows before, now one at $61,380.05). 6,775 -> 6,770 distinct titles.
+
+## Update 2026-10-20: episode reference import (suggest-only)
+
+Kyle uploaded `episodes.csv`. Profiled it before writing any code:
+
+- It's **not** American-Pickers-only. It's a cross-show master episode list: 1,040 raw rows (977 after blank-title rows are dropped), spanning show-code prefixes AP (American Pickers, 383), SN (Snapped, 125), BOAP (113), ZOO (46), FA (43), ZOOSD, VPR, and ~20 smaller shows. The SN names cross-check against the pre-existing `BMI episode ids.csv` already in Kyle's Downloads (same Snapped victim-name style titles), which corroborates this is a real, maintained reference, not a one-off.
+- Verified match quality against real BMI American Pickers statement data (the only way to know if this is useful, not a guess): of 317 distinct `EPISODE NAME` values in the BMI statements, 78.5% matched this file's titles exactly, another ~7% were near-misses where BMI drops a leading "A"/"The" article the episode file keeps, and ~5% were "Best of ..." clip/compilation episodes with no original air date (legitimately unmatchable). Net: ~90% of real, non-compilation episodes match.
+- Asked Kyle directly what this file is for, rather than assume: confirmed it's meant to be imported as a maintained reference, used to **suggest** an episode (title/code/air date) for a human to confirm next to a royalty line's show/episode context -- never auto-linked, same posture the title-matching has always had.
+
+Built:
+- `royalty-import.js`: `parseEpisodeReferenceFile()`. Handles a real quirk confirmed on the actual file -- it arrives with **CR-only line endings** (no `\n` at all; a plain `.split('\n')` reads the whole file as a single line). Dry-run verified end-to-end against the real file on Kyle's machine: 977 rows, spot-checked "NO STONER LEFT UNTURNED" -> `AP8192`, aired `2016-06-15`, matching the EPISODE NAME seen in real BMI statement data.
+- `api.js`: `episode_reference_imports` / `episode_reference` tables (own try/catch, same pattern as every other schema block here). `importEpisodeReference()` replaces a prior import under the same filename rather than erroring or duplicating -- intentionally different from the royalty-statement dedup, because this is a reference list meant to be kept current, not a payment record where a duplicate means double-counted money. Three routes: `POST /api/episode-reference/import`, `GET /api/episode-reference` (status/listing), `GET /api/episode-reference/suggest?title=` (exact-normalized-title lookup, read-only, never writes).
+- `index.html`: "Import Episode List" button + status indicator on the Royalties tab header; a "suggest episode" link on each line's show/episode cell that calls the suggest endpoint on click and renders candidates inline. No new write path from the UI -- this is display-only, exactly as scoped.
+
+Not done / still open:
+- This is **not wired into the cue-sheet `episodes` table** and deliberately so -- that table's join key (`program`, `episode_num`) has no verified correspondence to this file's `show_code` across all 5 PRO statement formats. Treat these as two separate reference points until someone verifies a real join key.
+- Like the rest of this feature, never run against a live DB (cloud environment can't reach Neon). Needs the same dry run from Erik's terminal before merging.
+- All 5 `index.html` inline `<script>` blocks and both `.js` files re-verified with `node -c` after this change.
