@@ -535,11 +535,32 @@ function suggestEpisodeJoin(episodeNum, referenceRows, program) {
     }
   }
 
-  // Path 2: MUSIC-FINAL-style -- episode_num is actually a stored filename
-  // stem. Strip the leading show/episode code tokens and the MUSIC FINAL
-  // marker (in either word order, as seen in real filenames), match what's
-  // left as a normalized title -- same exact-match-only posture as
-  // matchLineToTitles.
+  // Path 2: American Pickers "MUSIC FINAL" filename stem, reconstructing the
+  // real SKU directly rather than fuzzy-matching a stripped title. Kyle
+  // confirmed the SKU grammar directly: AP + season + 3-digit episode, no
+  // separator (e.g. "AP10314" = season 10, episode 314). Verified against
+  // all 23 real plain-format filenames in Kyle's Downloads: season/episode
+  // decode cleanly for every one (season range 7-13, all real), and 21 of
+  // 23 reconstructed SKUs find an exact title match in episode_reference
+  // (the other 2 are just episodes not yet in Kyle's reference list, not a
+  // parsing miss -- confirmed by eye). Deliberately does NOT match the
+  // "SFP" short-form-promo filename variant (e.g. real file "AP12 SFP
+  // 403_32_Smokin Find_FINAL MUSIC.xlsx") -- that has a different, not-yet-
+  // understood numbering (the "32" doesn't correspond to anything in
+  // episode_reference) and it's a product question whether a promo clip
+  // should even link to the same episode row, not something to guess here.
+  const apMusicFinal = /^AP(\d{1,2})\s+(\d{3})\s+.+?\s+MUSIC\s*FINAL$/i.exec(trimmed);
+  if (apMusicFinal) {
+    const [, season, ep] = apMusicFinal;
+    const reconstructedCode = `AP${season}${ep}`;
+    const candidates = referenceRows.filter(r => r.showCode === reconstructedCode);
+    if (candidates.length) return { strategy: 'ap-filename-sku', candidates, reconstructedCode };
+  }
+
+  // Path 3: any other stored-filename shape -- fall back to stripping the
+  // MUSIC FINAL marker and leading code tokens, matching what's left as a
+  // normalized title. Weaker than path 2 (no code to cross-check against),
+  // same exact-match-only posture as matchLineToTitles.
   const stripped = trimmed
     .replace(/\bMUSIC\s*FINAL\b/i, '')
     .replace(/\bFINAL\s*MUSIC\b/i, '')
