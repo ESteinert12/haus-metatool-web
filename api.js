@@ -32,7 +32,7 @@ const { Pool }   = require('pg')
 const multer     = require('multer')
 const IntakeIntegration = require('./intake-integration.js')
 const { parseCueSheetFile, matchCueToTitles, normTitle, titleToCamelKey } = require('./cue-sheet-import.js')
-const { parseRoyaltyStatementFile, matchLineToTitles } = require('./royalty-import.js')
+const { parseRoyaltyStatementFile, parseEpisodeReferenceFile, matchLineToTitles } = require('./royalty-import.js')
 
 const compression = require('compression')
 
@@ -1030,6 +1030,42 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_royalty_lines_sku ON royalty_statement_lines(matched_sku_root)`)
     console.log('✅ royalty tracker tables ready')
   } catch (e) { console.warn('[schema] royalty tracker tables:', e.message) }
+
+  // ─── Episode reference import (added 2026-10) ─────────────────────────
+  // Kyle's own maintained cross-show episode master list (title/show
+  // code/air date), imported so an unresolved royalty line's show/episode
+  // name can be matched against it and SUGGESTED to a human -- never
+  // auto-linked to a royalty line or to the separate cue-sheet `episodes`
+  // table, which uses its own (program, episode_num) key with no verified
+  // join to this file (see royalty-import.js header comment). One row per
+  // title/show-code pair; a whole re-import replaces the prior one under
+  // the same source_filename rather than accumulating duplicates.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS episode_reference_imports (
+        id              SERIAL PRIMARY KEY,
+        source_filename TEXT NOT NULL,
+        row_count       INTEGER,
+        imported_by     TEXT,
+        imported_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS episode_reference (
+        id                SERIAL PRIMARY KEY,
+        import_id         INTEGER NOT NULL REFERENCES episode_reference_imports(id) ON DELETE CASCADE,
+        show_code         TEXT,
+        title_raw         TEXT NOT NULL,
+        title_normalized  TEXT NOT NULL,
+        air_date          DATE,
+        month             SMALLINT,
+        season            TEXT,
+        year              SMALLINT
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_episode_reference_title ON episode_reference(title_normalized)`)
+    console.log('✅ episode reference tables ready')
+  } catch (e) { console.warn('[schema] episode reference tables:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -8037,6 +8073,89 @@ app.get('/api/royalties/title-search', async (req, res) => {
     const q = `%${(req.query.q || '').trim()}%`
     const r = await pgPool.query(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q])
     res.json({ ok: true, titles: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ─── Episode reference import/lookup (added 2026-10) ───────────────────────
+// Suggest-only, never auto-linked -- see api.js schema comment and
+// royalty-import.js's parseEpisodeReferenceFile header for the full
+// reasoning and the real match-rate verification this was built from.
+async function importEpisodeReference(filePath, origName, importedBy) {
+  const parsed = parseEpisodeReferenceFile(filePath)
+  if (!parsed.rows.length) {
+    return { ok: false, origName, error: `No usable rows parsed from "${origName}" -- check it's the expected title/code/date CSV.` }
+  }
+
+  // A re-upload of the same filename (e.g. Kyle's list gets a new episode
+  // added and he re-exports) REPLACES the prior import rather than
+  // duplicating or erroring -- this is a reference list meant to be kept
+  // current, unlike a royalty statement where re-importing the same period
+  // would double-count real money.
+  const existing = await pgPool.query(`SELECT id FROM episode_reference_imports WHERE source_filename = $1`, [origName])
+  if (existing.rows.length) {
+    await pgPool.query(`DELETE FROM episode_reference_imports WHERE id = $1`, [existing.rows[0].id]) // cascades to episode_reference rows
+  }
+
+  const importRow = await pgPool.query(
+    `INSERT INTO episode_reference_imports (source_filename, row_count, imported_by) VALUES ($1,$2,$3) RETURNING id`,
+    [origName, parsed.rows.length, importedBy || null]
+  )
+  const importId = importRow.rows[0].id
+
+  for (const row of parsed.rows) {
+    await pgPool.query(
+      `INSERT INTO episode_reference (import_id, show_code, title_raw, title_normalized, air_date, month, season, year)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [importId, row.showCode, row.titleRaw, row.titleNormalized, row.airDate, row.month, row.season, row.year]
+    )
+  }
+
+  return { ok: true, origName, importId, rowCount: parsed.rows.length, replaced: existing.rows.length > 0 }
+}
+
+app.post('/api/episode-reference/import', upload.single('file'), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.file) return res.json({ ok: false, error: 'No file provided' })
+  try {
+    const origName = req.file.originalname || req.file.path
+    const result = await importEpisodeReference(req.file.path, origName, req.session?.user?.username)
+    fs.unlinkSync(req.file.path)
+    res.json(result)
+  } catch (e) {
+    console.error('[episode-reference/import]', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
+app.get('/api/episode-reference', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const r = await pgPool.query(`
+      SELECT i.*, COUNT(e.id) AS actual_row_count
+      FROM episode_reference_imports i
+      LEFT JOIN episode_reference e ON e.import_id = i.id
+      GROUP BY i.id
+      ORDER BY i.imported_at DESC
+    `)
+    res.json({ ok: true, imports: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Exact normalized-title suggestion lookup -- same exact-match-only posture
+// as matchLineToTitles(), for the same reason: a wrong guess here points a
+// human at the wrong episode. Used by the Royalties line detail view to
+// show a candidate (code + air date) next to show_name/episode_name for a
+// human to confirm -- this endpoint never writes anything.
+app.get('/api/episode-reference/suggest', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const titleNorm = normTitle((req.query.title || '').trim())
+    if (!titleNorm) return res.json({ ok: true, candidates: [] })
+    const r = await pgPool.query(
+      `SELECT show_code, title_raw, air_date, season, year FROM episode_reference WHERE title_normalized = $1 ORDER BY air_date LIMIT 10`,
+      [titleNorm]
+    )
+    res.json({ ok: true, candidates: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 

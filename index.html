@@ -1157,6 +1157,9 @@ webview{flex:1;border:none}
       <span style="font-size:15px;font-weight:600;color:#1a2226">Royalties</span>
       <span style="font-size:11px;color:#4b5a5e">Import PRO royalty statements (BMI/SESAC/ASCAP/SOCAN), match against the catalog.</span>
       <div style="flex:1"></div>
+      <span id="episode-reference-status" style="font-size:11px;color:#4b5a5e"></span>
+      <input type="file" id="episode-reference-file-input" accept=".csv" style="display:none" onchange="episodeReferenceUpload(this.files[0])">
+      <button class="btn" onclick="document.getElementById('episode-reference-file-input').click()" title="Episode title/code/air-date reference list, used only to suggest an episode match for a human to confirm -- never auto-linked"><i class="ti ti-calendar"></i> Import Episode List</button>
       <input type="file" id="royalty-file-input" accept=".csv" style="display:none" onchange="royaltyUpload(this.files[0])">
       <button class="btn btn-primary" onclick="document.getElementById('royalty-file-input').click()"><i class="ti ti-upload"></i> Import Statement</button>
     </div>
@@ -8819,6 +8822,51 @@ async function loadRoyaltiesSection() {
   }
   royaltyStatementsCache = r.statements
   renderRoyaltyList()
+  refreshEpisodeReferenceStatus()
+}
+
+// Episode reference list: a human-maintained show/episode title + air-date
+// lookup, imported separately from royalty statements. Only ever used to
+// SUGGEST a candidate episode next to a line's show/episode context -- see
+// api.js's episode_reference schema comment and royalty-import.js's
+// parseEpisodeReferenceFile header for why it's never auto-linked.
+async function refreshEpisodeReferenceStatus() {
+  const el = document.getElementById('episode-reference-status')
+  if (!el) return
+  const r = await fetch('/api/episode-reference').then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok || !r.imports.length) { el.textContent = 'No episode reference list imported'; return }
+  const latest = r.imports[0]
+  el.textContent = `Episode list: ${latest.actual_row_count} rows (${esc(latest.source_filename)})`
+}
+
+async function episodeReferenceUpload(file) {
+  if (!file) return
+  const fd = new FormData()
+  fd.append('file', file)
+  const statusEl = document.getElementById('episode-reference-status')
+  if (statusEl) statusEl.textContent = 'Importing episode list…'
+  try {
+    const r = await fetch('/api/episode-reference/import', { method: 'POST', body: fd }).then(r => r.json())
+    if (!r.ok) { alert(r.error || 'Import failed'); return }
+    if (statusEl) statusEl.textContent = `Imported ${r.rowCount} rows${r.replaced ? ' (replaced prior import)' : ''}`
+  } finally {
+    document.getElementById('episode-reference-file-input').value = ''
+  }
+}
+
+// Suggest (never apply) a candidate episode for a royalty line, by exact
+// normalized-title match against the imported reference list -- same
+// exact-match-only posture as title matching, for the same reason.
+async function suggestEpisodeForLine(lineId, queryTitle) {
+  const el = document.getElementById(`episode-suggest-${lineId}`)
+  if (!el) return
+  el.textContent = 'Looking…'
+  const r = await fetch(`/api/episode-reference/suggest?title=${encodeURIComponent(queryTitle)}`).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { el.textContent = 'Lookup failed'; return }
+  if (!r.candidates.length) { el.textContent = 'No match in episode list'; return }
+  el.innerHTML = r.candidates.map(c =>
+    `<div style="font-size:10px;color:#2e7d32">${esc(c.title_raw)} ${c.show_code ? `(${esc(c.show_code)})` : ''}${c.air_date ? ` · aired ${c.air_date.slice(0,10)}` : ''}</div>`
+  ).join('')
 }
 
 function renderRoyaltyList() {
@@ -8882,8 +8930,11 @@ function renderRoyaltyLines(lines) {
     // show_name/episode_name are display-only context for a human resolving
     // an unmatched/ambiguous line -- not used for matching. Often blank for
     // non-TV usage (streaming/digital) -- that's normal, not missing data.
+    const episodeQueryTitle = line.episode_name || line.show_name || ''
     const episodeContext = (line.show_name || line.episode_name)
-      ? `${esc(line.show_name || '')}${line.show_name && line.episode_name ? ' — ' : ''}${esc(line.episode_name || '')}`
+      ? `${esc(line.show_name || '')}${line.show_name && line.episode_name ? ' — ' : ''}${esc(line.episode_name || '')}
+         <div><a href="#" data-suggest-title="${esc(episodeQueryTitle)}" data-line-id="${line.id}" onclick="event.preventDefault();suggestEpisodeForLine(this.dataset.lineId, this.dataset.suggestTitle)" style="font-size:10px">suggest episode</a></div>
+         <div id="episode-suggest-${line.id}"></div>`
       : '<span style="color:var(--text3)">—</span>'
     return `
       <tr style="border-bottom:1px solid var(--border)">

@@ -391,6 +391,51 @@ function parseRoyaltyStatementFile(filePath) {
   return { format, ...parsed };
 }
 
+// ─── Episode reference import (added 2026-10) ──────────────────────────────
+// A separate, explicit import -- NOT part of sniffFormat()/the PRO-statement
+// pipeline above. This is Kyle's own maintained cross-show episode master
+// list (confirmed on the real file: 1,040 rows spanning many shows by code
+// prefix -- AP = American Pickers, SN = Snapped, BOAP, ZOO, FA, etc. --
+// not an American-Pickers-only list, verified by checking the code prefixes
+// and cross-referencing SN-prefixed titles against the existing
+// "BMI episode ids.csv" Snapped name list already in Kyle's Downloads).
+// Used ONLY to SUGGEST an episode match next to an unresolved royalty line
+// for a human to confirm -- never auto-linked. Verified against real BMI
+// American Pickers statement data: ~78.5% of 317 distinct episode names
+// matched exactly, another ~7% were near-misses from BMI dropping a leading
+// "A"/"The" article, and ~5% were "Best of ..." clip/compilation episodes
+// with no original air date to match. No format has ever been guessed here.
+//
+// Known real quirk: the raw file arrives with CR-only line endings (no \n
+// at all) -- a plain .split('\n') treats the whole file as one line.
+function parseAirDate(s) {
+  const m = /^(\d{1,2})\/(\d{1,2})\/(\d{4})$/.exec((s || '').trim());
+  if (!m) return null;
+  const [, mo, d, y] = m;
+  return `${y}-${mo.padStart(2, '0')}-${d.padStart(2, '0')}`;
+}
+
+function parseEpisodeReferenceFile(filePath) {
+  const raw = fs.readFileSync(filePath, 'utf8');
+  const rawLines = raw.split(/\r\n|\r|\n/).filter(l => l.trim().length);
+  const rows = [];
+  for (const line of rawLines) {
+    const f = splitCsvLine(line).map(stripQuotes);
+    const title = (f[0] || '').trim();
+    if (!title) continue; // blank-title guard, same principle as every PRO parser above
+    rows.push({
+      titleRaw: title,
+      titleNormalized: normTitle(title),
+      showCode: (f[1] || '').trim() || null,
+      airDate: parseAirDate(f[2]),
+      month: f[3] ? (parseInt(f[3], 10) || null) : null,
+      season: (f[4] || '').trim() || null,
+      year: f[5] ? (parseInt(f[5], 10) || null) : null,
+    });
+  }
+  return { rows };
+}
+
 // Same posture as cue-sheet-import.js's matchCueToTitles(): exact
 // normalized-title match only, never fuzzy. Multiple candidates -> ambiguous,
 // human picks; zero -> unmatched, human can search/override. A wrong
@@ -408,6 +453,7 @@ function matchLineToTitles(line, titlesIndex) {
 module.exports = {
   sniffFormat,
   parseRoyaltyStatementFile,
+  parseEpisodeReferenceFile,
   matchLineToTitles,
   normTitle,
   titleToCamelKey,
