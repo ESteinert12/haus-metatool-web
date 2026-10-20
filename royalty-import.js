@@ -450,11 +450,116 @@ function matchLineToTitles(line, titlesIndex) {
   return { status: 'unmatched', candidates: [] }
 }
 
+// ─── Episode join key: episode_reference <-> live `episodes` table ─────────
+// (verified 2026-10-20, against real artifacts, not guessed)
+//
+// Kyle's hypothesis: the show_code values already in episode_reference
+// (e.g. "SN3021", "AP12385") should line up with episode_num in the live
+// `episodes` table, since both ultimately come from the same real cue
+// sheets. Checked this against real files on Kyle's machine before writing
+// anything:
+//
+//   - SESAC cue sheets (Cue_Sheet_Details_*.csv) report a clean numeric
+//     "Episode Number" field. Real example: Episode Title "Patricia Brown",
+//     Episode Number 3021, Program "Snapped", Air Date 06/20/2021 --
+//     matches episode_reference's "PATRICIA BROWN" / "SN3021" row EXACTLY
+//     (title + the numeric suffix of show_code + air date). Checked a
+//     second one too: "Georgina Misener" / Episode Number 3125 / Snapped ->
+//     episode_reference's "SN3125" -- exact again. So for SESAC-sourced
+//     shows, episode_num IS the numeric tail of show_code.
+//
+//   - Production "MUSIC FINAL" xlsx cue sheets -- the American Pickers
+//     format, and the dominant show in the royalty data -- are different.
+//     cue-sheet-import.js's parseFormatB() leaves episodeNum blank, so
+//     importOneCueSheet()'s fallback stores the RAW FILENAME STEM as
+//     episode_num in the live DB (e.g. "AP12 385 Evel Empire MUSIC
+//     FINAL"), not a clean code. Checked 4 real filenames on Kyle's machine
+//     ("AP12 385 Evel Empire MUSIC FINAL.xlsx", "AP12 390 Speedway Thrills
+//     MUSIC FINAL.xlsx", etc.) against episode_reference: the TITLE
+//     embedded in each filename matches an episode_reference row exactly
+//     ("Evel Empire" -> AP12385, "Speedway Thrills" -> AP12390), but there
+//     is no clean number to match directly -- the join for this format has
+//     to go through the title, not a number.
+//
+// Different real formats, different real join strategies. This tries the
+// numeric path first (only when episode_num is a bare integer), then the
+// filename-title path (only when it looks like a stored filename), and
+// returns 'none' rather than guessing when neither fits. Always a
+// candidate for a human to confirm -- same posture as every other match in
+// this pipeline, never an automatic write.
+// Show-code prefix -> real program name, but ONLY for prefixes actually
+// confirmed against a real cue sheet this session (never extrapolated to
+// the ~20 other prefixes in the file -- that would be exactly the kind of
+// guess this codebase's rule is against). Each entry here has a real
+// Cue_Sheet_Details_*.csv backing it:
+//   SN   -> "Snapped"                (Patricia Brown/3021, Georgina Misener/3125)
+//   SBB  -> "Snapped: Behind Bars"   (Traci Wolfe/103)
+// Add a prefix here only once it's been checked against a real cue sheet
+// the same way -- see royalty-tracker handoff doc for how to verify one.
+// Keys are the program name run through the SAME normalization as titles
+// (normTitle strips punctuation/case) so "Snapped: Behind Bars" and
+// "SNAPPED BEHIND BARS" are the same key -- program names arrive from
+// different real sources (cue sheet metadata lines, xlsx fields) with
+// inconsistent punctuation, confirmed when "Snapped: Behind Bars" first
+// failed to match this literally.
+const VERIFIED_PREFIX_PROGRAMS = {
+  SN: normTitle('Snapped'),
+  SBB: normTitle('Snapped: Behind Bars'),
+};
+
+function suggestEpisodeJoin(episodeNum, referenceRows, program) {
+  const trimmed = (episodeNum || '').trim();
+  if (!trimmed) return { strategy: 'none', candidates: [] };
+
+  // Path 1: SESAC-style -- episode_num is already a bare integer. A short
+  // numeric ID collides across shows (confirmed on real data: "103" alone
+  // matches 11 different shows in the reference list -- SN, SBB, ZOOSD,
+  // AQUA, TEN, etc. all happen to have an episode numbered 103) -- so a raw
+  // numeric suffix match is NEVER returned as a single confident answer
+  // without the real episodes.program value narrowing it to a prefix
+  // that's actually been verified to mean that program. Without a usable
+  // program hint, every numeric match is 'ambiguous' and a human picks.
+  if (/^\d+$/.test(trimmed)) {
+    const allNumericCandidates = referenceRows.filter(r => r.showCode && new RegExp(`${trimmed}$`).test(r.showCode) && /\d/.test(r.showCode));
+    const programNorm = normTitle((program || '').trim());
+    const verifiedPrefix = programNorm
+      ? Object.keys(VERIFIED_PREFIX_PROGRAMS).find(p => VERIFIED_PREFIX_PROGRAMS[p] === programNorm)
+      : null;
+    if (verifiedPrefix) {
+      const narrowed = allNumericCandidates.filter(r => r.showCode.startsWith(verifiedPrefix));
+      if (narrowed.length === 1) return { strategy: 'numeric-suffix', candidates: narrowed };
+      if (narrowed.length > 1) return { strategy: 'ambiguous', candidates: narrowed };
+      // program given but didn't match a verified prefix's candidates -- fall through to title path below
+    } else if (allNumericCandidates.length) {
+      return { strategy: 'ambiguous', candidates: allNumericCandidates };
+    }
+  }
+
+  // Path 2: MUSIC-FINAL-style -- episode_num is actually a stored filename
+  // stem. Strip the leading show/episode code tokens and the MUSIC FINAL
+  // marker (in either word order, as seen in real filenames), match what's
+  // left as a normalized title -- same exact-match-only posture as
+  // matchLineToTitles.
+  const stripped = trimmed
+    .replace(/\bMUSIC\s*FINAL\b/i, '')
+    .replace(/\bFINAL\s*MUSIC\b/i, '')
+    .replace(/^[A-Z]+\d*\s+(SFP\s+)?\d+[_\s]*\d*[_\s]*/i, '')
+    .trim();
+  if (stripped) {
+    const norm = normTitle(stripped);
+    const candidates = referenceRows.filter(r => r.titleNormalized === norm);
+    if (candidates.length) return { strategy: 'filename-title', candidates };
+  }
+
+  return { strategy: 'none', candidates: [] };
+}
+
 module.exports = {
   sniffFormat,
   parseRoyaltyStatementFile,
   parseEpisodeReferenceFile,
   matchLineToTitles,
+  suggestEpisodeJoin,
   normTitle,
   titleToCamelKey,
 };
