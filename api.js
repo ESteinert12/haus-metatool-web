@@ -1810,6 +1810,8 @@ app.get('/api/pg/status', async (req, res) => {
 })
 
 const ebrLotExport = require('./ebr-lot-export')
+const ebrAckImport = require('./ebr-ack-import')
+const ebrFtp = require('./ebr-ftp')
 
 // Atomically claims the next ebr_export_log sequence number and inserts the
 // log row under the same advisory lock generate-ebr-export.js's --live path
@@ -1894,6 +1896,70 @@ app.post('/api/ebr/auto-export-lot', async (req, res) => {
     res.json(result)
   } catch (e) {
     res.json({ ok: false, error: e.message })
+  }
+})
+
+// Pulls new MusicMark EBR acknowledgment files from HAUS's own FTP server
+// (NOT the MusicMark submission FTP -- separate thing, still blocked on
+// credentials, see engineering_notes.md) and imports them with the exact
+// same logic the in-app "Import Acknowledgment File" button and
+// import-ebr-acks.js already use (ebr-ack-import.js). Unlike that button
+// (window.haus.ebr.pickAckFile/readAckFile -- Electron-only, silently
+// unavailable in a plain browser session), this is a plain HTTP route, so
+// it works for any logged-in user in a browser, no HAUS Workspace.app
+// desktop build required.
+//
+// On-demand only, by design (2026-10-21 decision, see
+// handoff-2026-10-21-ebr-ack-ftp-autofetch-spec.md in the project docs) --
+// nothing calls this on a timer; a human clicks the button and sees the
+// result each time.
+//
+// Read-only against the FTP server: never deletes/moves/renames anything
+// there. "Already imported" is tracked purely by filename against
+// ebr_acknowledgments.source_file (ebrAckImport.alreadyImported) -- see
+// that file for the accepted limitation on filename reuse.
+//
+// Requires FTP_ACK_HOST / FTP_ACK_USER / FTP_ACK_PASS (and optionally
+// FTP_ACK_PORT / FTP_ACK_DIR / FTP_ACK_SECURE) set in the server's own
+// environment -- never taken from the request, never hardcoded.
+app.post('/api/ebr/fetch-acks-from-ftp', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Not connected to database' })
+  const cfg = ebrFtp.configFromEnv()
+  if (!cfg) {
+    return res.json({ ok: false, error: 'FTP_ACK_HOST / FTP_ACK_USER / FTP_ACK_PASS are not set on the server' })
+  }
+  const client = await pgPool.connect()
+  try {
+    await ebrAckImport.ensureAckTable(client)
+    const { downloaded, skippedAlreadyImported, errors } = await ebrFtp.fetchNewAckFiles(client, cfg)
+
+    const results = []
+    let totalImported = 0, totalUnmatched = 0, totalFlagged = 0
+    for (const f of downloaded) {
+      const r = await ebrAckImport.importAckFile(client, f.localPath, f.fileName)
+      results.push({ fileName: f.fileName, ...r })
+      if (r.ok) {
+        totalImported += r.imported
+        totalUnmatched += r.unmatched
+        totalFlagged += r.flagged
+      }
+    }
+
+    res.json({
+      ok: true,
+      filesFound: downloaded.length + skippedAlreadyImported.length,
+      alreadyImported: skippedAlreadyImported.length,
+      newFiles: downloaded.length,
+      rowsImported: totalImported,
+      rowsUnmatched: totalUnmatched,
+      rowsFlagged: totalFlagged,
+      files: results,
+      downloadErrors: errors
+    })
+  } catch (e) {
+    res.json({ ok: false, error: e.message })
+  } finally {
+    client.release()
   }
 })
 

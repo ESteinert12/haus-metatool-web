@@ -11,12 +11,9 @@
  * safe to re-run (already-imported files are not re-inserted unless you
  * pass --force).
  *
- * Parsing logic (header names, trimming, blank-row filtering) is copied
- * from main.js's `ebr-read-ack-file` IPC handler. DB logic (table shape,
- * insert, pro_registrations sync) is copied from index.html's
- * ebrEnsureAckTable / ebrImportAckFile / ebrSyncProRegistrations. Nothing
- * here is new business logic — it's the existing, already-working import
- * path, just run in a loop instead of through 46 file-picker dialogs.
+ * Parsing + DB logic now lives in ebr-ack-import.js (extracted 2026-10-21
+ * so the new FTP-fetch route in api.js could reuse the exact same code
+ * instead of becoming a third copy — this script's behavior is unchanged).
  *
  * Usage:
  *   DATABASE_URL=postgres://... node import-ebr-acks.js [folder] [--dry-run] [--force]
@@ -38,8 +35,8 @@
 const fs = require('fs')
 const path = require('path')
 const os = require('os')
-const XLSX = require('xlsx')
 const { Pool } = require('pg')
+const ebrAckImport = require('./ebr-ack-import')
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -57,74 +54,6 @@ const pool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false }
 })
-
-// ---- parsing (mirrors main.js ebr-read-ack-file) ----------------------
-function readAckFile(filePath) {
-  const wb = XLSX.readFile(filePath)
-  const sheetName = wb.SheetNames[0]
-  const sheet = wb.Sheets[sheetName]
-  const aoa = XLSX.utils.sheet_to_json(sheet, { header: 1, defval: '' })
-  if (!aoa.length) return { ok: false, error: 'Sheet is empty' }
-
-  const norm = (s) => String(s || '').trim().toLowerCase().replace(/[\s_]+/g, '')
-  const headerRow = aoa[0].map(norm)
-  const colMap = {
-    workTitle: ['worktitle'],
-    submitterWorkId: ['submitterworkid'],
-    recipientWorkId: ['recipientworkid'],
-    iswc: ['iswc'],
-    status: ['transactionstatus'],
-    comments: ['comments']
-  }
-  const idx = {}
-  for (const [key, names] of Object.entries(colMap)) {
-    idx[key] = headerRow.findIndex(h => names.includes(h))
-  }
-  if (idx.submitterWorkId === -1 || idx.status === -1) {
-    return { ok: false, error: 'Unrecognized ack file format — missing Submitter_Work_ID or Transaction_Status column' }
-  }
-
-  const rows = aoa.slice(1)
-    .filter(r => r.some(c => String(c || '').trim() !== ''))
-    .map(r => ({
-      workTitle: idx.workTitle >= 0 ? String(r[idx.workTitle] || '').trim() : '',
-      submitterWorkId: idx.submitterWorkId >= 0 ? String(r[idx.submitterWorkId] || '').trim() : '',
-      recipientWorkId: idx.recipientWorkId >= 0 ? String(r[idx.recipientWorkId] || '').trim() : '',
-      iswc: idx.iswc >= 0 ? String(r[idx.iswc] || '').trim() : '',
-      status: idx.status >= 0 ? String(r[idx.status] || '').trim() : '',
-      // comments can carry embedded \r line breaks and huge trailing
-      // whitespace in real MusicMark files — collapse for storage/CSV.
-      comments: idx.comments >= 0 ? String(r[idx.comments] || '').replace(/\s+/g, ' ').trim() : ''
-    }))
-
-  return { ok: true, rows, fileName: path.basename(filePath) }
-}
-
-// ---- DB helpers (mirrors index.html) -----------------------------------
-async function ensureAckTable(client) {
-  await client.query(`CREATE TABLE IF NOT EXISTS ebr_acknowledgments (
-    ack_id             SERIAL PRIMARY KEY,
-    sku_root           TEXT,
-    work_title         TEXT,
-    recipient_work_id  TEXT,
-    iswc               TEXT,
-    status             TEXT NOT NULL,
-    comments           TEXT,
-    source_file        TEXT,
-    imported_at        TIMESTAMPTZ NOT NULL DEFAULT NOW()
-  )`)
-}
-
-async function syncProRegistrations(client, skuRoot, ackStatus) {
-  const prStatus = ackStatus === 'RA' ? 'registered' : (ackStatus === 'RJ' ? 'failed' : 'pending')
-  await client.query(
-    `UPDATE pro_registrations pr
-     SET status = $1
-     FROM mix_stems ms
-     WHERE pr.mix_stem_id = ms.mix_stem_id AND ms.sku_root = $2`,
-    [prStatus, skuRoot]
-  )
-}
 
 function csvEscape(v) {
   const s = String(v == null ? '' : v)
@@ -153,65 +82,35 @@ async function main() {
   let grandImported = 0, grandUnmatched = 0, grandSkippedFiles = 0
 
   try {
-    await ensureAckTable(client)
+    await ebrAckImport.ensureAckTable(client)
 
     for (const file of files) {
       const filePath = path.join(folder, file)
-      let parsed
-      try {
-        parsed = readAckFile(filePath)
-      } catch (e) {
-        console.error(`✗ ${file}: failed to read (${e.message})`)
-        continue
-      }
-      if (!parsed.ok) {
-        console.error(`✗ ${file}: ${parsed.error}`)
-        continue
-      }
 
       if (!force) {
-        const existing = await client.query(
-          `SELECT 1 FROM ebr_acknowledgments WHERE source_file = $1 LIMIT 1`,
-          [file]
-        )
-        if (existing.rows.length) {
+        const already = await ebrAckImport.alreadyImported(client, file)
+        if (already) {
           console.log(`– ${file}: already imported, skipping (use --force to re-import)`)
           grandSkippedFiles++
           continue
         }
       }
 
-      let imported = 0, unmatched = 0
-      for (const r of parsed.rows) {
-        const skuRoot = r.submitterWorkId
-        if (!skuRoot) continue
-
-        const check = await client.query(`SELECT sku_root FROM titles WHERE sku_root = $1`, [skuRoot])
-        if (!check.rows.length) {
-          unmatched++
-          unmatchedRows.push({ file, ...r })
-          continue
-        }
-
-        statusTotals[r.status] = (statusTotals[r.status] || 0) + 1
-        if (r.status && r.status !== 'AC' && r.status !== 'RA') {
-          flaggedRows.push({ file, ...r })
-        }
-
-        if (!dryRun) {
-          await client.query(
-            `INSERT INTO ebr_acknowledgments (sku_root, work_title, recipient_work_id, iswc, status, comments, source_file)
-             VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-            [skuRoot, r.workTitle, r.recipientWorkId, r.iswc, r.status, r.comments, file]
-          )
-          await syncProRegistrations(client, skuRoot, r.status)
-        }
-        imported++
+      const result = await ebrAckImport.importAckFile(client, filePath, file, { dryRun })
+      if (!result.ok) {
+        console.error(`✗ ${file}: ${result.error}`)
+        continue
       }
 
-      grandImported += imported
-      grandUnmatched += unmatched
-      console.log(`${dryRun ? '≈' : '✓'} ${file}: ${imported} matched${dryRun ? ' (not written)' : ' & recorded'}${unmatched ? `, ${unmatched} unmatched sku_root` : ''}`)
+      unmatchedRows.push(...result.unmatchedRows)
+      flaggedRows.push(...result.flaggedRows)
+      for (const [status, count] of Object.entries(result.statusTotals)) {
+        statusTotals[status] = (statusTotals[status] || 0) + count
+      }
+
+      grandImported += result.imported
+      grandUnmatched += result.unmatched
+      console.log(`${dryRun ? '≈' : '✓'} ${file}: ${result.imported} matched${dryRun ? ' (not written)' : ' & recorded'}${result.unmatched ? `, ${result.unmatched} unmatched sku_root` : ''}`)
     }
   } finally {
     client.release()

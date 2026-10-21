@@ -1102,6 +1102,7 @@ webview{flex:1;border:none}
             <span style="font-size:11px;color:var(--text3)">Import MusicMark's response file, review rejections, fix writer shares, mark for re-registration.</span>
             <div style="flex:1"></div>
             <button class="btn" onclick="ebrImportAckFile()"><i class="ti ti-upload"></i> Import Acknowledgment File</button>
+            <button class="btn" onclick="ebrFetchAcksFromFtp()"><i class="ti ti-refresh"></i> Check FTP for New Acknowledgments</button>
           </div>
           <div id="ebr-ack-panel" style="border:1px solid var(--border);border-radius:8px;max-height:420px;overflow-y:auto"></div>
         </div>
@@ -9193,6 +9194,41 @@ async function ebrImportAckFile() {
     `Imported ${fileName}: ${imported} acknowledgment${imported !== 1 ? 's' : ''} recorded${unmatched ? `, ${unmatched} row(s) didn't match a title on file` : ''}.`,
     unmatched > 0
   )
+  await ebrRenderAcknowledgments()
+}
+
+// Pulls new MusicMark acknowledgment files straight from HAUS's FTP server
+// (see /api/ebr/fetch-acks-from-ftp in api.js) and imports them -- same
+// result as ebrImportAckFile() above, minus the manual
+// download-then-file-picker round trip. Works from a plain browser session
+// (no Electron/window.haus dependency), unlike the button above it.
+async function ebrFetchAcksFromFtp() {
+  ebrToast('Checking FTP for new acknowledgment files…')
+  let resp, result
+  try {
+    resp = await fetch('/api/ebr/fetch-acks-from-ftp', { method: 'POST' })
+    result = await resp.json()
+  } catch (e) {
+    alert('Failed to reach the server: ' + e.message)
+    return
+  }
+  if (!result || !result.ok) {
+    alert('FTP check failed: ' + ((result && result.error) || 'unknown error'))
+    return
+  }
+  if (!result.newFiles) {
+    ebrToast(`No new acknowledgment files on the FTP server (${result.alreadyImported} already imported previously).`)
+    return
+  }
+  const failedFiles = (result.files || []).filter(f => !f.ok)
+  ebrToast(
+    `Checked FTP: ${result.newFiles} new file${result.newFiles !== 1 ? 's' : ''}, ` +
+    `${result.rowsImported} acknowledgment${result.rowsImported !== 1 ? 's' : ''} recorded` +
+    `${result.rowsUnmatched ? `, ${result.rowsUnmatched} row(s) didn't match a title on file` : ''}` +
+    `${failedFiles.length ? `, ${failedFiles.length} file(s) failed to import (see console)` : ''}.`,
+    result.rowsUnmatched > 0 || failedFiles.length > 0
+  )
+  if (failedFiles.length) console.error('[ebrFetchAcksFromFtp] failed files:', failedFiles)
   await ebrRenderAcknowledgments()
 }
 
