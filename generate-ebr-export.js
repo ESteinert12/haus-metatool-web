@@ -34,9 +34,16 @@ const senderArg = args.find(a => a.startsWith('--sender='));
 const SENDER_CODE = (senderArg ? senderArg.split('=')[1] : 'H03').trim().toUpperCase().slice(0, 3);
 const outArg = args.find(a => a.startsWith('--out='));
 const OUT_DIR = outArg ? outArg.split('=')[1] : __dirname;
+const batchSizeArg = args.find(a => a.startsWith('--batch-size='));
+const BATCH_SIZE = batchSizeArg ? parseInt(batchSizeArg.split('=')[1], 10) : null;
+if (batchSizeArg && (!Number.isInteger(BATCH_SIZE) || BATCH_SIZE <= 0)) {
+  console.error(`Invalid --batch-size value: ${batchSizeArg.split('=')[1]}`);
+  process.exit(1);
+}
 
 const SPLIT_TOLERANCE_PCT = 0.5;
 const EBR_SEQ_LOCK_KEY = 771983501;
+const csvEscape = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
 
 // Shared across index.html / generate-ebr-export.js / ebr-lot-export.js --
 // see ebr-shared.js for why this used to be three hand-synced copies.
@@ -202,10 +209,18 @@ async function run() {
   console.log(`\nFinal export population: ${finalEligible.length} titles (of ${eligible.length} otherwise-eligible).`);
   if (!finalEligible.length) { console.log('Nothing left to export after quality checks.'); await pool.end(); return; }
 
-  const rows = finalEligible.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
+  let batchEligible = finalEligible;
+  if (BATCH_SIZE && finalEligible.length > BATCH_SIZE) {
+    batchEligible = finalEligible.slice(0, BATCH_SIZE);
+    console.log(`--batch-size=${BATCH_SIZE}: this run will export the first ${batchEligible.length} of ${finalEligible.length} remaining eligible titles (same title-ASC order as the full query). ${finalEligible.length - batchEligible.length} will remain for the next run -- each --live run excludes whatever is already in ebr_export_log, so rerunning the same command gets you the next batch.`);
+  } else if (BATCH_SIZE) {
+    console.log(`--batch-size=${BATCH_SIZE}: only ${finalEligible.length} eligible title(s) remain, so this is the last batch.`);
+  }
+
+  const rows = batchEligible.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
 
   console.log('\nSample of first 3 rows (Work Title / Submitter Work ID / writer count):');
-  console.log(finalEligible.slice(0, 3).map(t => ({ title: t.title, sku_root: t.sku_root, writers: (writersByTeam[t.team_id] || []).length })));
+  console.log(batchEligible.slice(0, 3).map(t => ({ title: t.title, sku_root: t.sku_root, writers: (writersByTeam[t.team_id] || []).length })));
 
   if (!LIVE) {
     const now = new Date();
@@ -215,6 +230,12 @@ async function run() {
     const nnnn = String(seq).padStart(4, '0');
     const fileName = `EB${yy}${nnnn}${SENDER_CODE}_707.xlsx`;
     console.log(`\nWould write: ${fileName} (sequence ${seq} as of right now -- may shift by the time a live run actually claims it), ${rows.length} works.`);
+    if (BATCH_SIZE) {
+      const reviewPath = path.join(OUT_DIR, fileName.replace(/\.xlsx$/, '-review.csv'));
+      const reviewCsv = 'sku_root,title,writer_count\n' + batchEligible.map(t => [t.sku_root, t.title, (writersByTeam[t.team_id] || []).length].map(csvEscape).join(',')).join('\n') + '\n';
+      fs.writeFileSync(reviewPath, reviewCsv);
+      console.log(`Wrote ${path.basename(reviewPath)} (${batchEligible.length} rows) -- the exact titles in this batch, for eyeballing before --live. Note: sequence/filename are provisional for a dry run, so this review file's name may not match the one a --live run actually produces.`);
+    }
     console.log('\nDry run only -- no file written, no ebr_export_log row inserted. Rerun with --live to actually generate the file.');
     await pool.end();
     return;
@@ -240,12 +261,19 @@ async function run() {
     XLSX.writeFile(wb, outPath);
     console.log('Wrote', outPath);
 
+    if (BATCH_SIZE) {
+      const reviewPath = outPath.replace(/\.xlsx$/, '-review.csv');
+      const reviewCsv = 'sku_root,title,writer_count\n' + batchEligible.map(t => [t.sku_root, t.title, (writersByTeam[t.team_id] || []).length].map(csvEscape).join(',')).join('\n') + '\n';
+      fs.writeFileSync(reviewPath, reviewCsv);
+      console.log('Wrote', reviewPath, `(${batchEligible.length} rows, matches this exact export file)`);
+    }
+
     await client.query(
       `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
-      [seq, fileName, finalEligible.length, finalEligible.map(t => t.sku_root).join(',')]
+      [seq, fileName, batchEligible.length, batchEligible.map(t => t.sku_root).join(',')]
     );
     await client.query('COMMIT');
-    console.log('Logged to ebr_export_log: sequence', seq, ', title_count', finalEligible.length, '(committed under advisory lock)');
+    console.log('Logged to ebr_export_log: sequence', seq, ', title_count', batchEligible.length, '(committed under advisory lock)');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     if (outPath && fs.existsSync(outPath)) {
