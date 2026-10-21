@@ -1980,11 +1980,23 @@ app.post('/api/ebr/fetch-acks-from-ftp', async (req, res) => {
     return res.json({ ok: false, error: `FTP fetch failed: ${e.message}` })
   }
 
+  // Loaded ONCE for the whole batch (one SELECT) instead of once per row --
+  // a prior run against 2466 real rows did one SELECT per row and got hit by
+  // repeated transient Neon connection drops simply because it made 2466
+  // round trips. Matching happens in-process against this map now; only the
+  // per-matched-row INSERT/UPDATE calls still touch the DB.
+  let skuMap
+  try {
+    skuMap = await ebrAckImport.loadTitleSkuMap(db)
+  } catch (e) {
+    return res.json({ ok: false, error: `Failed to load titles for matching: ${e.message}` })
+  }
+
   const results = []
   let totalImported = 0, totalUnmatched = 0, totalFlagged = 0
   try {
     for (const f of downloaded) {
-      const r = await ebrAckImport.importAckFile(db, f.localPath, f.fileName)
+      const r = await ebrAckImport.importAckFile(db, f.localPath, f.fileName, { skuMap })
       results.push({ fileName: f.fileName, ...r })
       if (r.ok) {
         totalImported += r.imported

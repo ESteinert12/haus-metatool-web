@@ -118,6 +118,31 @@ async function getImportedFileNames(client) {
   return new Set(rows.map(r => r.source_file))
 }
 
+async function loadTitleSkuMap(client) {
+  const { rows } = await client.query(`SELECT sku_root FROM titles WHERE sku_root IS NOT NULL`)
+  const map = new Map()
+  for (const row of rows) {
+    if (row.sku_root) map.set(row.sku_root.toLowerCase(), row.sku_root)
+  }
+  return map
+}
+
+function stripTrailingSuffix(id) {
+  return (id || '').replace(/_\d+$/, '')
+}
+
+function matchSkuRoot(skuMap, rawId) {
+  if (!rawId) return null
+  const direct = skuMap.get(rawId.toLowerCase())
+  if (direct) return direct
+  const stripped = stripTrailingSuffix(rawId)
+  if (stripped !== rawId) {
+    const strippedMatch = skuMap.get(stripped.toLowerCase())
+    if (strippedMatch) return strippedMatch
+  }
+  return null
+}
+
 // Imports one already-downloaded ack file (parse + per-row title match +
 // insert + pro_registrations sync). Caller owns ensureAckTable() (once per
 // run/connection) and any already-imported skip via alreadyImported() —
@@ -140,6 +165,8 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
   }
   if (!parsed.ok) return { ok: false, error: parsed.error }
 
+  const skuMap = opts.skuMap || await loadTitleSkuMap(client)
+
   let imported = 0, unmatched = 0
   const unmatchedRows = []
   const flaggedRows = []
@@ -149,25 +176,12 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
     const rawId = r.submitterWorkId
     if (!rawId) continue
 
-    // MusicMark echoes the submitted Submitter_Work_ID back fully uppercased
-    // (our real sku_root values use mixed case, e.g. "R84a0701"), and some
-    // rows carry a trailing "_01"-style suffix we haven't identified the
-    // meaning of yet. Match case-insensitively, falling back to the
-    // suffix-stripped id, and always store OUR canonical sku_root casing
-    // rather than whatever case/suffix came back in the file.
-    let check = await client.query(`SELECT sku_root FROM titles WHERE lower(sku_root) = lower($1)`, [rawId])
-    if (!check.rows.length) {
-      const stripped = rawId.replace(/_\d+$/, '')
-      if (stripped !== rawId) {
-        check = await client.query(`SELECT sku_root FROM titles WHERE lower(sku_root) = lower($1)`, [stripped])
-      }
-    }
-    if (!check.rows.length) {
+    const skuRoot = matchSkuRoot(skuMap, rawId)
+    if (!skuRoot) {
       unmatched++
       unmatchedRows.push({ file: fileName, ...r })
       continue
     }
-    const skuRoot = check.rows[0].sku_root
 
     statusTotals[r.status] = (statusTotals[r.status] || 0) + 1
     if (r.status && r.status !== 'AC' && r.status !== 'RA') {
@@ -196,4 +210,4 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
   }
 }
 
-module.exports = { readAckFile, ensureAckTable, syncProRegistrations, alreadyImported, getImportedFileNames, importAckFile }
+module.exports = { readAckFile, ensureAckTable, syncProRegistrations, alreadyImported, getImportedFileNames, loadTitleSkuMap, importAckFile }
