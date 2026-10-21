@@ -5,7 +5,9 @@
     "intake-integration.js",
     "ebr-lot-export.js",
     "generate-ebr-export.js",
-    "ebr-shared.js"
+    "ebr-shared.js",
+    "ebr-ack-import.js",
+    "ebr-ftp.js"
   ],
   "ext": "js",
   "delay": "500"
