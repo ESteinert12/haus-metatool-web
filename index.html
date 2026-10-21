@@ -8717,6 +8717,7 @@ function ebrBuildRow(title, writersByTeam, stemsBySku) {
     set(`Writer Role Code ${n}`, 'C')
     set(`Writer PR Affiliation ${n}`, w.pro || '')
     set(`Writer Share ${n}`, w.split_pct != null ? w.split_pct : '')
+    set(`Writer Internal ID ${n}`, w.id != null ? String(w.id) : '')
     set(`Writer IPI Name# ${n}`, w.ipi || '')
     set(`1st Controlled Pub IPI Name# or Internal ID for Writer ${n}`, pub.ipi)
 
