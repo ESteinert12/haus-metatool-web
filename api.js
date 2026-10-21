@@ -9,6 +9,23 @@
 // A process that cannot serve should die so it is visibly gone.
 process.on('uncaughtException', e => {
   console.error('uncaughtException:', e.message, e.stack)
+  // Neon drops idle/in-flight connections during its own autosuspend/cold-start
+  // cycle ("Connection terminated unexpectedly", also ECONNRESET/ETIMEDOUT/"starting
+  // up"/"shutting down") -- this is expected and already treated as non-fatal and
+  // retried everywhere a query is actually awaited in this file (see the
+  // sessionPool retry wrapper above and the main pool's _pgRetry), and as
+  // "(handled)" on every pool's own 'error' listener (see /api/pg/connect's
+  // newPool.on('error', ...) comment). It should never reach this point and kill
+  // the whole server -- but on 2026-10-21 it did, crash-looping the server on
+  // every restart that happened to land while Neon was still waking up, which is
+  // worse than the EADDRINUSE/duplicate-listener failure mode this handler exists
+  // to guard against. Only this specific, well-understood transient class is
+  // spared here; anything else still exits immediately, unchanged.
+  const transientNeon = /terminated unexpectedly|ECONNRESET|ETIMEDOUT|starting up|shutting down/i.test(e?.message || '')
+  if (transientNeon) {
+    console.warn('[uncaughtException] transient Postgres/Neon connection drop -- treating as non-fatal, not exiting')
+    return
+  }
   process.exit(1)
 })
 // Rejections stay non-fatal - one failed query should not kill the server - but
