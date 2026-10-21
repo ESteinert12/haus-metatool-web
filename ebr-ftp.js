@@ -32,7 +32,6 @@ const fs = require('fs')
 const os = require('os')
 const path = require('path')
 const { Client } = require('basic-ftp')
-const ebrAckImport = require('./ebr-ack-import')
 
 // Returns null (not a thrown error) if the env vars aren't set, so callers
 // can give a clear "not configured" response instead of a stack trace.
@@ -52,14 +51,23 @@ function configFromEnv() {
 }
 
 // Connects, lists .xls/.xlsx files in cfg.remoteDir, downloads any whose
-// filename isn't already recorded in ebr_acknowledgments, and returns what
-// it found. Does NOT import anything — that's a separate, slower, row-by-row
-// step (ebr-ack-import.js's importAckFile) so the caller can report
-// "found N, M new" quickly before running it.
+// filename isn't already in `importedFileNames`, and returns what it found.
+// Does NOT import anything — that's a separate, slower, row-by-row step
+// (ebr-ack-import.js's importAckFile) so the caller can report "found N, M
+// new" quickly before running it.
 //
-// `client` is a live pg client/pool connection, used only to check
-// alreadyImported() per file — the caller owns the connection's lifecycle.
-async function fetchNewAckFiles(client, cfg) {
+// `importedFileNames` is a plain Set<string> (from
+// ebr-ack-import.js's getImportedFileNames), NOT a live DB client/connection
+// — deliberately. This function talks to the FTP server only, for however
+// long that takes, with zero Postgres connections open. The caller is
+// responsible for looking up `importedFileNames` with a short-lived client
+// BEFORE calling this, and for opening a (possibly new) client AFTER this
+// returns to actually do the import writes. Don't thread a pg client
+// through here again — that's exactly the bug this was written to fix
+// (see the 2026-10-21 incident: holding a Postgres client open-but-idle for
+// the whole FTP operation got it killed by Neon, which also degraded
+// service for other concurrent users hitting the same pool).
+async function fetchNewAckFiles(importedFileNames, cfg) {
   const ftp = new Client(15000) // 15s timeout
   const downloaded = []
   const skippedAlreadyImported = []
@@ -78,8 +86,7 @@ async function fetchNewAckFiles(client, cfg) {
     const ackFiles = list.filter(f => f.isFile && /\.xlsx?$/i.test(f.name))
 
     for (const f of ackFiles) {
-      const already = await ebrAckImport.alreadyImported(client, f.name)
-      if (already) { skippedAlreadyImported.push(f.name); continue }
+      if (importedFileNames.has(f.name)) { skippedAlreadyImported.push(f.name); continue }
 
       if (!tmpDir) tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'ebr-ack-ftp-'))
       const localPath = path.join(tmpDir, f.name)

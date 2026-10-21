@@ -106,6 +106,18 @@ async function alreadyImported(client, fileName) {
   return existing.rows.length > 0
 }
 
+// Bulk version of the same check -- one query for every already-imported
+// filename instead of one query per candidate file. Added so a caller (the
+// FTP-fetch route) can do this single lookup BEFORE opening a slow,
+// unrelated network connection (FTP), instead of holding a Postgres client
+// checked out, idle, for the whole FTP listing/download -- Neon has been
+// observed dropping connections held open-but-idle like that (see the
+// 2026-10-21 "holding a pg client across slow FTP I/O" incident).
+async function getImportedFileNames(client) {
+  const { rows } = await client.query(`SELECT DISTINCT source_file FROM ebr_acknowledgments WHERE source_file IS NOT NULL`)
+  return new Set(rows.map(r => r.source_file))
+}
+
 // Imports one already-downloaded ack file (parse + per-row title match +
 // insert + pro_registrations sync). Caller owns ensureAckTable() (once per
 // run/connection) and any already-imported skip via alreadyImported() —
@@ -171,4 +183,4 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
   }
 }
 
-module.exports = { readAckFile, ensureAckTable, syncProRegistrations, alreadyImported, importAckFile }
+module.exports = { readAckFile, ensureAckTable, syncProRegistrations, alreadyImported, getImportedFileNames, importAckFile }

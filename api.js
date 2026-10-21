@@ -1945,39 +1945,68 @@ app.post('/api/ebr/fetch-acks-from-ftp', async (req, res) => {
   if (!cfg) {
     return res.json({ ok: false, error: 'FTP_ACK_HOST / FTP_ACK_USER / FTP_ACK_PASS are not set on the server' })
   }
-  const client = await pgPool.connect()
+
+  // Deliberately three separate, SHORT pg checkouts instead of one held open
+  // for the whole request. Originally this held a single client checked out
+  // across the entire FTP operation (connect/list/download) -- fine on a
+  // fast network, but Neon was observed killing that connection when
+  // MusicMark's FTP server was slow to respond, which also starved other
+  // concurrent requests (e.g. Kyle's session queries) hitting the same pool
+  // at the same time. See the 2026-10-21 incident in the project docs.
+  let importedFileNames
   try {
-    await ebrAckImport.ensureAckTable(client)
-    const { downloaded, skippedAlreadyImported, errors } = await ebrFtp.fetchNewAckFiles(client, cfg)
-
-    const results = []
-    let totalImported = 0, totalUnmatched = 0, totalFlagged = 0
-    for (const f of downloaded) {
-      const r = await ebrAckImport.importAckFile(client, f.localPath, f.fileName)
-      results.push({ fileName: f.fileName, ...r })
-      if (r.ok) {
-        totalImported += r.imported
-        totalUnmatched += r.unmatched
-        totalFlagged += r.flagged
-      }
+    const setupClient = await pgPool.connect()
+    try {
+      await ebrAckImport.ensureAckTable(setupClient)
+      importedFileNames = await ebrAckImport.getImportedFileNames(setupClient)
+    } finally {
+      setupClient.release()
     }
-
-    res.json({
-      ok: true,
-      filesFound: downloaded.length + skippedAlreadyImported.length,
-      alreadyImported: skippedAlreadyImported.length,
-      newFiles: downloaded.length,
-      rowsImported: totalImported,
-      rowsUnmatched: totalUnmatched,
-      rowsFlagged: totalFlagged,
-      files: results,
-      downloadErrors: errors
-    })
   } catch (e) {
-    res.json({ ok: false, error: e.message })
-  } finally {
-    client.release()
+    return res.json({ ok: false, error: `Database lookup failed before contacting FTP: ${e.message}` })
   }
+
+  // No pg client held during this -- fetchNewAckFiles only talks to the FTP
+  // server, for however long that takes.
+  let downloaded, skippedAlreadyImported, errors
+  try {
+    ;({ downloaded, skippedAlreadyImported, errors } = await ebrFtp.fetchNewAckFiles(importedFileNames, cfg))
+  } catch (e) {
+    return res.json({ ok: false, error: `FTP fetch failed: ${e.message}` })
+  }
+
+  const results = []
+  let totalImported = 0, totalUnmatched = 0, totalFlagged = 0
+  try {
+    const importClient = await pgPool.connect()
+    try {
+      for (const f of downloaded) {
+        const r = await ebrAckImport.importAckFile(importClient, f.localPath, f.fileName)
+        results.push({ fileName: f.fileName, ...r })
+        if (r.ok) {
+          totalImported += r.imported
+          totalUnmatched += r.unmatched
+          totalFlagged += r.flagged
+        }
+      }
+    } finally {
+      importClient.release()
+    }
+  } catch (e) {
+    return res.json({ ok: false, error: `Downloaded ${downloaded.length} file(s) but import failed: ${e.message}` })
+  }
+
+  res.json({
+    ok: true,
+    filesFound: downloaded.length + skippedAlreadyImported.length,
+    alreadyImported: skippedAlreadyImported.length,
+    newFiles: downloaded.length,
+    rowsImported: totalImported,
+    rowsUnmatched: totalUnmatched,
+    rowsFlagged: totalFlagged,
+    files: results,
+    downloadErrors: errors
+  })
 })
 
 // ─── Filesystem routes ─────────────────────────────────────────────────────
