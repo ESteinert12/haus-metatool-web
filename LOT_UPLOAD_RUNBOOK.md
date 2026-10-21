@@ -870,3 +870,42 @@ query instead of re-listing the bucket.
 ### Lot 1 final
 30 folders / 180 files / 3.13 GB / 30 titles. verdict PASS, recorded 180.
 work_queue open 3,261 -> 2,739.
+
+## Side lots closed outside the 30-lot list (October 2026)
+
+These two were not part of "4. SKU but not tagged", so they have no tick box
+above. Both ended in `verify-lot` PASS.
+
+### SOHO4_03  (2. ATMOS_Shipping/SOHO4_03)
+- PASS, recorded 129 files.
+- Not under "4. SKU but not tagged", so every call needs `&base=<path to the
+  folder that CONTAINS the lot>` or create-stems answers "lot folder not found".
+- One new composer (Anything But That, S22a0274 -> `nimbus/S22_Raphael McGregor_NIMBUS`)
+  was uploaded with `upload_new_composer_songs.py`, then ONE whole-lot
+  create-stems linked it. The script has no skip-if-exists, so re-running it
+  re-uploads every file as an extra B2 version.
+- One song (Molly) had two B2 folders: stubs from an old run and the real audio.
+  Its old stub-only mp3 row was deleted after confirming no pro_registrations
+  pointed at it; it plays now.
+- pro_registrations for the lot were set to the composer's PRO only. NOTE: normal
+  app intake writes ASCAP + BMI per stem, so this lot differs from that
+  convention. The right rule (one row per writer, by that writer's PRO) is
+  written up in HANDOFF_pro_registrations_per_writer.md and is not settled.
+
+### INTAKE LOT_251002_SOHO4_MIXED(EX)
+- PASS, 33 files; work_queue open for the lot: 0.
+- Songs already in Neon whose mix_stems rows pointed at differently named STUB
+  folders (case, spacing, key suffix such as `_C#m`) played a 154-byte file.
+  create-stems does NOT repoint existing rows: it treats a row as recorded when
+  b2_key OR (sku, stem_name, filename) matches. Fix: UPDATE b2_key to the real
+  key, by mix_stem_id, then confirm with verify-lot. Never construct the key;
+  derive it from the real folder and the filename.
+- A stem with no row at all (T73 NoSynth) was inserted by create-stems and
+  registered with the composer's PRO only.
+
+### Pattern worth knowing
+When a song logged through intake is flagged DUPE with one stem missing its
+b2_key, the title saved and a single upload failed. Re-run intake on the DUPE:
+it backfills only the blank key and leaves the staging folder in place for
+review. Move that folder to `_deleted` afterwards; do not expect intake to
+retire it. (b2UploadFile has no retry; see the engineering notes.)
