@@ -93,6 +93,66 @@ async function syncProRegistrations(client, skuRoot, ackStatus) {
   )
 }
 
+function ackStatusToPrStatus(ackStatus) {
+  return ackStatus === 'RA' ? 'registered' : (ackStatus === 'RJ' ? 'failed' : 'pending')
+}
+
+// Bulk version of the INSERT in importAckFile's loop -- one multi-row INSERT
+// instead of one query per matched row. Added 2026-10-21: a real run with
+// ~2200 matched rows doing one INSERT + one syncProRegistrations UPDATE each
+// (4000+ sequential queries in a single HTTP request) ran long enough to hit
+// the tunnel's request timeout, which shows up client-side as "Unexpected
+// token '<' ... is not valid JSON" (an HTML timeout/gateway page instead of
+// our JSON response) -- the app itself wasn't erroring, the request just
+// never got a chance to finish. Chunked to stay well under Postgres's
+// per-query parameter limit.
+const BULK_CHUNK = 500
+async function insertAckRowsBulk(client, rows) {
+  for (let i = 0; i < rows.length; i += BULK_CHUNK) {
+    const chunk = rows.slice(i, i + BULK_CHUNK)
+    const cols = ['sku_root', 'work_title', 'recipient_work_id', 'iswc', 'status', 'comments', 'source_file']
+    const values = []
+    const params = []
+    chunk.forEach((r, idx) => {
+      const base = idx * cols.length
+      values.push(`(${cols.map((_, j) => `$${base + j + 1}`).join(',')})`)
+      params.push(r.skuRoot, r.workTitle, r.recipientWorkId, r.iswc, r.status, r.comments, r.fileName)
+    })
+    await client.query(
+      `INSERT INTO ebr_acknowledgments (${cols.join(',')}) VALUES ${values.join(',')}`,
+      params
+    )
+  }
+}
+
+// Bulk version of syncProRegistrations -- one UPDATE (per chunk) instead of
+// one per matched row. `pairs` is [{ skuRoot, status (ack status) }, ...];
+// when the same sku_root appears more than once, the LAST occurrence in the
+// array wins, matching the sequential-overwrite behavior the per-row version
+// had.
+async function syncProRegistrationsBulk(client, pairs) {
+  const latest = new Map()
+  for (const p of pairs) latest.set(p.skuRoot, ackStatusToPrStatus(p.status))
+  const entries = [...latest.entries()]
+  for (let i = 0; i < entries.length; i += BULK_CHUNK) {
+    const chunk = entries.slice(i, i + BULK_CHUNK)
+    const values = []
+    const params = []
+    chunk.forEach(([skuRoot, prStatus], idx) => {
+      const base = idx * 2
+      values.push(`($${base + 1},$${base + 2})`)
+      params.push(skuRoot, prStatus)
+    })
+    await client.query(
+      `UPDATE pro_registrations pr
+       SET status = v.pr_status
+       FROM mix_stems ms, (VALUES ${values.join(',')}) AS v(sku_root, pr_status)
+       WHERE pr.mix_stem_id = ms.mix_stem_id AND ms.sku_root = v.sku_root`,
+      params
+    )
+  }
+}
+
 // Has this exact filename already been imported? Both import-ebr-acks.js
 // and the FTP-fetch route use this as their sole dedup key — see the
 // "leave files on the FTP server, dedup locally by filename" decision in
@@ -171,6 +231,7 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
   const unmatchedRows = []
   const flaggedRows = []
   const statusTotals = {}
+  const toInsert = []
 
   for (const r of parsed.rows) {
     const rawId = r.submitterWorkId
@@ -188,15 +249,13 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
       flaggedRows.push({ file: fileName, ...r })
     }
 
-    if (!dryRun) {
-      await client.query(
-        `INSERT INTO ebr_acknowledgments (sku_root, work_title, recipient_work_id, iswc, status, comments, source_file)
-         VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-        [skuRoot, r.workTitle, r.recipientWorkId, r.iswc, r.status, r.comments, fileName]
-      )
-      await syncProRegistrations(client, skuRoot, r.status)
-    }
+    toInsert.push({ skuRoot, workTitle: r.workTitle, recipientWorkId: r.recipientWorkId, iswc: r.iswc, status: r.status, comments: r.comments, fileName })
     imported++
+  }
+
+  if (!dryRun && toInsert.length) {
+    await insertAckRowsBulk(client, toInsert)
+    await syncProRegistrationsBulk(client, toInsert.map(r => ({ skuRoot: r.skuRoot, status: r.status })))
   }
 
   return {
@@ -210,4 +269,4 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
   }
 }
 
-module.exports = { readAckFile, ensureAckTable, syncProRegistrations, alreadyImported, getImportedFileNames, loadTitleSkuMap, importAckFile }
+module.exports = { readAckFile, ensureAckTable, syncProRegistrations, insertAckRowsBulk, syncProRegistrationsBulk, alreadyImported, getImportedFileNames, loadTitleSkuMap, importAckFile }
