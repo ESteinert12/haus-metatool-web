@@ -146,15 +146,28 @@ async function importAckFile(client, filePath, fileName, opts = {}) {
   const statusTotals = {}
 
   for (const r of parsed.rows) {
-    const skuRoot = r.submitterWorkId
-    if (!skuRoot) continue
+    const rawId = r.submitterWorkId
+    if (!rawId) continue
 
-    const check = await client.query(`SELECT sku_root FROM titles WHERE sku_root = $1`, [skuRoot])
+    // MusicMark echoes the submitted Submitter_Work_ID back fully uppercased
+    // (our real sku_root values use mixed case, e.g. "R84a0701"), and some
+    // rows carry a trailing "_01"-style suffix we haven't identified the
+    // meaning of yet. Match case-insensitively, falling back to the
+    // suffix-stripped id, and always store OUR canonical sku_root casing
+    // rather than whatever case/suffix came back in the file.
+    let check = await client.query(`SELECT sku_root FROM titles WHERE lower(sku_root) = lower($1)`, [rawId])
+    if (!check.rows.length) {
+      const stripped = rawId.replace(/_\d+$/, '')
+      if (stripped !== rawId) {
+        check = await client.query(`SELECT sku_root FROM titles WHERE lower(sku_root) = lower($1)`, [stripped])
+      }
+    }
     if (!check.rows.length) {
       unmatched++
       unmatchedRows.push({ file: fileName, ...r })
       continue
     }
+    const skuRoot = check.rows[0].sku_root
 
     statusTotals[r.status] = (statusTotals[r.status] || 0) + 1
     if (r.status && r.status !== 'AC' && r.status !== 'RA') {
