@@ -9198,6 +9198,10 @@ async function ebrImportAckFile() {
     `Imported ${fileName}: ${imported} acknowledgment${imported !== 1 ? 's' : ''} recorded${unmatched ? `, ${unmatched} row(s) didn't match a title on file` : ''}.`,
     unmatched > 0
   )
+  if (imported > 0) {
+    ebrSwitchTab('ack')
+    await ebrShowAckResultsModal([fileName])
+  }
   await ebrRenderAcknowledgments()
 }
 
@@ -9233,18 +9237,100 @@ async function ebrFetchAcksFromFtp() {
     result.rowsUnmatched > 0 || failedFiles.length > 0
   )
   if (failedFiles.length) console.error('[ebrFetchAcksFromFtp] failed files:', failedFiles)
+  if (result.newFiles > 0) {
+    ebrSwitchTab('ack')
+    await ebrShowAckResultsModal((result.files || []).map(f => f.fileName))
+  }
   await ebrRenderAcknowledgments()
+}
+
+// Shows a one-time summary right after an import/FTP-fetch finishes: per-file
+// status breakdown and the actual MusicMark comment for every row that came
+// back as anything other than AC/RA (i.e. the same "flagged" definition
+// ebr-ack-import.js already uses server-side). Re-queries the DB by
+// source_file rather than threading parse-time data through from either
+// caller, so it works identically whether the import came from the manual
+// file-picker path or the FTP-fetch path. Purely informational -- closing it
+// does not change anything; the persistent "Acknowledgments" tab (see
+// ebrRenderAcknowledgments below) is still the place to act on a flagged row.
+async function ebrShowAckResultsModal(sourceFiles) {
+  const files = (sourceFiles || []).filter(Boolean)
+  if (!files.length) return
+  const statusRows = await pgQ(
+    `SELECT source_file, status, count(*)::int AS n FROM ebr_acknowledgments
+     WHERE source_file = ANY($1) GROUP BY source_file, status ORDER BY source_file, status`,
+    [files]
+  ).catch(() => [])
+  const flaggedRows = await pgQ(
+    `SELECT source_file, sku_root, work_title, status, comments FROM ebr_acknowledgments
+     WHERE source_file = ANY($1) AND status IS NOT NULL AND status NOT IN ('RA','AC')
+     ORDER BY source_file, sku_root`,
+    [files]
+  ).catch(() => [])
+
+  const byFile = {}
+  for (const f of files) byFile[f] = { statuses: [], flagged: [] }
+  for (const r of (Array.isArray(statusRows) ? statusRows : [])) {
+    if (!byFile[r.source_file]) byFile[r.source_file] = { statuses: [], flagged: [] }
+    byFile[r.source_file].statuses.push(`${esc(r.status || '(blank)')}: ${r.n}`)
+  }
+  for (const r of (Array.isArray(flaggedRows) ? flaggedRows : [])) {
+    if (!byFile[r.source_file]) byFile[r.source_file] = { statuses: [], flagged: [] }
+    byFile[r.source_file].flagged.push(r)
+  }
+
+  const totalFlagged = Object.values(byFile).reduce((s, f) => s + f.flagged.length, 0)
+
+  const body = files.map(f => {
+    const info = byFile[f] || { statuses: [], flagged: [] }
+    const flaggedHtml = info.flagged.length
+      ? info.flagged.map(r => `
+          <div style="border-top:1px solid var(--border);padding:6px 0;font-size:12px">
+            <div style="font-weight:600">${esc(r.work_title || r.sku_root)} <span style="font-weight:400;color:var(--text3)">${esc(r.sku_root)} — ${esc(r.status)}</span></div>
+            <div style="color:#c0392b;margin-top:2px">${esc(r.comments || 'no comment given')}</div>
+          </div>`).join('')
+      : `<div style="padding:6px 0;font-size:12px;color:#2d6a4f">Nothing flagged — all rows AC/RA.</div>`
+    return `
+      <div style="border:1px solid var(--border);border-radius:8px;padding:10px;margin-bottom:10px">
+        <div style="font-weight:600;font-size:13px">${esc(f)}</div>
+        <div style="color:var(--text3);font-size:12px;margin-top:2px">${info.statuses.join(', ') || 'no rows'}</div>
+        ${flaggedHtml}
+      </div>`
+  }).join('')
+
+  const overlay = document.createElement('div')
+  overlay.id = 'ebr-ack-results-modal'
+  overlay.style.cssText = 'display:flex;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:9500;align-items:center;justify-content:center'
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove() }
+  overlay.innerHTML = `
+    <div style="background:var(--bg,#fff);border-radius:10px;max-width:560px;width:90%;max-height:80vh;overflow-y:auto;padding:18px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+        <div style="font-size:16px;font-weight:700">Import results${totalFlagged ? ` — ${totalFlagged} flagged` : ''}</div>
+        <button class="btn" onclick="document.getElementById('ebr-ack-results-modal').remove()">Close</button>
+      </div>
+      ${body}
+    </div>`
+  document.body.appendChild(overlay)
 }
 
 async function ebrRenderAcknowledgments() {
   const el = document.getElementById('ebr-ack-panel')
   if (!el) return
   await ebrEnsureAckTable()
+  // Was `WHERE a.status = 'RJ'` -- MusicMark never actually sends that status
+  // code; real values observed are RA (accepted), AC (acknowledged), and NP
+  // (not processed / the actual "something's wrong, see comments" status --
+  // confirmed via _check_np_comments_20261021.js, see
+  // handoff-2026-10-21-ebr-ack-ftp-autofetch-spec.md). This panel was
+  // therefore never showing anything. Fixed 2026-10-28 to match any status
+  // that isn't AC/RA, same "flagged" definition ebr-ack-import.js already
+  // uses server-side, so a future status code MusicMark introduces still
+  // surfaces here instead of silently being ignored again.
   const rows = await pgQ(`
-    SELECT DISTINCT ON (a.sku_root) a.sku_root, a.work_title, a.status, a.comments, a.imported_at, t.team_id
+    SELECT DISTINCT ON (a.sku_root) a.ack_id, a.sku_root, a.work_title, a.status, a.comments, a.imported_at, t.team_id
     FROM ebr_acknowledgments a
     LEFT JOIN titles t ON t.sku_root = a.sku_root
-    WHERE a.status = 'RJ'
+    WHERE a.status IS NOT NULL AND a.status NOT IN ('RA','AC')
     ORDER BY a.sku_root, a.imported_at DESC
   `)
   const rejected = Array.isArray(rows) ? rows : []
@@ -9279,11 +9365,25 @@ async function ebrRenderAcknowledgments() {
               <span style="color:var(--text3)">%</span>
             </div>`).join('') : '<span style="color:#c0392b">no writers on file for this team</span>'}
         </div>
-        <div style="margin-top:6px">
+        <div style="margin-top:6px;display:flex;gap:6px">
           <button class="btn" style="font-size:11px;padding:4px 10px" onclick="ebrMarkForReregistration('${r.sku_root}')">Mark for re-registration</button>
+          <button class="btn" style="font-size:11px;padding:4px 10px;color:#c0392b" onclick="ebrDeleteAck(${r.ack_id})">Delete acknowledgment</button>
         </div>
       </div>`
   }).join('')
+}
+
+// Deletes a single ebr_acknowledgments row. Only removes the acknowledgment
+// record itself -- deliberately does not touch pro_registrations.status, so
+// deleting a stale/duplicate/corrected-and-resolved ack doesn't silently flip
+// a title's registration status; if that's ever needed, do it explicitly via
+// ebrSyncProRegistrations alongside this.
+async function ebrDeleteAck(ackId) {
+  if (!ackId) return
+  if (!confirm('Delete this acknowledgment record? This cannot be undone.')) return
+  await pgQ(`DELETE FROM ebr_acknowledgments WHERE ack_id = $1`, [ackId]).catch(() => {})
+  ebrToast('Acknowledgment deleted.')
+  await ebrRenderAcknowledgments()
 }
 
 async function ebrUpdateWriterSplit(writerId, value) {
