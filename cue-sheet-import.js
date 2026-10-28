@@ -36,7 +36,15 @@ function normTitle(raw) {
   if (!raw) return '';
   let s = String(raw).toUpperCase();
   s = s.replace(/[_-]+/g, ' ');
-  s = s.replace(/\b(FULL|NODR|NO DRUMS|DNB|DRUMS AND FX|MIX|ALT MIX|NOPNO|NODMSPERC)\b/g, '');
+  // Mix/version-suffix vocabulary expanded 2026-10-28, derived from the real
+  // HAUS CUE SHEETS corpus (17,643 HAUS-own cue titles) -- BUMPER/STING/ALT/
+  // DRUMS/MAIN/NODRUMS/NOLEAD were real, frequent trailing words this list was
+  // missing (NODRUMS specifically: the old list only had the two-word 'NO
+  // DRUMS' and single 'NODR', neither of which matches the real one-word
+  // concatenated form). Leading-article stripping (The/A/An) was considered
+  // and NOT added -- zero HAUS-own cue titles in the real corpus start with
+  // one, unlike BMI royalty statements where that pattern is real.
+  s = s.replace(/\b(FULL|NODR|NODRUMS|NO DRUMS|DNB|DRUMS AND FX|MIX|ALT MIX|NOPNO|NODMSPERC|BUMPER|STING|ALT|DRUMS|MAIN|NOLEAD)\b/g, '');
   s = s.replace(/[^A-Z0-9 ]/g, '');
   s = s.replace(/\s+/g, ' ').trim();
   return s;
