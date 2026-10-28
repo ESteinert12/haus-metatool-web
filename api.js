@@ -1058,7 +1058,7 @@ _logFsRoots()
         setInterval(() => {
           console.log(`[pool] stats total=${pgPool.totalCount} idle=${pgPool.idleCount} waiting=${pgPool.waitingCount}`)
         }, 60000).unref()
-        await pgPool.query('SELECT 1')
+        await _pgRetry('SELECT 1', [], 'startup health check')
         console.log('✅ PostgreSQL connected')
         await runServerMigrations(pgPool)
         await loadFolderTags()   // must precede the watcher — parseFolderDrop reads FOLDER_TAGS
@@ -1763,7 +1763,7 @@ app.post('/api/pg/connect', async (req, res) => {
       }, 5000)  // Give 5 seconds for existing queries to finish
     }
     // Run schema migrations - create tables if they don't exist
-    await pgPool.query(`
+    await _pgRetry(`
       CREATE TABLE IF NOT EXISTS playlists (
         id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
         project_id UUID NOT NULL,
@@ -1771,18 +1771,18 @@ app.post('/api/pg/connect', async (req, res) => {
         client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL,
         created_at TIMESTAMPTZ DEFAULT now()
       )
-    `).catch(() => {})
-    await pgPool.query(`
+    `, [], 'pg-connect playlists table').catch(() => {})
+    await _pgRetry(`
       CREATE TABLE IF NOT EXISTS playlist_tracks (
         playlist_id UUID NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
         sku_root TEXT NOT NULL,
         position INTEGER DEFAULT 1,
         PRIMARY KEY (playlist_id, sku_root)
       )
-    `).catch(() => {})
-    await pgPool.query(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
-    await pgPool.query(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
-    await pgPool.query(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`).catch(() => {})
+    `, [], 'pg-connect playlist_tracks table').catch(() => {})
+    await _pgRetry(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`, [], 'pg-connect playlists client_id').catch(() => {})
+    await _pgRetry(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`, [], 'pg-connect lots client_id').catch(() => {})
+    await _pgRetry(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`, [], 'pg-connect projects client_id').catch(() => {})
     // Persist the connection string for auto-connect on restart
     const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
     let cfg = {}
@@ -1822,7 +1822,7 @@ app.post('/api/pg/query', async (req, res) => {
 
 app.get('/api/pg/status', async (req, res) => {
   if (!pgPool) return res.json({ connected: false })
-  try { await pgPool.query('SELECT 1'); res.json({ connected: true }) }
+  try { await _pgRetry('SELECT 1', [], 'pg-status health check'); res.json({ connected: true }) }
   catch { res.json({ connected: false }) }
 })
 
@@ -2215,7 +2215,7 @@ app.post('/api/lot/create', async (req, res) => {
 
   try {
     // Insert lot into database
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `INSERT INTO lots (lot_name, lot_type, status, track_limit, project_id, client)
        VALUES ($1, 'client', 'active', $2, $3, $4) RETURNING lot_id`,
       [lotName, limit || null, projectId || null, clientName || null]
@@ -2277,7 +2277,7 @@ app.post('/api/lot/download-avid-wavs', async (req, res) => {
   const { lotId, lotName, safeName, shippingBase: clientBase } = req.body
   try {
     // Get lot details from DB
-    const lotRows = await pgPool.query('SELECT * FROM lots WHERE lot_id = $1', [lotId])
+    const lotRows = await _pgRetry('SELECT * FROM lots WHERE lot_id = $1', [lotId])
     const lot = lotRows?.rows?.[0]
     if (!lot) return res.json({ ok: false, error: 'Lot not found' })
 
@@ -4202,7 +4202,7 @@ app.get('/api/b2/verify', async (req, res) => {
       : `SELECT m.sku_root, m.filename, m.b2_key, t.title
            FROM mix_stems m JOIN titles t ON t.sku_root = m.sku_root
           WHERE m.b2_key IS NOT NULL`
-    const rows = (await pgPool.query(q, since ? [since] : [])).rows
+    const rows = (await _pgRetry(q, since ? [since] : [])).rows
     // Only remember sizes for keys we actually care about -- no point holding
     // 250k entries when we are asking about a fraction of them.
     const wanted = new Set(rows.map(r => r.b2_key))
@@ -4357,7 +4357,7 @@ app.get('/api/b2/repair', async (req, res) => {
     }
     if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
 
-    const rows = (await pgPool.query(
+    const rows = (await _pgRetry(
       `SELECT m.mix_stem_id, m.sku_root, m.filename, m.b2_key
          FROM mix_stems m WHERE m.b2_key IS NOT NULL`)).rows
     const wanted = new Set(rows.map(r => r.b2_key))
@@ -4506,7 +4506,7 @@ app.get('/api/b2/scan', async (req, res) => {
     let known = 0, orphan = 0
     if (pgPool && stubKeys.length) {
       try {
-        const rows = (await pgPool.query(
+        const rows = (await _pgRetry(
           `SELECT b2_key FROM mix_stems WHERE b2_key = ANY($1::text[])`, [stubKeys])).rows
         known = rows.length
         orphan = stubKeys.length - known
@@ -4561,7 +4561,7 @@ app.get('/api/b2/link', async (req, res) => {
   const limit  = parseInt(req.query.limit || '0') || 0
   const STUB_LIMIT = 1024
   try {
-    const rows = (await pgPool.query(
+    const rows = (await _pgRetry(
       `SELECT m.mix_stem_id, m.sku_root, m.filename
          FROM mix_stems m WHERE m.b2_key IS NULL`)).rows
     if (!rows.length) return res.json({ ok: true, message: 'no unlinked stems' })
@@ -4659,7 +4659,7 @@ app.get('/api/b2/link', async (req, res) => {
       let done = false
       for (let attempt = 1; attempt <= 3 && !done; attempt++) {
         try {
-          const r = await pgPool.query(
+          const r = await _pgRetry(
             `UPDATE mix_stems m SET b2_key = v.key
                FROM (SELECT unnest($1::int[]) AS id, unnest($2::text[]) AS key) v
               WHERE m.mix_stem_id = v.id AND m.b2_key IS NULL`, [ids, keys])
@@ -4974,7 +4974,7 @@ app.get('/api/b2/heal', async (req, res) => {
     }
     if (!bucketId) return res.json({ ok: false, error: 'bucket haus-music not found' })
 
-    const rows = (await pgPool.query(
+    const rows = (await _pgRetry(
       `SELECT mix_stem_id, sku_root, filename, b2_key
          FROM mix_stems WHERE b2_key IS NOT NULL`)).rows
 
@@ -5093,7 +5093,7 @@ app.get('/api/b2/relocate-strays', async (req, res) => {
     //    the long bucket listing, so the PG connection is not left idle (that is what
     //    killed the first full sweep).
     const notLike = COLLECTION_PREFIXES.map((_, i) => `b2_key NOT LIKE $${i + 1}`).join(' AND ')
-    const strays = (await pgPool.query(
+    const strays = (await _pgRetry(
       `SELECT mix_stem_id, sku_root, filename, b2_key
          FROM mix_stems
         WHERE b2_key IS NOT NULL AND ${notLike}
@@ -5104,7 +5104,7 @@ app.get('/api/b2/relocate-strays', async (req, res) => {
 
     // 2. Composer names, one query.
     const prefixes = [...new Set(strays.map(r => r.sku_root.slice(0, 3).toUpperCase()))]
-    const cRows = (await pgPool.query(
+    const cRows = (await _pgRetry(
       `SELECT upper(composer_id) AS cid, full_name FROM composers WHERE upper(composer_id) = ANY($1)`,
       [prefixes])).rows
     const nameOf = new Map(cRows.map(r => [r.cid, r.full_name]))
@@ -5213,7 +5213,7 @@ app.get('/api/b2/relocate-strays', async (req, res) => {
                       WHERE m.mix_stem_id = u.id`
       let ok = false
       for (let attempt = 0; attempt < 2 && !ok; attempt++) {
-        try { const r = await pgPool.query(sql, [ids, keys]); updated += r.rowCount; ok = true }
+        try { const r = await _pgRetry(sql, [ids, keys]); updated += r.rowCount; ok = true }
         catch (e) {
           if (attempt === 0) { console.warn('[b2-relocate] update chunk failed, retrying:', e.message); await new Promise(r => setTimeout(r, 1000)) }
           else chunk.forEach(c => failures.push({ ...c, error: 'copied to B2 but DB update failed: ' + e.message }))
@@ -6975,7 +6975,7 @@ async function generateSku(composerFullId, albumDigit = CURRENT_ALBUM_DIGIT) {
 app.get('/api/intake/teams', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(`
+    const result = await _pgRetry(`
       SELECT t.team_id, t.composer_full_id, t.composer_prefix,
              t.has_cowriters, t.is_jup, t.status,
              s.next_seq
@@ -7034,14 +7034,14 @@ app.post('/api/intake/save-title', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
     // Guard: refuse to overwrite an existing title
-    const existing = await pgPool.query(
+    const existing = await _pgRetry(
       `SELECT 1 FROM titles WHERE sku_root = $1`, [skuRoot]
     )
     if (existing.rows.length > 0) {
       return res.json({ ok: false, error: `SKU ${skuRoot} already exists in titles` })
     }
 
-    await pgPool.query(`
+    await _pgRetry(`
       INSERT INTO titles (
         sku_root, composer_id, team_id,
         title, key, bpm, description,
@@ -7088,7 +7088,7 @@ let FOLDER_TAGS = new Set()
 async function loadFolderTags() {
   if (!pgPool) return
   try {
-    const r = await pgPool.query('SELECT tag FROM folder_tags')
+    const r = await _pgRetry('SELECT tag FROM folder_tags')
     FOLDER_TAGS = new Set(r.rows.map(x => String(x.tag).trim().toUpperCase()))
     console.log(`[tags] loaded ${FOLDER_TAGS.size} folder tags`)
   } catch (e) {
@@ -7244,7 +7244,7 @@ async function startStagingWatcher(pool) {
     if (!IS_DROP_FOLDER.test(path.basename(dirPath))) return
     if (!pgPool) return
     try {
-      const r = await pgPool.query(
+      const r = await _pgRetry(
         `UPDATE staged_files SET status='gone' WHERE filepath=$1 AND status='pending'`, [dirPath])
       if (r.rowCount) console.log(`[staging] ${path.basename(dirPath)} left staging - row retired`)
     } catch (e) { console.warn('[staging] unlinkDir update failed:', e.message) }
@@ -7257,7 +7257,7 @@ async function startStagingWatcher(pool) {
 app.get('/api/staged-files', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const r = await pgPool.query(
+    const r = await _pgRetry(
       `SELECT * FROM staged_files WHERE status IN ('pending','processing') ORDER BY arrived_at ASC`
     )
     // Reconcile against disk. The watcher is add-only (chokidar addDir), so a
@@ -7273,7 +7273,7 @@ app.get('/api/staged-files', async (req, res) => {
     }
     if (ghosts.length) {
       try {
-        await pgPool.query(
+        await _pgRetry(
           `UPDATE staged_files SET status='gone' WHERE id = ANY($1::int[])`, [ghosts])
         console.log(`[staging] retired ${ghosts.length} stale staged_files row(s) (folder no longer on disk)`)
       } catch (e) { console.warn('[staging] could not retire stale rows:', e.message) }
@@ -7288,7 +7288,7 @@ app.delete('/api/staged-files/:id', async (req, res) => {
     // Soft delete: mark imported rather than removing the row, so staging history
     // survives and a failed cleanup is diagnosable. The listing endpoint filters
     // status='pending', so the effect for the UI is identical.
-    const r = await pgPool.query(
+    const r = await _pgRetry(
       `UPDATE staged_files SET status='imported' WHERE id=$1`, [req.params.id])
     res.json({ ok: true, updated: r.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -7301,7 +7301,7 @@ app.delete('/api/staged-files/by-path', async (req, res) => {
   if (!filePath) return res.json({ ok: false, error: 'path required' })
   try {
     // Soft delete — see the :id handler above.
-    const r = await pgPool.query(
+    const r = await _pgRetry(
       `UPDATE staged_files SET status='imported' WHERE filepath=$1`, [filePath])
     res.json({ ok: true, updated: r.rowCount })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -7314,31 +7314,31 @@ app.get('/api/intake/metadata', async (req, res) => {
   try {
     // Fetch all metadata in parallel
     const [genres, subgenres, moods, mood1, composers, rmo, ksl, cowriters] = await Promise.all([
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (primary_genre_name)
                primary_genre_id, primary_genre_name
         FROM primary_genres
         ORDER BY primary_genre_name
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (sg.primary_genre_id, sg.secondary_genre_name)
                sg.secondary_genre_id, sg.primary_genre_id, sg.secondary_genre_name
         FROM secondary_genres sg
         ORDER BY sg.primary_genre_id, sg.secondary_genre_name
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (mood_name)
                mood_id, mood_name
         FROM moods
         ORDER BY mood_name
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (mood_1_name)
                mood_1_id, mood_1_name
         FROM mood_1
         ORDER BY mood_1_name
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (t.composer_full_id)
                t.composer_full_id, t.team_id, t.writer_detail, t.pub_detail, t.has_cowriters, t.is_jup,
                c.full_name
@@ -7347,19 +7347,19 @@ app.get('/api/intake/metadata', async (req, res) => {
         WHERE t.composer_full_id IS NOT NULL AND t.composer_full_id != ''
         ORDER BY t.composer_full_id, t.team_id
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (rmo_name)
                rmo_id, rmo_name
         FROM rmo
         ORDER BY rmo_name
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT DISTINCT ON (ksl_name)
                ksl_id, ksl_name
         FROM ksl
         ORDER BY ksl_name
       `),
-      pgPool.query(`
+      _pgRetry(`
         SELECT cowriter_id, cowriter_name, pro
         FROM cowriters
         ORDER BY cowriter_name
@@ -7404,7 +7404,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
   let intakeIntegration
   try {
     const cfg = JSON.parse(fs.readFileSync(path.join(os.homedir(), '.haus-workspace-cfg.json'), 'utf8'))
-    intakeIntegration = new IntakeIntegration({ query: (...a) => pgPool.query(...a) }, { cfg })
+    intakeIntegration = new IntakeIntegration({ query: (...a) => _pgRetry(...a) }, { cfg })
   } catch (e) {
     return res.json({ ok: false, error: 'Intake system not initialized: ' + e.message })
   }
@@ -7418,7 +7418,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     // quarantined to _INVALID. A claim older than 10 minutes is treated as
     // abandoned (crashed request) and can be taken over.
     const me = req.session?.user?.username || 'unknown'
-    const claim = await pgPool.query(
+    const claim = await _pgRetry(
       `UPDATE staged_files
           SET status='processing', claimed_by=$2, claimed_at=NOW()
         WHERE id=$1
@@ -7426,7 +7426,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
                OR (status='processing' AND claimed_at < NOW() - INTERVAL '10 minutes'))
         RETURNING *`, [id, me])
     if (!claim.rows.length) {
-      const cur = await pgPool.query(`SELECT status, claimed_by FROM staged_files WHERE id=$1`, [id])
+      const cur = await _pgRetry(`SELECT status, claimed_by FROM staged_files WHERE id=$1`, [id])
       if (!cur.rows.length) return res.json({ ok: false, error: 'Staged file not found' })
       const c = cur.rows[0]
       if (c.status === 'processing') {
@@ -7438,7 +7438,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     const stagingPath = record.filepath
     // Put the drop back in the queue on any failure that didn't already mark it
     // invalid/shipped (guarded on status so it never clobbers those).
-    const releaseClaim = (sid) => pgPool.query(
+    const releaseClaim = (sid) => _pgRetry(
       `UPDATE staged_files SET status='pending', claimed_by=NULL, claimed_at=NULL
         WHERE id=$1 AND status='processing'`, [sid]).catch(() => {})
 
@@ -7479,7 +7479,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
 
       // Insert or update titles table (matched by SKU - unique ID)
       try {
-        await pgPool.query(`
+        await _pgRetry(`
           INSERT INTO titles (sku_root, title, composer_id, key, bpm, primary_genre_id, mood_1_id, ksl_id, created_at, updated_at)
           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
           ON CONFLICT (sku_root) DO UPDATE SET
@@ -7527,7 +7527,7 @@ app.post('/api/staged-files/:id/import-metadata', async (req, res) => {
     }
   } catch (e) {
     console.error('[import] Unexpected error:', e.message)
-    try { await pgPool.query(`UPDATE staged_files SET status='pending', claimed_by=NULL, claimed_at=NULL WHERE id=$1 AND status='processing'`, [req.params.id]) } catch {}
+    try { await _pgRetry(`UPDATE staged_files SET status='pending', claimed_by=NULL, claimed_at=NULL WHERE id=$1 AND status='processing'`, [req.params.id]) } catch {}
     res.status(500).json({ ok: false, error: e.message })
   }
 })
@@ -7539,7 +7539,7 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
 
   try {
     // Ensure fm_pk has a unique constraint
-    await pgPool.query(`ALTER TABLE clients ADD CONSTRAINT clients_fm_pk_unique UNIQUE (fm_pk)`).catch(() => {})
+    await _pgRetry(`ALTER TABLE clients ADD CONSTRAINT clients_fm_pk_unique UNIQUE (fm_pk)`).catch(() => {})
 
     const csv = fs.readFileSync(req.file.path, 'utf8')
     const lines = csv.trim().split('\n')
@@ -7566,7 +7566,7 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
     }
 
     if (pks.length) {
-      await pgPool.query(
+      await _pgRetry(
         `INSERT INTO clients (fm_pk, name, city, state, country, contact, active)
          SELECT * FROM unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[], array_fill(true, ARRAY[array_length($1::text[],1)]))
          ON CONFLICT (fm_pk) DO NOTHING`,
@@ -7898,7 +7898,7 @@ app.post('/api/intake/draft', async (req, res) => {
 
   const key = `${clientName}_${dropIndex}`
   try {
-    await pgPool.query(
+    await _pgRetry(
       `INSERT INTO intake_drafts (username, draft_key, payload, updated_at)
        VALUES ($1, $2, $3, NOW())
        ON CONFLICT (username, draft_key)
@@ -7917,7 +7917,7 @@ app.get('/api/intake/draft', async (req, res) => {
   if (!pgPool) return res.status(503).json(null)
   try {
     // The calling user's own most recent draft only.
-    const r = await pgPool.query(
+    const r = await _pgRetry(
       `SELECT payload FROM intake_drafts WHERE username = $1 ORDER BY updated_at DESC LIMIT 1`,
       [draftUser(req)]
     )
@@ -7931,7 +7931,7 @@ app.get('/api/intake/draft', async (req, res) => {
 app.delete('/api/intake/draft/:key', async (req, res) => {
   if (!pgPool) return res.status(503).json({ ok: false, error: 'Database not connected' })
   try {
-    await pgPool.query(`DELETE FROM intake_drafts WHERE username = $1 AND draft_key = $2`, [draftUser(req), req.params.key])
+    await _pgRetry(`DELETE FROM intake_drafts WHERE username = $1 AND draft_key = $2`, [draftUser(req), req.params.key])
     res.json({ ok: true })
   } catch (e) {
     res.status(500).json({ ok: false, error: e.message })
