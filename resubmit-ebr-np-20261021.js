@@ -112,15 +112,23 @@ async function run() {
   if (!npRows.length) { console.log('Nothing to resubmit.'); await pool.end(); return }
 
   const skuRoots = npRows.map(r => r.sku_root)
-  const { rows: titles } = await pool.query(
-    `SELECT sku_root, title, team_id FROM titles WHERE sku_root = ANY($1::text[])`,
+  const { rows: titlesRaw } = await pool.query(
+    `SELECT sku_root, title, team_id, description FROM titles WHERE sku_root = ANY($1::text[])`,
     [skuRoots]
   )
-  const foundSkus = new Set(titles.map(t => t.sku_root))
-  const missingFromTitles = skuRoots.filter(s => !foundSkus.has(s))
+  const foundSkusRaw = new Set(titlesRaw.map(t => t.sku_root))
+  const missingFromTitles = skuRoots.filter(s => !foundSkusRaw.has(s))
   if (missingFromTitles.length) {
     console.log(`WARNING: ${missingFromTitles.length} NP sku_root(s) no longer exist in titles (deleted/renamed?) -- skipped:`, missingFromTitles.slice(0, 10))
   }
+
+  const aeTitles = titlesRaw.filter(t => /SOLD TO A&E/i.test(t.description || ''))
+  if (aeTitles.length) {
+    console.log(`WARNING: ${aeTitles.length} NP titles were SOLD TO A&E and will be EXCLUDED from resubmission (must never be sent to MusicMark):`, aeTitles.map(t => t.sku_root))
+  }
+  const aeSkuSet = new Set(aeTitles.map(t => t.sku_root))
+  const titles = titlesRaw.filter(t => !aeSkuSet.has(t.sku_root))
+  const foundSkus = new Set(titles.map(t => t.sku_root))
 
   const teamIds = [...new Set(titles.map(t => t.team_id).filter(Boolean))]
   const { rows: writerRows } = await pool.query(
