@@ -6611,6 +6611,9 @@ async function openMetadataEditor(sku) {
           </select>
         </div>
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+          <div id="me-usage-stats" style="font-size:11px;color:#3a4f56">Loading usage…</div>
+        </div>
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
           <div id="me-lot-history" style="font-size:11px;color:#3a4f56">Loading lots…</div>
         </div>
         <div id="me-status" style="font-size:12px;color:var(--red,#e53);min-height:16px"></div>
@@ -6634,6 +6637,7 @@ async function openMetadataEditor(sku) {
 
   // Load lot history into the metadata editor
   loadMetadataEditorLotHistory(sku)
+  loadMetadataEditorUsageStats(sku)
 }
 
 async function saveMetadataEditor(sku) {
@@ -6781,6 +6785,47 @@ async function loadMetadataEditorLotHistory(skuRoot) {
         </button>
       </div>
     `).join('')}
+  `
+}
+
+// Usage count shown on the metadata editor: how many times this title has
+// been confirmed as actually aired, per human-verified cue sheet matches
+// (cue_sheet_cues rows with match_status='confirmed'). Computed live via
+// JOIN every time this modal opens -- no new columns on titles, nothing to
+// keep in sync, per Erik's 2026-10-28 call on this feature.
+async function loadMetadataEditorUsageStats(skuRoot) {
+  const el = document.getElementById('me-usage-stats')
+  if (!el) return
+  const rows = await pgQ(`
+    SELECT e.program, e.episode_title, e.episode_num, e.air_date, csc.confirmed_at
+    FROM cue_sheet_cues csc
+    JOIN cue_sheets cs ON cs.id = csc.cue_sheet_id
+    LEFT JOIN episodes e ON e.id = cs.episode_id
+    WHERE csc.matched_sku_root = $1
+      AND csc.match_status = 'confirmed'
+    ORDER BY e.air_date DESC NULLS LAST, csc.confirmed_at DESC
+  `, [skuRoot])
+  if (!Array.isArray(rows)) {
+    el.innerHTML = `<div style="font-size:11px;color:#3a4f56">Usage data unavailable</div>`
+    return
+  }
+  if (!rows.length) {
+    el.innerHTML = `<div style="font-size:11px;color:#3a4f56">No confirmed cue sheet usage yet</div>`
+    return
+  }
+  const recent = rows.slice(0, 10)
+  el.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.08em;margin-bottom:6px">
+      Used ${rows.length} time${rows.length !== 1 ? 's' : ''} (confirmed)
+    </div>
+    ${recent.map(r => `
+      <div style="display:flex;align-items:center;gap:6px;padding:5px 8px;background:rgba(0,0,0,0.07);border-radius:var(--radius-sm);margin-bottom:4px;font-size:11px">
+        <i class="ti ti-movie" style="font-size:12px;color:#8FAF9B;flex-shrink:0"></i>
+        <span style="font-weight:500;flex:1;color:#1a2226">${esc(r.program || 'Unknown program')}${r.episode_title ? ' — ' + esc(r.episode_title) : ''}${r.episode_num ? ' (' + esc(r.episode_num) + ')' : ''}</span>
+        ${r.air_date ? `<span style="color:#3a4f56">${esc(String(r.air_date).slice(0,10))}</span>` : ''}
+      </div>
+    `).join('')}
+    ${rows.length > recent.length ? `<div style="font-size:10px;color:#3a4f56;margin-top:2px">+ ${rows.length - recent.length} more</div>` : ''}
   `
 }
 
