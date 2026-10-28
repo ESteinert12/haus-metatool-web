@@ -64,7 +64,7 @@ function normTitle(raw) {
   // Leading-article stripping (The/A/An) was considered and NOT added --
   // zero HAUS-own cue titles in the real corpus start with one, unlike BMI
   // royalty statements where that pattern is real.
-  const TRAILING_SUFFIX_RE = /\b(DRUMS AND FX|NO DRUMS|ALT MIX|FULL|NODR|NODRUMS|DNB|MIX|NOPNO|NODMSPERC|BUMPER|STING|ALT|DRUMS|MAIN|NOLEAD)\b[^A-Z0-9]*$/;
+  const TRAILING_SUFFIX_RE = /\b(DRUMS AND FX|NO DRUMS|ALT MIX|FULL|NODR|NODRUMS|DNB|MIX|NOPNO|NODMSPERC|BUMPER|STING|ALT|BASS AND DRUM|DRUM AND BASS|DRUMS AND BASS|DRUMS|DRUM|MAIN|NOLEAD)\b[^A-Z0-9]*$/;
   let prev;
   do {
     prev = s;

@@ -446,6 +446,25 @@ function matchLineToTitles(line, titlesIndex) {
     const exact = titlesIndex.filter(t => t.normTitle === norm)
     if (exact.length === 1) return { status: 'matched', candidates: exact, confidence: 'exact' }
     if (exact.length > 1) return { status: 'ambiguous', candidates: exact, confidence: 'exact-multiple' }
+
+    // BMI (and apparently other PROs) routinely drop a leading "The" that
+    // the HAUS catalog keeps on the title (e.g. "Duke Of Dumbass" vs "The
+    // Duke Of Dumbass") -- confirmed against a real statement: 928 of 4,063
+    // previously-unmatched lines in one BMI file resolve uniquely this way,
+    // zero of them ambiguous (see
+    // handoff-2026-10-28-titles-usage-count-and-royalty-tracker-rebase.md).
+    // Deliberately NOT added to the shared normTitle() -- see that
+    // function's own comment on this -- cue sheets show zero evidence of
+    // this pattern, so this stays scoped to royalty matching, where the
+    // evidence actually is. Still exact-match only, never fuzzy -- a wrong
+    // guess here means wrong money, same posture as every other match tier
+    // in this file.
+    const withThe = normTitle('THE ' + (line.titleRaw || ''))
+    if (withThe && withThe !== norm) {
+      const withTheMatches = titlesIndex.filter(t => t.normTitle === withThe)
+      if (withTheMatches.length === 1) return { status: 'matched', candidates: withTheMatches, confidence: 'exact-with-article' }
+      if (withTheMatches.length > 1) return { status: 'ambiguous', candidates: withTheMatches, confidence: 'exact-with-article-multiple' }
+    }
   }
   return { status: 'unmatched', candidates: [] }
 }
