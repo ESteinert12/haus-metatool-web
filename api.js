@@ -7967,6 +7967,32 @@ app.get('/api/cue-sheets/title-search', async (req, res) => {
 // shape as importOneCueSheet, manual-confirm only (this one involves real
 // money, so there is an even stronger case than cue sheets to never
 // silently write a confirmed match without a human in the loop).
+// One multi-row INSERT per 500-row chunk instead of one query per line --
+// same fix, same reasoning, as ebr-ack-import.js's insertAckRowsBulk()
+// (commit 732eaef): a real statement here runs 30k-80k lines (confirmed
+// against Erik's own BMI/ASCAP archive), so one-row-at-a-time would be slow
+// AND multiply the odds of hitting a transient Neon drop mid-import.
+const ROYALTY_LINES_BULK_CHUNK = 500
+const ROYALTY_LINE_COLS = ['statement_id', 'title_raw', 'title_normalized', 'payee_name', 'payee_role', 'amount',
+  'usage_type', 'country', 'work_id', 'show_name', 'episode_name', 'bonus_amount', 'match_status', 'matched_sku_root']
+async function insertRoyaltyLinesBulk(rows) {
+  for (let i = 0; i < rows.length; i += ROYALTY_LINES_BULK_CHUNK) {
+    const chunk = rows.slice(i, i + ROYALTY_LINES_BULK_CHUNK)
+    const values = []
+    const params = []
+    chunk.forEach((row, idx) => {
+      const base = idx * ROYALTY_LINE_COLS.length
+      values.push(`(${ROYALTY_LINE_COLS.map((_, j) => `$${base + j + 1}`).join(',')})`)
+      params.push(...row)
+    })
+    await _pgRetry(
+      `INSERT INTO royalty_statement_lines (${ROYALTY_LINE_COLS.join(',')}) VALUES ${values.join(',')}`,
+      params,
+      'royalty-import bulk insert lines'
+    )
+  }
+}
+
 async function importOneRoyaltyStatement(filePath, origName, titlesIndex, importedBy) {
   const parsed = parseRoyaltyStatementFile(filePath)
 
@@ -7984,9 +8010,10 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
   // a literal re-upload of the identical file before its period is even
   // parsed out, and catches formats where period parsing might fail/be null).
   const dupByPeriod = parsed.meta.period
-    ? await pgPool.query(
+    ? await _pgRetry(
         `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 LIMIT 1`,
-        [parsed.meta.source, parsed.format, parsed.meta.period]
+        [parsed.meta.source, parsed.format, parsed.meta.period],
+        'royalty-import dedupe-by-period'
       )
     : { rows: [] }
   if (dupByPeriod.rows.length) {
@@ -7996,9 +8023,10 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
       duplicateOfStatementId: dupByPeriod.rows[0].id,
     }
   }
-  const dup = await pgPool.query(
+  const dup = await _pgRetry(
     `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 LIMIT 1`,
-    [origName]
+    [origName],
+    'royalty-import dedupe-by-filename'
   )
   if (dup.rows.length) {
     return {
@@ -8008,14 +8036,16 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
     }
   }
 
-  const statementRow = await pgPool.query(
+  const statementRow = await _pgRetry(
     `INSERT INTO royalty_statements (source, format, period, source_filename, statement_total, imported_by)
      VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-    [parsed.meta.source, parsed.format, parsed.meta.period || null, origName, parsed.meta.statementTotal || 0, importedBy || null]
+    [parsed.meta.source, parsed.format, parsed.meta.period || null, origName, parsed.meta.statementTotal || 0, importedBy || null],
+    'royalty-import insert statement'
   )
   const statementId = statementRow.rows[0].id
 
   let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+  const lineRows = []
 
   for (const line of parsed.lines) {
     const m = matchLineToTitles(line, titlesIndex)
@@ -8025,16 +8055,12 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
 
     const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
 
-    await pgPool.query(
-      `INSERT INTO royalty_statement_lines
-         (statement_id, title_raw, title_normalized, payee_name, payee_role, amount,
-          usage_type, country, work_id, show_name, episode_name, bonus_amount, match_status, matched_sku_root)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-      [statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
+    lineRows.push([statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
        line.usageType || null, line.country || null, line.workId || null, line.showName || null, line.episodeName || null,
-       line.bonusAmount || null, m.status, matchedSku]
-    )
+       line.bonusAmount || null, m.status, matchedSku])
   }
+
+  await insertRoyaltyLinesBulk(lineRows)
 
   return {
     ok: true,
@@ -8053,7 +8079,7 @@ app.post('/api/royalties/import', upload.single('file'), async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   if (!req.file) return res.json({ ok: false, error: 'No file provided' })
   try {
-    const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+    const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-import titles index')
     const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
     const origName = req.file.originalname || req.file.path
     const result = await importOneRoyaltyStatement(req.file.path, origName, titlesIndex, req.session?.user?.username)
@@ -8070,7 +8096,7 @@ app.post('/api/royalties/import-bulk', upload.array('files', 200), async (req, r
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   if (!req.files || !req.files.length) return res.json({ ok: false, error: 'No files provided' })
 
-  const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+  const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-import-bulk titles index')
   const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
   const importedBy = req.session?.user?.username
 
@@ -8099,7 +8125,7 @@ app.post('/api/royalties/import-bulk', upload.array('files', 200), async (req, r
 app.get('/api/royalties', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const r = await pgPool.query(`
+    const r = await _pgRetry(`
       SELECT rs.*,
         COUNT(l.id) AS line_count,
         COUNT(l.id) FILTER (WHERE l.match_status = 'confirmed') AS confirmed_count,
@@ -8110,7 +8136,7 @@ app.get('/api/royalties', async (req, res) => {
       LEFT JOIN royalty_statement_lines l ON l.statement_id = rs.id
       GROUP BY rs.id
       ORDER BY rs.imported_at DESC
-    `)
+    `, [], 'royalties list')
     res.json({ ok: true, statements: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -8118,13 +8144,14 @@ app.get('/api/royalties', async (req, res) => {
 app.get('/api/royalties/:id/lines', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const linesRes = await pgPool.query(
+    const linesRes = await _pgRetry(
       `SELECT l.*, t.title AS matched_title
        FROM royalty_statement_lines l
        LEFT JOIN titles t ON t.sku_root = l.matched_sku_root
        WHERE l.statement_id = $1
        ORDER BY l.amount DESC, l.id`,
-      [req.params.id]
+      [req.params.id],
+      'royalties lines'
     )
     // Same song in the same statement commonly repeats across many lines
     // (confirmed on real BMI data -- one title split across many per-
@@ -8165,28 +8192,31 @@ app.post('/api/royalties/lines/:id/confirm', async (req, res) => {
     const status = sku_root ? 'confirmed' : 'rejected'
     const confirmedBy = req.session?.user?.username || null
 
-    const lineRes = await pgPool.query(
+    const lineRes = await _pgRetry(
       `SELECT statement_id, title_normalized FROM royalty_statement_lines WHERE id = $1`,
-      [req.params.id]
+      [req.params.id],
+      'royalties confirm lookup'
     )
     if (!lineRes.rows.length) return res.json({ ok: false, error: 'Line not found' })
     const { statement_id, title_normalized } = lineRes.rows[0]
 
-    await pgPool.query(
+    await _pgRetry(
       `UPDATE royalty_statement_lines
        SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
        WHERE id = $4`,
-      [sku_root || null, status, confirmedBy, req.params.id]
+      [sku_root || null, status, confirmedBy, req.params.id],
+      'royalties confirm update'
     )
 
     let appliedToCount = 0
     if (applyToAllInStatement && title_normalized) {
-      const applyRes = await pgPool.query(
+      const applyRes = await _pgRetry(
         `UPDATE royalty_statement_lines
          SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
          WHERE statement_id = $4 AND title_normalized = $5 AND id != $6
            AND match_status IN ('unmatched', 'ambiguous')`,
-        [sku_root || null, status, confirmedBy, statement_id, title_normalized, req.params.id]
+        [sku_root || null, status, confirmedBy, statement_id, title_normalized, req.params.id],
+        'royalties confirm apply-to-all'
       )
       appliedToCount = applyRes.rowCount
     }
@@ -8199,7 +8229,7 @@ app.get('/api/royalties/title-search', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const q = `%${(req.query.q || '').trim()}%`
-    const r = await pgPool.query(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q])
+    const r = await _pgRetry(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q], 'royalties title-search')
     res.json({ ok: true, titles: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -8208,6 +8238,26 @@ app.get('/api/royalties/title-search', async (req, res) => {
 // Suggest-only, never auto-linked -- see api.js schema comment and
 // royalty-import.js's parseEpisodeReferenceFile header for the full
 // reasoning and the real match-rate verification this was built from.
+const EPISODE_REF_BULK_CHUNK = 500
+const EPISODE_REF_COLS = ['import_id', 'show_code', 'title_raw', 'title_normalized', 'air_date', 'month', 'season', 'year']
+async function insertEpisodeReferenceRowsBulk(rows) {
+  for (let i = 0; i < rows.length; i += EPISODE_REF_BULK_CHUNK) {
+    const chunk = rows.slice(i, i + EPISODE_REF_BULK_CHUNK)
+    const values = []
+    const params = []
+    chunk.forEach((row, idx) => {
+      const base = idx * EPISODE_REF_COLS.length
+      values.push(`(${EPISODE_REF_COLS.map((_, j) => `$${base + j + 1}`).join(',')})`)
+      params.push(...row)
+    })
+    await _pgRetry(
+      `INSERT INTO episode_reference (${EPISODE_REF_COLS.join(',')}) VALUES ${values.join(',')}`,
+      params,
+      'episode-reference bulk insert rows'
+    )
+  }
+}
+
 async function importEpisodeReference(filePath, origName, importedBy) {
   const parsed = parseEpisodeReferenceFile(filePath)
   if (!parsed.rows.length) {
@@ -8219,24 +8269,23 @@ async function importEpisodeReference(filePath, origName, importedBy) {
   // duplicating or erroring -- this is a reference list meant to be kept
   // current, unlike a royalty statement where re-importing the same period
   // would double-count real money.
-  const existing = await pgPool.query(`SELECT id FROM episode_reference_imports WHERE source_filename = $1`, [origName])
+  const existing = await _pgRetry(`SELECT id FROM episode_reference_imports WHERE source_filename = $1`, [origName], 'episode-reference dedupe lookup')
   if (existing.rows.length) {
-    await pgPool.query(`DELETE FROM episode_reference_imports WHERE id = $1`, [existing.rows[0].id]) // cascades to episode_reference rows
+    await _pgRetry(`DELETE FROM episode_reference_imports WHERE id = $1`, [existing.rows[0].id], 'episode-reference replace delete') // cascades to episode_reference rows
   }
 
-  const importRow = await pgPool.query(
+  const importRow = await _pgRetry(
     `INSERT INTO episode_reference_imports (source_filename, row_count, imported_by) VALUES ($1,$2,$3) RETURNING id`,
-    [origName, parsed.rows.length, importedBy || null]
+    [origName, parsed.rows.length, importedBy || null],
+    'episode-reference insert import row'
   )
   const importId = importRow.rows[0].id
 
-  for (const row of parsed.rows) {
-    await pgPool.query(
-      `INSERT INTO episode_reference (import_id, show_code, title_raw, title_normalized, air_date, month, season, year)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
-      [importId, row.showCode, row.titleRaw, row.titleNormalized, row.airDate, row.month, row.season, row.year]
-    )
-  }
+  // Bulk insert, same reasoning as royalty_statement_lines above -- a real
+  // reference list here can run thousands of rows.
+  await insertEpisodeReferenceRowsBulk(parsed.rows.map(row =>
+    [importId, row.showCode, row.titleRaw, row.titleNormalized, row.airDate, row.month, row.season, row.year]
+  ))
 
   return { ok: true, origName, importId, rowCount: parsed.rows.length, replaced: existing.rows.length > 0 }
 }
@@ -8258,13 +8307,13 @@ app.post('/api/episode-reference/import', upload.single('file'), async (req, res
 app.get('/api/episode-reference', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const r = await pgPool.query(`
+    const r = await _pgRetry(`
       SELECT i.*, COUNT(e.id) AS actual_row_count
       FROM episode_reference_imports i
       LEFT JOIN episode_reference e ON e.import_id = i.id
       GROUP BY i.id
       ORDER BY i.imported_at DESC
-    `)
+    `, [], 'episode-reference list')
     res.json({ ok: true, imports: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -8279,9 +8328,10 @@ app.get('/api/episode-reference/suggest', async (req, res) => {
   try {
     const titleNorm = normTitle((req.query.title || '').trim())
     if (!titleNorm) return res.json({ ok: true, candidates: [] })
-    const r = await pgPool.query(
+    const r = await _pgRetry(
       `SELECT show_code, title_raw, air_date, season, year FROM episode_reference WHERE title_normalized = $1 ORDER BY air_date LIMIT 10`,
-      [titleNorm]
+      [titleNorm],
+      'episode-reference suggest'
     )
     res.json({ ok: true, candidates: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
