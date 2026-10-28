@@ -138,7 +138,7 @@ async function run() {
       AND ae.sku_root IS NULL
       AND ($1::boolean OR ack.status IS DISTINCT FROM 'RA')
     GROUP BY t.sku_root, t.title, t.team_id, t.created_at
-    HAVING count(tw.id) > 0 AND NOT bool_or(tw.pro = 'SESAC')
+    HAVING count(tw.id) > 0 AND bool_or(tw.pro IS DISTINCT FROM 'SESAC')  -- exclude only if EVERY writer is SESAC (pure-SESAC title, not an EBR/joint ASCAP-BMI work); a mixed SESAC+ASCAP/BMI title is eligible, SESAC writer included in the row
     ORDER BY t.title ASC
   `, [INCLUDE_ACCEPTED]);
   console.log('EBR-eligible titles (after ebr_acknowledgments + ebr_export_log exclusion):', eligible.length);

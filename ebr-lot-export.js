@@ -161,7 +161,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
     if (t.ack_status === 'RA')                skipped.push({ sku: t.sku_root, reason: 'already accepted by MusicMark' });
     else if (t.is_jup)                        skipped.push({ sku: t.sku_root, reason: 'JUP title — not supported yet' });
     else if (!w.length)                       skipped.push({ sku: t.sku_root, reason: 'no writers on file' });
-    else if (w.some(x => x.pro === 'SESAC'))  skipped.push({ sku: t.sku_root, reason: 'SESAC writer — separate process' });
+    else if (w.every(x => x.pro === 'SESAC'))  skipped.push({ sku: t.sku_root, reason: 'all writers SESAC — not an EBR/joint ASCAP-BMI work' });
     else if (badSplit)                        skipped.push({ sku: t.sku_root, reason: `writer splits sum to ${splitSum}%, not ~100% — fix before export` });
     else                                       exportable.push(t);
   });

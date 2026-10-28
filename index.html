@@ -8624,9 +8624,17 @@ async function ebrRunSearch() {
 
   ebrState.titles = titles.map(t => {
     const w = ebrState.writersByTeam[t.team_id] || []
-    const hasSesac = w.some(x => x.pro === 'SESAC')
+    // __sesac = ALL writers are SESAC (a pure-SESAC title, not an EBR/joint
+    // ASCAP-BMI work at all). A MIXED title (SESAC + ASCAP/BMI) is eligible
+    // for EBR like any other -- the SESAC writer is included in the row same
+    // as any writer, via ebrPublisherFor's HAUS_PUBLISHERS.SESAC entry (SDBK
+    // Music). __hasSesacWriter tracks the mixed case separately so it can be
+    // flagged (non-blocking) for a future, separate SESAC registration of
+    // that writer's own share.
+    const allSesac = w.length > 0 && w.every(x => x.pro === 'SESAC')
+    const hasSesacWriter = w.some(x => x.pro === 'SESAC')
     const noWriters = w.length === 0
-    return { ...t, __checked: !hasSesac && !noWriters, __sesac: hasSesac, __noWriters: noWriters }
+    return { ...t, __checked: !allSesac && !noWriters, __sesac: allSesac, __hasSesacWriter: hasSesacWriter, __noWriters: noWriters }
   })
 
   ebrRenderResults()
@@ -8641,7 +8649,8 @@ function ebrRenderResults() {
       ? writers.map(w => `${esc(w.writer_name)} (${esc(w.pro || '?')}${w.split_pct != null ? ' ' + w.split_pct + '%' : ''})`).join(', ')
       : '<span style="color:#c0392b">no writers on file for this team</span>'
     let warn = ''
-    if (t.__sesac) warn = '<span style="color:#c0392b;font-weight:600">SESAC writer — export separately, not part of this MusicMark batch</span>'
+    if (t.__sesac) warn = '<span style="color:#c0392b;font-weight:600">All writers SESAC — not an EBR/MusicMark work, handle separately</span>'
+    else if (t.__hasSesacWriter) warn = '<span style="color:#7b3fc4;font-weight:600">Includes a SESAC writer — also needs separate SESAC registration for that writer\'s share</span>'
     else if (writers.length > EBR_MAX_ORIGINAL_PUBS) warn = `<span style="color:#c0392b">${writers.length} writers — this template only carries publisher info for the first ${EBR_MAX_ORIGINAL_PUBS}, review manually</span>`
     const disabled = t.__sesac || t.__noWriters
     return `
@@ -9024,9 +9033,14 @@ async function ebrLoadGapPage() {
 
   ebrGapState.titles = titleRows.map(t => {
     const w = ebrGapState.writersByTeam[t.team_id] || []
-    const hasSesac = w.some(x => x.pro === 'SESAC')
+    // See the matching comment in ebrLoadLots above: __sesac means ALL
+    // writers are SESAC (truly not an EBR work); a mixed SESAC+ASCAP/BMI
+    // title is eligible and __hasSesacWriter just flags it for a separate,
+    // future SESAC registration of that writer's share.
+    const allSesac = w.length > 0 && w.every(x => x.pro === 'SESAC')
+    const hasSesacWriter = w.some(x => x.pro === 'SESAC')
     const noWriters = w.length === 0
-    return { ...t, __checked: !hasSesac && !noWriters, __sesac: hasSesac, __noWriters: noWriters }
+    return { ...t, __checked: !allSesac && !noWriters, __sesac: allSesac, __hasSesacWriter: hasSesacWriter, __noWriters: noWriters }
   })
 
   ebrRenderGapResults()
@@ -9041,7 +9055,8 @@ function ebrRenderGapResults() {
       ? writers.map(w => `${esc(w.writer_name)} (${esc(w.pro || '?')}${w.split_pct != null ? ' ' + w.split_pct + '%' : ''})`).join(', ')
       : '<span style="color:#c0392b">no writers on file for this team</span>'
     let warn = ''
-    if (t.__sesac) warn = '<span style="color:#c0392b;font-weight:600">SESAC writer — not EBR/MusicMark-eligible, handle separately</span>'
+    if (t.__sesac) warn = '<span style="color:#c0392b;font-weight:600">All writers SESAC — not EBR/MusicMark-eligible, handle separately</span>'
+    else if (t.__hasSesacWriter) warn = '<span style="color:#7b3fc4;font-weight:600">Includes a SESAC writer — also needs separate SESAC registration for that writer\'s share</span>'
     else if (t.__noWriters) warn = '<span style="color:#c0392b">no writers on file — not exportable</span>'
     else if (writers.length > EBR_MAX_ORIGINAL_PUBS) warn = `<span style="color:#c0392b">${writers.length} writers — this template only carries publisher info for the first ${EBR_MAX_ORIGINAL_PUBS}, review manually</span>`
     const disabled = t.__sesac || t.__noWriters
