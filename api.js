@@ -1106,7 +1106,7 @@ app.post('/api/auth/login', async (req, res) => {
     // Transparent re-hash: an account on the legacy scheme is migrated the first
     // time it signs in, without anyone being locked out.
     if (needsUpgrade) {
-      await pgPool.query(`UPDATE haus_users SET password_hash=$1 WHERE user_id=$2`,
+      await _pgRetry(`UPDATE haus_users SET password_hash=$1 WHERE user_id=$2`,
         [_hashPassword(password), row.user_id]).catch(e => console.warn('[auth] rehash failed:', e.message))
       console.log(`[auth] upgraded ${row.username} to scrypt`)
     }
@@ -1138,14 +1138,14 @@ app.post('/api/auth/change-password', async (req, res) => {
     if (!newPassword || String(newPassword).length < 12) {
       return res.json({ ok: false, error: 'New password must be at least 12 characters' })
     }
-    const cur = await pgPool.query(
+    const cur = await _pgRetry(
       `SELECT user_id, password_hash FROM haus_users WHERE LOWER(username)=LOWER($1)`, [username])
     const row = cur.rows[0]
     if (!row) return res.json({ ok: false, error: 'Current password incorrect' })
     if (!_verifyPassword(oldPassword || '', row.password_hash).ok) {
       return res.json({ ok: false, error: 'Current password incorrect' })
     }
-    await pgPool.query(
+    await _pgRetry(
       `UPDATE haus_users SET password_hash=$1, must_change_password=false WHERE user_id=$2`,
       [_hashPassword(newPassword), row.user_id])
     if (req.session?.user?.user_id === row.user_id) req.session.user.must_change_password = false
@@ -1167,7 +1167,7 @@ app.post('/api/portal/auth/login', async (req, res) => {
   const { email, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT pu.portal_user_id, pu.client_id, pu.email, pu.display_name,
               pu.password_hash, pu.must_change_password,
               c.name AS client_name
@@ -1181,7 +1181,7 @@ app.post('/api/portal/auth/login', async (req, res) => {
     const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
     if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
     if (needsUpgrade) {
-      await pgPool.query(`UPDATE portal_users SET password_hash=$1 WHERE portal_user_id=$2`,
+      await _pgRetry(`UPDATE portal_users SET password_hash=$1 WHERE portal_user_id=$2`,
         [_hashPassword(password), row.portal_user_id]).catch(e => console.warn('[portal-auth] rehash failed:', e.message))
     }
     const portalUser = {
@@ -1216,12 +1216,12 @@ app.post('/api/portal/auth/change-password', async (req, res) => {
     if (!newPassword || String(newPassword).length < 12) {
       return res.json({ ok: false, error: 'New password must be at least 12 characters' })
     }
-    const cur = await pgPool.query(`SELECT password_hash FROM portal_users WHERE portal_user_id=$1`, [pu.portal_user_id])
+    const cur = await _pgRetry(`SELECT password_hash FROM portal_users WHERE portal_user_id=$1`, [pu.portal_user_id])
     const row = cur.rows[0]
     if (!row || !_verifyPassword(oldPassword || '', row.password_hash).ok) {
       return res.json({ ok: false, error: 'Current password incorrect' })
     }
-    await pgPool.query(`UPDATE portal_users SET password_hash=$1, must_change_password=false WHERE portal_user_id=$2`,
+    await _pgRetry(`UPDATE portal_users SET password_hash=$1, must_change_password=false WHERE portal_user_id=$2`,
       [_hashPassword(newPassword), pu.portal_user_id])
     req.session.portalUser.must_change_password = false
     res.json({ ok: true })
@@ -1244,7 +1244,7 @@ app.post('/api/writer-portal/auth/login', async (req, res) => {
   const { email, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT wpu.writer_portal_user_id, wpu.composer_id, wpu.email, wpu.display_name,
               wpu.password_hash, wpu.must_change_password,
               c.full_name AS composer_name
@@ -1258,7 +1258,7 @@ app.post('/api/writer-portal/auth/login', async (req, res) => {
     const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
     if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
     if (needsUpgrade) {
-      await pgPool.query(`UPDATE writer_portal_users SET password_hash=$1 WHERE writer_portal_user_id=$2`,
+      await _pgRetry(`UPDATE writer_portal_users SET password_hash=$1 WHERE writer_portal_user_id=$2`,
         [_hashPassword(password), row.writer_portal_user_id]).catch(e => console.warn('[writer-portal-auth] rehash failed:', e.message))
     }
     const writerUser = {
@@ -1292,12 +1292,12 @@ app.post('/api/writer-portal/auth/change-password', async (req, res) => {
     if (!newPassword || String(newPassword).length < 12) {
       return res.json({ ok: false, error: 'New password must be at least 12 characters' })
     }
-    const cur = await pgPool.query(`SELECT password_hash FROM writer_portal_users WHERE writer_portal_user_id=$1`, [wu.writer_portal_user_id])
+    const cur = await _pgRetry(`SELECT password_hash FROM writer_portal_users WHERE writer_portal_user_id=$1`, [wu.writer_portal_user_id])
     const row = cur.rows[0]
     if (!row || !_verifyPassword(oldPassword || '', row.password_hash).ok) {
       return res.json({ ok: false, error: 'Current password incorrect' })
     }
-    await pgPool.query(`UPDATE writer_portal_users SET password_hash=$1, must_change_password=false WHERE writer_portal_user_id=$2`,
+    await _pgRetry(`UPDATE writer_portal_users SET password_hash=$1, must_change_password=false WHERE writer_portal_user_id=$2`,
       [_hashPassword(newPassword), wu.writer_portal_user_id])
     req.session.writerUser.must_change_password = false
     res.json({ ok: true })
@@ -1312,7 +1312,7 @@ app.get('/api/writer-portal/my-assignments', async (req, res) => {
   const composerId = req.session?.writerUser?.composer_id
   if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT a.assignment_id, a.title, a.type, a.track, a.brief_text, a.priority,
               a.status, a.due_date, a.notes, a.created_at,
               COALESCE(
@@ -1346,7 +1346,7 @@ app.post('/api/writer-portal/assignments/:id/status', async (req, res) => {
   if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
   const { status } = req.body
   try {
-    const cur = await pgPool.query(
+    const cur = await _pgRetry(
       `SELECT status FROM assignments WHERE assignment_id = $1 AND composer_id = $2`,
       [req.params.id, composerId]
     )
@@ -1356,7 +1356,7 @@ app.post('/api/writer-portal/assignments/:id/status', async (req, res) => {
     if (!allowed.includes(status)) {
       return res.status(403).json({ ok: false, error: `Cannot move an assignment from "${row.status}" to "${status}"` })
     }
-    await pgPool.query(
+    await _pgRetry(
       `UPDATE assignments SET status = $1, updated_at = now() WHERE assignment_id = $2`,
       [status, req.params.id]
     )
@@ -1373,7 +1373,7 @@ app.get('/api/writer-portal/notifications', async (req, res) => {
   const composerId = req.session?.writerUser?.composer_id
   if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT notification_id, assignment_id, type, message, read_at, created_at
          FROM writer_notifications
         WHERE composer_id = $1
@@ -1381,7 +1381,7 @@ app.get('/api/writer-portal/notifications', async (req, res) => {
         LIMIT 100`,
       [composerId]
     )
-    const unread = await pgPool.query(
+    const unread = await _pgRetry(
       `SELECT COUNT(*)::int AS n FROM writer_notifications WHERE composer_id = $1 AND read_at IS NULL`,
       [composerId]
     )
@@ -1397,7 +1397,7 @@ app.post('/api/writer-portal/notifications/:id/read', async (req, res) => {
   const composerId = req.session?.writerUser?.composer_id
   if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `UPDATE writer_notifications SET read_at = now()
         WHERE notification_id = $1 AND composer_id = $2 AND read_at IS NULL
         RETURNING notification_id`,
@@ -1417,7 +1417,7 @@ app.get('/api/writer-portal/my-titles', async (req, res) => {
   const composerId = req.session?.writerUser?.composer_id
   if (!composerId) return res.status(401).json({ ok: false, error: 'Not logged in' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT t.title_id, t.title, t.sku_root, t.genre, t.status, t.date_added,
               tm.team_id,
               EXISTS(SELECT 1 FROM mix_stems ms WHERE ms.title_id = t.title_id) AS has_stems
@@ -1437,11 +1437,11 @@ app.get('/api/portal/overview', async (req, res) => {
   const clientId = req.session.portalUser.client_id
   try {
     const [pitches, briefs, licenses, messages, client] = await Promise.all([
-      pgPool.query(`SELECT COUNT(*)::int AS n FROM pitches WHERE client_id=$1 AND status='pending'`, [clientId]),
-      pgPool.query(`SELECT COUNT(*)::int AS n FROM briefs WHERE client_id=$1 AND status='active'`, [clientId]),
-      pgPool.query(`SELECT COUNT(*)::int AS n FROM licenses WHERE client_id=$1 AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)`, [clientId]),
-      pgPool.query(`SELECT COUNT(*)::int AS n FROM portal_messages WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`, [clientId]),
-      pgPool.query(`SELECT name FROM clients WHERE id=$1`, [clientId])
+      _pgRetry(`SELECT COUNT(*)::int AS n FROM pitches WHERE client_id=$1 AND status='pending'`, [clientId]),
+      _pgRetry(`SELECT COUNT(*)::int AS n FROM briefs WHERE client_id=$1 AND status='active'`, [clientId]),
+      _pgRetry(`SELECT COUNT(*)::int AS n FROM licenses WHERE client_id=$1 AND (expires_at IS NULL OR expires_at >= CURRENT_DATE)`, [clientId]),
+      _pgRetry(`SELECT COUNT(*)::int AS n FROM portal_messages WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`, [clientId]),
+      _pgRetry(`SELECT name FROM clients WHERE id=$1`, [clientId])
     ])
     res.json({
       ok: true,
@@ -1458,7 +1458,7 @@ app.get('/api/portal/overview', async (req, res) => {
 app.get('/api/portal/briefs', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT brief_id, title, description, mood_tags, budget_type, due_date, status, created_at
          FROM briefs WHERE client_id=$1 ORDER BY created_at DESC`,
       [req.session.portalUser.client_id]
@@ -1472,7 +1472,7 @@ app.post('/api/portal/briefs', async (req, res) => {
   const { title, description, mood_tags, budget_type, due_date } = req.body
   if (!title || !String(title).trim()) return res.json({ ok: false, error: 'Title is required' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `INSERT INTO briefs (client_id, title, description, mood_tags, budget_type, due_date, status, created_by)
        VALUES ($1, $2, $3, $4, $5, $6, 'active', $7)
        RETURNING brief_id, title, description, mood_tags, budget_type, due_date, status, created_at`,
@@ -1488,7 +1488,7 @@ app.post('/api/portal/briefs', async (req, res) => {
 app.get('/api/portal/pitches', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT p.pitch_id, p.brief_id, p.rep_note, p.status, p.created_at, p.responded_at,
               t.sku_root, t.title, t.key, t.bpm, t.mood,
               pg.primary_genre_name
@@ -1508,7 +1508,7 @@ app.post('/api/portal/pitches/:id/respond', async (req, res) => {
   const { status } = req.body
   if (!['approved', 'passed'].includes(status)) return res.json({ ok: false, error: 'status must be approved or passed' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `UPDATE pitches SET status=$1, responded_at=now()
         WHERE pitch_id=$2 AND client_id=$3
         RETURNING pitch_id, status, responded_at`,
@@ -1523,7 +1523,7 @@ app.post('/api/portal/pitches/:id/respond', async (req, res) => {
 app.get('/api/portal/licenses', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT l.license_id, l.license_type, l.formats, l.expires_at, l.created_at,
               t.sku_root, t.title, b.title AS brief_title
          FROM licenses l
@@ -1558,7 +1558,7 @@ app.get('/api/portal/library', async (req, res) => {
     const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
 
     params.push(limit, offset)
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT t.sku_root, t.title, t.key, t.bpm, t.mood, pg.primary_genre_name
          FROM titles t
          LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
@@ -1571,8 +1571,8 @@ app.get('/api/portal/library', async (req, res) => {
     let facets = undefined
     if (req.query.facets === 'true') {
       const [genres, moods] = await Promise.all([
-        pgPool.query(`SELECT DISTINCT primary_genre_name FROM primary_genres ORDER BY primary_genre_name`),
-        pgPool.query(`SELECT DISTINCT mood FROM titles WHERE mood IS NOT NULL AND mood <> '' ORDER BY mood LIMIT 200`)
+        _pgRetry(`SELECT DISTINCT primary_genre_name FROM primary_genres ORDER BY primary_genre_name`),
+        _pgRetry(`SELECT DISTINCT mood FROM titles WHERE mood IS NOT NULL AND mood <> '' ORDER BY mood LIMIT 200`)
       ])
       facets = { genres: genres.rows.map(r => r.primary_genre_name), moods: moods.rows.map(r => r.mood) }
     }
@@ -1586,7 +1586,7 @@ app.get('/api/portal/library', async (req, res) => {
 app.get('/api/portal/playlists', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const playlists = await pgPool.query(
+    const playlists = await _pgRetry(
       `SELECT playlist_id, name, share_token, created_by, created_at
          FROM portal_playlists WHERE client_id=$1 ORDER BY created_at DESC`,
       [req.session.portalUser.client_id]
@@ -1597,7 +1597,7 @@ app.get('/api/portal/playlists', async (req, res) => {
     const playlistIds = playlists.rows.map(pl => pl.playlist_id)
     const tracksByPlaylist = {}
     if (playlistIds.length) {
-      const allTracks = await pgPool.query(
+      const allTracks = await _pgRetry(
         `SELECT ppt.playlist_id, t.sku_root, t.title, t.key, t.bpm
            FROM portal_playlist_tracks ppt
            JOIN titles t ON t.sku_root = ppt.sku_root
@@ -1621,7 +1621,7 @@ app.post('/api/portal/playlists', async (req, res) => {
   if (!name || !String(name).trim()) return res.json({ ok: false, error: 'Playlist name is required' })
   try {
     const pu = req.session.portalUser
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `INSERT INTO portal_playlists (client_id, name, created_by)
        VALUES ($1, $2, $3)
        RETURNING playlist_id, name, share_token, created_by, created_at`,
@@ -1634,7 +1634,7 @@ app.post('/api/portal/playlists', async (req, res) => {
 app.delete('/api/portal/playlists/:id', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `DELETE FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
       [req.params.id, req.session.portalUser.client_id]
     )
@@ -1649,17 +1649,17 @@ app.post('/api/portal/playlists/:id/tracks', async (req, res) => {
   if (!sku_root) return res.json({ ok: false, error: 'sku_root is required' })
   try {
     // Ownership check — the playlist must belong to this client.
-    const owns = await pgPool.query(
+    const owns = await _pgRetry(
       `SELECT 1 FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
       [req.params.id, req.session.portalUser.client_id]
     )
     if (!owns.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
 
-    const pos = await pgPool.query(
+    const pos = await _pgRetry(
       `SELECT COALESCE(MAX(sort_order), -1) + 1 AS next FROM portal_playlist_tracks WHERE playlist_id=$1`,
       [req.params.id]
     )
-    await pgPool.query(
+    await _pgRetry(
       `INSERT INTO portal_playlist_tracks (playlist_id, sku_root, sort_order)
        VALUES ($1, $2, $3) ON CONFLICT (playlist_id, sku_root) DO NOTHING`,
       [req.params.id, sku_root, pos.rows[0].next]
@@ -1671,12 +1671,12 @@ app.post('/api/portal/playlists/:id/tracks', async (req, res) => {
 app.delete('/api/portal/playlists/:id/tracks/:skuRoot', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
-    const owns = await pgPool.query(
+    const owns = await _pgRetry(
       `SELECT 1 FROM portal_playlists WHERE playlist_id=$1 AND client_id=$2`,
       [req.params.id, req.session.portalUser.client_id]
     )
     if (!owns.rowCount) return res.status(404).json({ ok: false, error: 'Playlist not found' })
-    await pgPool.query(
+    await _pgRetry(
       `DELETE FROM portal_playlist_tracks WHERE playlist_id=$1 AND sku_root=$2`,
       [req.params.id, req.params.skuRoot]
     )
@@ -1689,12 +1689,12 @@ app.get('/api/portal/messages', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
   try {
     const clientId = req.session.portalUser.client_id
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `SELECT message_id, sender_type, sender_name, body, created_at, read_at
          FROM portal_messages WHERE client_id=$1 ORDER BY created_at ASC`,
       [clientId]
     )
-    pgPool.query(
+    _pgRetry(
       `UPDATE portal_messages SET read_at=now() WHERE client_id=$1 AND sender_type='haus_rep' AND read_at IS NULL`,
       [clientId]
     ).catch(e => console.warn('[portal-messages] mark-read failed:', e.message))
@@ -1708,7 +1708,7 @@ app.post('/api/portal/messages', async (req, res) => {
   if (!body || !String(body).trim()) return res.json({ ok: false, error: 'Message body is required' })
   try {
     const pu = req.session.portalUser
-    const result = await pgPool.query(
+    const result = await _pgRetry(
       `INSERT INTO portal_messages (client_id, sender_type, sender_id, sender_name, body)
        VALUES ($1, 'portal_user', $2, $3, $4)
        RETURNING message_id, sender_type, sender_name, body, created_at`,
