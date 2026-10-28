@@ -123,6 +123,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
         ORDER BY a2.imported_at DESC LIMIT 1
      ) ack ON TRUE
      WHERE lt.lot_id = $1 AND COALESCE(t.status,'active') = 'active'
+       AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
      ORDER BY t.title ASC`,
     [lotId]
   );

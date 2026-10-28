@@ -134,6 +134,7 @@ async function run() {
     LEFT JOIN latest_ack ack ON ack.sku_root = t.sku_root
     WHERE COALESCE(t.status,'active') = 'active'
       AND COALESCE(t.is_jup,false)    = false
+      AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
       AND ae.sku_root IS NULL
       AND ($1::boolean OR ack.status IS DISTINCT FROM 'RA')
     GROUP BY t.sku_root, t.title, t.team_id, t.created_at

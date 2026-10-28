@@ -8530,6 +8530,7 @@ async function ebrLoadTitles(lotIds, dateFrom, dateTo, includeAccepted) {
      ) ack ON TRUE
      WHERE COALESCE(t.status,'active') = 'active'
        AND COALESCE(t.is_jup,false)    = false
+       AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
        AND l.lot_id = ANY($1::int[])
        AND t.created_at >= COALESCE($2::timestamptz, '-infinity')
        AND t.created_at <= COALESCE($3::timestamptz, 'infinity')
@@ -8967,6 +8968,7 @@ async function ebrGapCount() {
     LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
     WHERE COALESCE(t.status,'active') = 'active'
       AND COALESCE(t.is_jup,false)    = false
+      AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
       AND ae.sku_root IS NULL
   `)
   return (Array.isArray(rows) && rows.length) ? parseInt(rows[0].n, 10) : 0
@@ -8991,6 +8993,7 @@ async function ebrLoadGapPage() {
     LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
     WHERE COALESCE(t.status,'active') = 'active'
       AND COALESCE(t.is_jup,false)    = false
+      AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
       AND ae.sku_root IS NULL
     ORDER BY t.title ASC
     LIMIT $1 OFFSET $2
