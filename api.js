@@ -7610,17 +7610,17 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
   // links to the SAME episode instead of creating a disconnected duplicate.
   const program = (parsed.meta.program || '').trim() || null
   const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '')
-  const existingEpisode = await pgPool.query(
+  const existingEpisode = await _pgRetry(
     `SELECT id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
-    [program, episodeNum]
+    [program, episodeNum], 'cue-sheets episode lookup'
   )
   let episodeId
   if (existingEpisode.rows.length) {
     episodeId = existingEpisode.rows[0].id
   } else {
-    const newEpisode = await pgPool.query(
+    const newEpisode = await _pgRetry(
       `INSERT INTO episodes (program, episode_title, episode_num, air_date) VALUES ($1,$2,$3,$4) RETURNING id`,
-      [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null]
+      [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null], 'cue-sheets episode insert'
     )
     episodeId = newEpisode.rows[0].id
   }
@@ -7629,9 +7629,9 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
   // mistake (and the UI gives no indication a sheet was already imported) --
   // without this a resubmit silently doubles every cue. Require an explicit
   // replace=true to overwrite rather than failing silently or duplicating.
-  const dup = await pgPool.query(
+  const dup = await _pgRetry(
     `SELECT id, imported_at FROM cue_sheets WHERE episode_id = $1 AND source_filename = $2 LIMIT 1`,
-    [episodeId, origName]
+    [episodeId, origName], 'cue-sheets dedupe check'
   )
   if (dup.rows.length && !replace) {
     return {
@@ -7643,13 +7643,13 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
   if (dup.rows.length && replace) {
     // ON DELETE CASCADE on cue_sheet_cues/cue_sheet_cue_parties takes the old
     // cues and parties with it.
-    await pgPool.query(`DELETE FROM cue_sheets WHERE id = $1`, [dup.rows[0].id])
+    await _pgRetry(`DELETE FROM cue_sheets WHERE id = $1`, [dup.rows[0].id], 'cue-sheets dedupe delete')
   }
 
-  const sheetRow = await pgPool.query(
+  const sheetRow = await _pgRetry(
     `INSERT INTO cue_sheets (episode_id, source_filename, format, cue_sheet_ref, imported_by)
      VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [episodeId, origName, parsed.format, parsed.meta.cueSheetId || null, importedBy || null]
+    [episodeId, origName, parsed.format, parsed.meta.cueSheetId || null, importedBy || null], 'cue-sheets sheet insert'
   )
   const cueSheetId = sheetRow.rows[0].id
 
@@ -7667,7 +7667,7 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
 
     const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
 
-    const cueRow = await pgPool.query(
+    const cueRow = await _pgRetry(
       `INSERT INTO cue_sheet_cues
          (cue_sheet_id, seq, title_raw, title_normalized, usage_type, duration,
           is_haus_cue, classify_reason, classify_confidence, match_status,
@@ -7675,15 +7675,15 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
       [cueSheetId, cue.seq, cue.titleRaw, cue.titleNormalized, cue.usage || null, cue.duration || null,
        true, cue.classifyReason || null, cue.classifyConfidence || null, m.status,
-       matchedSku, m.confidence || null]
+       matchedSku, m.confidence || null], 'cue-sheets cue insert'
     )
     const cueId = cueRow.rows[0].id
 
     for (const p of cue.parties) {
-      await pgPool.query(
+      await _pgRetry(
         `INSERT INTO cue_sheet_cue_parties (cue_id, name, role, pro, split_pct)
          VALUES ($1,$2,$3,$4,$5)`,
-        [cueId, p.name || null, p.role || null, p.pro || null, p.pct ? parseFloat(p.pct) || null : null]
+        [cueId, p.name || null, p.role || null, p.pro || null, p.pct ? parseFloat(p.pct) || null : null], 'cue-sheets cue party insert'
       )
     }
   }
@@ -7712,9 +7712,9 @@ app.post('/api/cue-sheets/import', upload.single('file'), async (req, res) => {
   if (!req.file) return res.json({ ok: false, error: 'No file provided' })
 
   try {
-    const dealPubRows = await pgPool.query(`SELECT DISTINCT publisher_name FROM deal_publishers`)
+    const dealPubRows = await _pgRetry(`SELECT DISTINCT publisher_name FROM deal_publishers`, [], 'cue-sheets import deal publishers')
     const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
-    const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+    const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'cue-sheets import titles')
     const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), normTitleStrict: normTitleStrict(t.title), camelKey: titleToCamelKey(t.title) }))
 
     const origName = req.file.originalname || req.file.path
@@ -7741,9 +7741,9 @@ app.post('/api/cue-sheets/import-bulk', upload.array('files', 200), async (req, 
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   if (!req.files || !req.files.length) return res.json({ ok: false, error: 'No files provided' })
 
-  const dealPubRows = await pgPool.query(`SELECT DISTINCT publisher_name FROM deal_publishers`)
+  const dealPubRows = await _pgRetry(`SELECT DISTINCT publisher_name FROM deal_publishers`, [], 'cue-sheets import-bulk deal publishers')
   const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
-  const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
+  const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'cue-sheets import-bulk titles')
   const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), normTitleStrict: normTitleStrict(t.title), camelKey: titleToCamelKey(t.title) }))
   const replace = req.body?.replace === 'true' || req.body?.replace === '1'
   const importedBy = req.session?.user?.username
@@ -7773,7 +7773,7 @@ app.post('/api/cue-sheets/import-bulk', upload.array('files', 200), async (req, 
 app.get('/api/cue-sheets', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const r = await pgPool.query(`
+    const r = await _pgRetry(`
       SELECT cs.*,
         e.program, e.episode_title AS episode, e.episode_num, e.air_date,
         COUNT(c.id) AS cue_count,
@@ -7785,7 +7785,7 @@ app.get('/api/cue-sheets', async (req, res) => {
       LEFT JOIN cue_sheet_cues c ON c.cue_sheet_id = cs.id
       GROUP BY cs.id, e.program, e.episode_title, e.episode_num, e.air_date
       ORDER BY cs.imported_at DESC
-    `)
+    `, [], 'cue-sheets list')
     res.json({ ok: true, cueSheets: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
@@ -7798,37 +7798,37 @@ app.get('/api/cue-sheets/:id/cues', async (req, res) => {
     // Sibling cue sheets for the same episode (a PRO's own export, the
     // production company's, our internal log can all cover one episode) --
     // surfaced so the reviewer knows other sources exist to cross-check against.
-    const sheetMeta = await pgPool.query(
+    const sheetMeta = await _pgRetry(
       `SELECT cs.episode_id, e.program, e.episode_title, e.episode_num, e.air_date
        FROM cue_sheets cs LEFT JOIN episodes e ON e.id = cs.episode_id
        WHERE cs.id = $1`,
-      [req.params.id]
+      [req.params.id], 'cue-sheets sheet meta'
     )
     const episode = sheetMeta.rows[0] || null
     const siblingSheets = episode?.episode_id
-      ? (await pgPool.query(
+      ? (await _pgRetry(
           `SELECT id, source_filename, format, imported_at FROM cue_sheets
            WHERE episode_id = $1 AND id != $2 ORDER BY imported_at`,
-          [episode.episode_id, req.params.id]
+          [episode.episode_id, req.params.id], 'cue-sheets sibling sheets'
         )).rows
       : []
 
-    const cuesRes = await pgPool.query(
+    const cuesRes = await _pgRetry(
       `SELECT c.*, t.title AS matched_title, t.team_id AS matched_team_id
        FROM cue_sheet_cues c
        LEFT JOIN titles t ON t.sku_root = c.matched_sku_root
        WHERE c.cue_sheet_id = $1
        ORDER BY c.id`,
-      [req.params.id]
+      [req.params.id], 'cue-sheets cues'
     )
     const cueIds = cuesRes.rows.map(c => c.id)
     const teamIds = [...new Set(cuesRes.rows.map(c => c.matched_team_id).filter(Boolean))]
 
     const partiesRes = cueIds.length
-      ? await pgPool.query(`SELECT * FROM cue_sheet_cue_parties WHERE cue_id = ANY($1::int[]) ORDER BY id`, [cueIds])
+      ? await _pgRetry(`SELECT * FROM cue_sheet_cue_parties WHERE cue_id = ANY($1::int[]) ORDER BY id`, [cueIds], 'cue-sheets cue parties')
       : { rows: [] }
     const writersRes = teamIds.length
-      ? await pgPool.query(`SELECT id, team_id, writer_name, pro, split_pct, ipi FROM team_writers WHERE team_id = ANY($1::text[]) ORDER BY team_id, id`, [teamIds])
+      ? await _pgRetry(`SELECT id, team_id, writer_name, pro, split_pct, ipi FROM team_writers WHERE team_id = ANY($1::text[]) ORDER BY team_id, id`, [teamIds], 'cue-sheets team writers')
       : { rows: [] }
 
     const partiesByCue = {}
@@ -7852,11 +7852,11 @@ app.post('/api/cue-sheets/cues/:id/confirm', async (req, res) => {
   try {
     const { sku_root } = req.body
     const status = sku_root ? 'confirmed' : 'rejected'
-    await pgPool.query(
+    await _pgRetry(
       `UPDATE cue_sheet_cues
        SET matched_sku_root = $1, match_status = $2, confirmed_by = $3, confirmed_at = now()
        WHERE id = $4`,
-      [sku_root || null, status, req.session?.user?.username || null, req.params.id]
+      [sku_root || null, status, req.session?.user?.username || null, req.params.id], 'cue-sheets confirm update'
     )
     res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -7867,7 +7867,7 @@ app.get('/api/cue-sheets/title-search', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const q = `%${(req.query.q || '').trim()}%`
-    const r = await pgPool.query(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q])
+    const r = await _pgRetry(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q], 'cue-sheets title search')
     res.json({ ok: true, titles: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
