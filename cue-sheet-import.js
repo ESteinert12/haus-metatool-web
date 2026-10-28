@@ -36,15 +36,57 @@ function normTitle(raw) {
   if (!raw) return '';
   let s = String(raw).toUpperCase();
   s = s.replace(/[_-]+/g, ' ');
-  // Mix/version-suffix vocabulary expanded 2026-10-28, derived from the real
-  // HAUS CUE SHEETS corpus (17,643 HAUS-own cue titles) -- BUMPER/STING/ALT/
-  // DRUMS/MAIN/NODRUMS/NOLEAD were real, frequent trailing words this list was
-  // missing (NODRUMS specifically: the old list only had the two-word 'NO
-  // DRUMS' and single 'NODR', neither of which matches the real one-word
-  // concatenated form). Leading-article stripping (The/A/An) was considered
-  // and NOT added -- zero HAUS-own cue titles in the real corpus start with
-  // one, unlike BMI royalty statements where that pattern is real.
-  s = s.replace(/\b(FULL|NODR|NODRUMS|NO DRUMS|DNB|DRUMS AND FX|MIX|ALT MIX|NOPNO|NODMSPERC|BUMPER|STING|ALT|DRUMS|MAIN|NOLEAD)\b/g, '');
+  // Mix/version-suffix vocabulary (expanded 2026-10-28, derived from the real
+  // HAUS CUE SHEETS corpus -- 17,643 HAUS-own cue titles -- to add BUMPER/
+  // STING/ALT/DRUMS/MAIN/NODRUMS/NOLEAD). Stripped ONLY as a TRAILING tag --
+  // one or more, repeatedly, from the end of the string inward -- never
+  // mid-title. The 2026-10-28 commit stripped these words wherever they
+  // appeared in the string (no \b...$ anchor), which silently ate a real
+  // title word out of the middle of several live catalog titles: "Alt
+  // Approach" -> "Approach", "Main Street" -> "Street", "TBT Sting Goes Solo
+  // Universal" -> "TBT Goes Solo Universal", "Bumper To Bumper" -> "To".
+  // Anchoring to the end fixes every one of those (ALT/MAIN/STING there are
+  // not the last word, so they're left alone) without weakening the
+  // original intent -- "HAUS_DrivingSeat_MAIN" and "Thunder Drums" still
+  // normalize the suffix away.
+  //
+  // This does NOT (and structurally cannot) fix the smaller set of titles
+  // where the LIVE CATALOG itself has two distinct entries differing only by
+  // a genuinely trailing tag word -- e.g. "Thunder" vs "Thunder Drums",
+  // "Lafayette" vs "Lafayette Main". Those still normalize to the same key,
+  // but matchCueToTitles() already treats a normTitle() collision as
+  // status: 'ambiguous' rather than silently picking one, so this is a
+  // flagged-for-human-review outcome, not a data-corruption risk. Resolving
+  // those fully needs a catalog/vocabulary decision (e.g. should DRUMS/MAIN
+  // stay in this list at all, given the catalog uses them to distinguish
+  // real stem variants), not another regex tweak -- see
+  // check-new-strip-words-collisions.js.
+  // Leading-article stripping (The/A/An) was considered and NOT added --
+  // zero HAUS-own cue titles in the real corpus start with one, unlike BMI
+  // royalty statements where that pattern is real.
+  const TRAILING_SUFFIX_RE = /\b(DRUMS AND FX|NO DRUMS|ALT MIX|FULL|NODR|NODRUMS|DNB|MIX|NOPNO|NODMSPERC|BUMPER|STING|ALT|DRUMS|MAIN|NOLEAD)\b[^A-Z0-9]*$/;
+  let prev;
+  do {
+    prev = s;
+    s = s.replace(TRAILING_SUFFIX_RE, '');
+  } while (s !== prev);
+  s = s.replace(/[^A-Z0-9 ]/g, '');
+  s = s.replace(/\s+/g, ' ').trim();
+  return s;
+}
+
+// Same cleanup as normTitle() (case, underscores/hyphens, punctuation,
+// whitespace) but WITHOUT the mix/version-suffix stripping step. Used to
+// try an exact-as-written match BEFORE normTitle()'s stripped form is tried
+// -- see matchCueToTitles() below for why: the live catalog genuinely
+// contains distinct songs that differ only by a trailing tag-like word
+// ("Thunder" vs "Thunder Drums", "Lafayette" vs "Lafayette Main"), and a
+// strict match resolves those correctly without ever needing to strip
+// anything.
+function normTitleStrict(raw) {
+  if (!raw) return '';
+  let s = String(raw).toUpperCase();
+  s = s.replace(/[_-]+/g, ' ');
   s = s.replace(/[^A-Z0-9 ]/g, '');
   s = s.replace(/\s+/g, ' ').trim();
   return s;
@@ -748,6 +790,7 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 
   for (const cue of cues) {
     cue.titleNormalized = normTitle(cue.titleRaw);
+    cue.titleNormalizedStrict = normTitleStrict(cue.titleRaw);
     // null when titleRaw isn't a recognizable HAUS-convention filename --
     // see parseHausFilenameTitle's own comment.
     cue.filenameCamelKey = parseHausFilenameTitle(cue.titleRaw);
@@ -776,6 +819,25 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 // isn't an exact normalized-title match comes back unmatched and goes
 // through the manual search-to-confirm picker in the UI instead of a guess.
 function matchCueToTitles(cue, titlesIndex) {
+  // Strict pass first: match the cue's title AS WRITTEN against the
+  // catalog's title AS WRITTEN (no suffix stripping on either side). Tried
+  // before the stripped pass because the catalog can and does contain two
+  // genuinely distinct, real songs that differ only by a trailing tag-like
+  // word -- e.g. "Thunder" and "Thunder Drums" are separate sku_roots, not
+  // a mix-suffix variant of the same song. A strict match resolves both
+  // correctly and never reaches the stripped comparison below.
+  const strictNorm = cue.titleNormalizedStrict;
+  if (strictNorm) {
+    const strictExact = titlesIndex.filter(t => t.normTitleStrict === strictNorm);
+    if (strictExact.length === 1) return { status: 'matched', candidates: strictExact, confidence: 'exact-strict' };
+    if (strictExact.length > 1) return { status: 'ambiguous', candidates: strictExact, confidence: 'exact-strict-multiple' };
+  }
+
+  // Stripped pass: only reached when nothing matched the cue's title
+  // verbatim -- i.e. the cue's title text carries a mix/version tag the
+  // catalog has no literal row for (e.g. a HAUS-shipped filename like
+  // "HAUS_Thunder_Dm_R13a1591_MAIN", or a cue sheet literally reading
+  // "Thunder MAIN").
   const norm = cue.titleNormalized;
   if (norm) {
     const exact = titlesIndex.filter(t => t.normTitle === norm);
@@ -798,6 +860,7 @@ function matchCueToTitles(cue, titlesIndex) {
 
 module.exports = {
   normTitle,
+  normTitleStrict,
   titleToCamelKey,
   parseHausFilenameTitle,
   tokenOverlapScore,

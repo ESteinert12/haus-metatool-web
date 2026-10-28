@@ -48,7 +48,7 @@ const { exec, execSync, spawn } = require('child_process')
 const { Pool }   = require('pg')
 const multer     = require('multer')
 const IntakeIntegration = require('./intake-integration.js')
-const { parseCueSheetFile, matchCueToTitles, normTitle, titleToCamelKey } = require('./cue-sheet-import.js')
+const { parseCueSheetFile, matchCueToTitles, normTitle, normTitleStrict, titleToCamelKey } = require('./cue-sheet-import.js')
 
 const compression = require('compression')
 
@@ -7715,7 +7715,7 @@ app.post('/api/cue-sheets/import', upload.single('file'), async (req, res) => {
     const dealPubRows = await pgPool.query(`SELECT DISTINCT publisher_name FROM deal_publishers`)
     const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
     const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
-    const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
+    const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), normTitleStrict: normTitleStrict(t.title), camelKey: titleToCamelKey(t.title) }))
 
     const origName = req.file.originalname || req.file.path
     const replace = req.body?.replace === 'true' || req.body?.replace === '1'
@@ -7744,7 +7744,7 @@ app.post('/api/cue-sheets/import-bulk', upload.array('files', 200), async (req, 
   const dealPubRows = await pgPool.query(`SELECT DISTINCT publisher_name FROM deal_publishers`)
   const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
   const titlesRes = await pgPool.query(`SELECT sku_root, title, team_id FROM titles`)
-  const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
+  const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), normTitleStrict: normTitleStrict(t.title), camelKey: titleToCamelKey(t.title) }))
   const replace = req.body?.replace === 'true' || req.body?.replace === '1'
   const importedBy = req.session?.user?.username
 
