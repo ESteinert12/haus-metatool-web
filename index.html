@@ -6614,6 +6614,9 @@ async function openMetadataEditor(sku) {
           <div id="me-usage-stats" style="font-size:11px;color:#3a4f56">Loading usage…</div>
         </div>
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+          <div id="me-royalty-stats" style="font-size:11px;color:#3a4f56">Loading royalty earnings…</div>
+        </div>
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
           <div id="me-lot-history" style="font-size:11px;color:#3a4f56">Loading lots…</div>
         </div>
         <div id="me-status" style="font-size:12px;color:var(--red,#e53);min-height:16px"></div>
@@ -6638,6 +6641,7 @@ async function openMetadataEditor(sku) {
   // Load lot history into the metadata editor
   loadMetadataEditorLotHistory(sku)
   loadMetadataEditorUsageStats(sku)
+  loadMetadataEditorRoyaltyStats(sku)
 }
 
 async function saveMetadataEditor(sku) {
@@ -6826,6 +6830,44 @@ async function loadMetadataEditorUsageStats(skuRoot) {
       </div>
     `).join('')}
     ${rows.length > recent.length ? `<div style="font-size:10px;color:#3a4f56;margin-top:2px">+ ${rows.length - recent.length} more</div>` : ''}
+  `
+}
+
+// $ earned shown on the metadata editor: total CONFIRMED royalty payments
+// matched to this title (royalty_statement_lines.match_status='confirmed'),
+// computed live via JOIN -- no new columns on titles, same pattern as the
+// usage-count panel above. Per Erik's 2026-10-28 call: just the totaled $
+// amount, nothing else -- deliberately sums only the `amount` column, NOT
+// `bonus_amount` (BMI hit-bonus/foreign-society-adjustment): every real
+// bonus_amount observed so far is $0.00 and its own schema comment says to
+// verify before ever folding it into a reconciled total, so it's left out
+// here rather than guessed at. This will read $0/no data until real
+// statements are actually imported (every live-DB test so far has rolled
+// back on purpose) -- the royalty_statements/royalty_statement_lines tables
+// themselves already exist in production (created IF NOT EXISTS during that
+// testing), this just reads whatever's really in them.
+async function loadMetadataEditorRoyaltyStats(skuRoot) {
+  const el = document.getElementById('me-royalty-stats')
+  if (!el) return
+  const rows = await pgQ(`
+    SELECT COALESCE(SUM(amount), 0) AS total, COUNT(*) AS n
+    FROM royalty_statement_lines
+    WHERE matched_sku_root = $1 AND match_status = 'confirmed'
+  `, [skuRoot])
+  if (!Array.isArray(rows)) {
+    el.innerHTML = `<div style="font-size:11px;color:#3a4f56">Royalty data unavailable</div>`
+    return
+  }
+  const { total, n } = rows[0] || { total: 0, n: 0 }
+  if (!n || Number(n) === 0) {
+    el.innerHTML = `<div style="font-size:11px;color:#3a4f56">No confirmed royalty payments yet</div>`
+    return
+  }
+  const amount = Number(total).toLocaleString('en-US', { style: 'currency', currency: 'USD' })
+  el.innerHTML = `
+    <div style="font-size:11px;font-weight:700;color:#6F927E;text-transform:uppercase;letter-spacing:.08em">
+      ${amount} earned (confirmed, ${n} payment${n !== 1 ? 's' : ''})
+    </div>
   `
 }
 
