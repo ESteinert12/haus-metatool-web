@@ -7158,21 +7158,47 @@ async function showImportDescriptionsModal() {
 }
 
 async function exportCatalogCSV() {
-  const tracks = allTracks
-  if (!tracks.length) { toast('No tracks to export — load the catalog first.', 'info'); return }
-  const headers = ['SKU','Title','Key','Genre','KSL','MMW','Composer ID','Lot','JUP','Date Added']
-  const rows = tracks.map(t => [
-    t.sku, t.title, t.key, t.genre, t.ksl, t.mmw, t.composerID, t.lot,
-    t.isJup ? 'JUP' : '', t.dateAdded || ''
-  ].map(v => `"${(v||'').toString().replace(/"/g,'""')}"`).join(','))
+  // Exports the FOUND SET: the list the Collection screen is showing after search
+  // and filters. renderTrackList stores the full filtered list in currentDisplayTracks
+  // (the screen only draws the first CATALOG_DISPLAY_LIMIT of it). This used to export
+  // allTracks, so search and filters were ignored.
+  // KSL and Date Added are not populated on allTracks (the loader leaves them blank),
+  // so they are read from the database for exactly these SKUs. MMW is deliberately
+  // NOT exported: it is a very large free-text field and is not wanted in a CSV.
+  if (!allTracks.length) { toast('No tracks to export — load the catalog first.', 'info'); return }
+  const tracks = currentDisplayTracks || []
+  if (!tracks.length) { toast('Nothing to export — the current search/filters match no tracks.', 'info'); return }
+
+  const skus = [...new Set(tracks.map(t => t.sku).filter(Boolean))]
+  const [meta, kslMap] = await Promise.all([
+    skus.length ? pgQ(`SELECT sku_root, created_at FROM titles WHERE sku_root = ANY($1::varchar[])`, [skus]) : [],
+    loadKslMap(skus)
+  ])
+  if (!meta || meta.error) { toast('Export stopped — could not read dates from the database. Try again.', 'error'); return }
+  const metaBy = new Map(meta.map(r => [r.sku_root, r]))
+  const fmtDate = v => { if (!v) return ''; const d = new Date(v); return isNaN(d) ? String(v) : d.toISOString().slice(0, 10) }
+
+  const headers = ['SKU','Title','Key','BPM','Genre','KSL','Composer ID','Composer','Lot','JUP','Date Added']
+  const rows = tracks.map(t => {
+    const m = metaBy.get(t.sku) || {}
+    return [
+      t.sku, t.title, t.key, t.bpm, t.genre,
+      t.ksl || kslMap?.[t.sku] || '',
+      t.composerID, t.composerName, t.lot,
+      t.isJup ? 'JUP' : '',
+      fmtDate(m.created_at) || t.dateAdded || ''
+    ].map(v => `"${(v ?? '').toString().replace(/"/g,'""')}"`).join(',')
+  })
   const csv = [headers.join(','), ...rows].join('\n')
   const blob = new Blob([csv], { type: 'text/csv' })
   const url  = URL.createObjectURL(blob)
   const a    = document.createElement('a')
+  const day  = new Date().toISOString().split('T')[0]
   a.href     = url
-  a.download = `HAUS_Catalog_${new Date().toISOString().split('T')[0]}.csv`
+  a.download = tracks.length === allTracks.length ? `HAUS_Catalog_${day}.csv` : `HAUS_Catalog_found-${tracks.length}_${day}.csv`
   a.click()
   URL.revokeObjectURL(url)
+  toast(`Exported ${tracks.length.toLocaleString()} track${tracks.length !== 1 ? 's' : ''}.`, 'success')
 }
 
 // Load mood2/ksl/rmo data asynchronously after main Collection is displayed
