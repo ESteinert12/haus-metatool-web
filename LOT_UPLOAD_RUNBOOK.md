@@ -54,6 +54,24 @@ manageable, and a bad lot costs one lot instead of a day.
 ## Progress
 Tick these off. 30 lots.
 
+    [x] INTAKE LOT_250819_SOHO4_05 EDM (EX)  (ad hoc folder in 2. ATMOS_Shipping)  30 folders / 181 files / 2.17 GB
+        PASS 2026-10-22, record=1 recorded 181. Erik's brief: songs already in Neon
+        (titlesConsidered 30) but NO audio in B2. Confirmed first: create-stems dry run
+        showed titlesWithAudio 0 / titlesWithNoAudio 30 / alreadyRecorded 0.
+        Order used (base= on EVERY call, lot is in ATMOS_Shipping):
+          1. upload-lot dryRun=1: 181 files, cloudOnly 0, skipped 0; 7 composer folders all 3-char
+             form with healthy counts (C32 111, R48 1386, R73 212, S20 374, S33 8380, S90 102, T27 31).
+          2. upload-lot dryRun=0&limit=10: uploaded 10, failed 0.
+          3. upload-lot dryRun=0 (full): uploaded 171, skippedAlreadyThere 10, failed 0 (181 total).
+          4. create-stems dryRun=1: rowsToCreate 181, ambiguous 0, titlesWithNoAudio 0 -> dryRun=0: inserted 181.
+          5. verify-lot (read-only): PASS 181/181 fully verified, 0 failures, 0 warnings -> record=1: recorded 181.
+        Notes: create-stems dry run hit one "Connection terminated unexpectedly" (idle Neon),
+        plain re-run worked. R48a3734's B2 folder has a stray space before _SOHO EDM
+        (Stacks And Racks _SOHO EDM) -- cosmetic, rows link by exact key.
+        DB lot name is date-first (250819_INTAKE LOT_SOHO4_05 EDM (EX)) vs this folder name.
+        work_queue: preview 2026-10-22 = 181 mix_stems rows tagged source_lot='INTAKE LOT_250819_SOHO4_05 EDM (EX)',
+        30 open work_queue rows. UPDATE run in Neon console, resolved_by='lot-upload-250819-SOHO4-05'
+        (console said "Statement executed successfully" without a row count).
     [x] INTAKE LOT_250918_SOHO4_09_EDM(EX)   180 files 3.13 GB
         UPLOADED 164/164 on 2026-09-10, 0 failed. 2 folders skipped (bad names).
     [x] INTAKE LOT_230825_AP450 RETURNS   187 folders -- set aside earlier
@@ -191,6 +209,103 @@ Tick these off. 30 lots.
         record=1: PASS, filesFullyVerified 181/181, 0 failures, 0 warnings.
         work_queue: 30 rows resolved, resolved_by='lot-upload-251113-SNAPPED-46'.
         Dropbox folder set back to online-only.
+    [x] INTAKE LOT_251119_SOHO4_15_MIXED(EX)  (ad hoc folder in 2. ATMOS_Shipping)  29 folders / 184 files / 2.87 GB
+        PASS 2026-10-22, record=1 recorded 184, 196 mix_stems rows inserted (12 extra rows = existing
+        B2 objects the lot folder lacks, mostly old FULL.mp3). 29/29 titles linked, 0 ambiguous.
+        MIXED lot: 17 songs new to B2 (13 S33, 3 T08, 1 T50), 12 already in B2 under OLD-STYLE folder names
+        (..._VOX, ..._CLT, ..._PUNTA, ..._SOHOTENSION, ..._SOHOEDM). create-stems dry run FIRST showed this.
+        LESSONS (read before the next MIXED lot):
+        1. upload-lot keys by LOCAL folder name. Where the local folder differs from the existing B2 folder
+           (even case, tag order, '-' vs '_', straight vs curly apostrophe) it makes a SECOND copy. Fix: rename
+           the local folders to the exact existing B2 folder names BEFORE uploading (take them from the
+           create-stems report's b2_key, not by eye). 10 folders renamed this way, incl. S20d0884.
+        2. If the file at an existing key has a DIFFERENT SIZE, upload-lot OVERWRITES it in place (new version).
+           This is not "skip". limit=N is the first N planned files, NOT a probe of specific songs.
+           The limit=60 probe overwrote 38 existing objects (R48a4144, S13b0044, S13b0054, S20d0874,
+           S33a45254/45264/45274); the full run then overwrote the rest (incl. 3 for S20d0884, not version-checked).
+           check_overwritten_versions.js (read-only): all 38 old versions RETAINED in B2 (2 versions each), so
+           restorable by copying the old fileId back onto the key (never delete versions). Report:
+           b2-versions-check-1792700925935.json. Erik chose: lot-folder files win.
+        3. A folder name with a typo SKU ("Sdod0884" for S20d0884) blocked the dry run ("sku_root not in titles").
+           It also hid that S20d0884 already had audio in B2 (SOHOEDM folder), so the first create-stems dry run
+           under-counted existing audio. 3 stray objects landed in 'S20d0884_Yet Another Dance Thang_Am/' and were
+           HIDDEN with hide_stray_s20d0884.js (b2_hide_file; ambiguous went 3 -> 0).
+        Order used (base= on EVERY call): create-stems dry run -> upload-lot dry run -> renames -> upload-lot
+        limit=60 (41 up, 19 skipped) -> versions check -> full upload-lot (127 up, 57 skipped, 0 failed) ->
+        hide strays -> create-stems dry run (ambiguous 0) -> live (inserted 196) -> verify-lot PASS 184/184 -> record=1.
+        OPEN FOLLOW-UPS:
+        - 8 songs have a STALE FULL.mp3 (old mix) next to a NEW FULL.wav: R48a4144, S13b0044, S13b0054, S20d0874,
+          S20d0884, S33a45254, S33a45264, S33a45274. The player prefers the mp3. regen-mp3 only rebuilds BROKEN
+          mp3s, so it will not fix these; needs a targeted regen (wav -> 320k mp3 onto the existing mp3 key).
+          R48a4144's wav shrank ~25% (58.3 -> 43.7 MB): listen to old vs new before trusting either.
+        - Neon title typos: S20d0884 "Yet Anotherr Dance Thang"; T50a0284 DB "In Da Clerb" vs folder "In The Clerb".
+        work_queue: preview 2026-10-22 = 196 mix_stems rows tagged source_lot='INTAKE LOT_251119_SOHO4_15_MIXED(EX)',
+        29 open work_queue rows; UPDATE run in Neon console, resolved_by='lot-upload-251119-SOHO4-15';
+        confirmed 29 rows carry that resolved_by.
+    [x] 260720_TEXAS WIVES_5_Heartland  (ad hoc folder in 2. ATMOS_Shipping)  29 song folders / 208 audio files / ~2.9 GB
+        PASS 2026-10-23, record=1 recorded 208, verify-lot 208/208 fully verified, 0 failures, 0 warnings.
+        Lot value passed to every endpoint = "260720_TEXAS WIVES_5_Heartland" (no INTAKE LOT_ prefix), so
+        mix_stems.source_lot is that exact string. 30 local folders, but R82a8884 (Get Off Your High Horse) holds
+        only its .md note, NO audio: nothing uploaded, its 8 Neon rows still have no b2_key (needs another source).
+        29/29 titles linked. create-stems live inserted 1 row (T57a0014 NoLead -> existing ..._Blanket_Bbm/...NoLeads.wav).
+        Starting state: 10 songs already had audio in B2, 19 had none; 29 of 30 local folder names already matched the
+        existing B2 folder names exactly (no renames needed). Upload: 181 up (162 stubs replaced, 5 new, 14 real overwrites),
+        27 skipped; 1 failure ("no tomes available", B2 transient) cleared by a plain re-run.
+        NEW TOOL: precheck_lot.js (read-only). upload-lot's dry run does not look at B2, so it cannot predict overwrites.
+        precheck_lot.js asks B2 per file: new / stubOver / same / DIFF. Run it BEFORE any live upload. Here it found
+        14 DIFF wavs (R46a8254 x6, R82a8894 ALT, S33a49204 BUMPERa, S33a49224 x4, C53a4904 BUMPERb + STING) and 6 FULL.mp3
+        whose local copy was ~60% of the B2 size (consistent with 192k vs 320k; not verified).
+        Decisions (Erik): lot-folder wavs WIN (14 overwritten in place; check_precheck_versions.js: all 14 old versions
+        RETAINED, 3 versions each, new = local; report b2-versions-check-1792778488964.json). The 6 B2 FULL.mp3 were KEPT:
+        the 6 local mp3s were moved out of the lot to "2. ATMOS_Shipping/_held_mp3_260720" before upload (S33a49194, 49204,
+        49214, 49224, S73r1294, S73r1304). They are not in the lot, so verify-lot ignores them.
+        Order used (base= on EVERY call): create-stems dry run (report b2-create-stems-1792772809819.json) -> upload-lot dry
+        run (clean, 0 blocked) -> inspect_lot_stems.js -> precheck_lot.js -> move 6 mp3s aside -> precheck again (DIFF 14) ->
+        upload-lot live -> same again (1 retry) -> check_precheck_versions.js -> create-stems dry run -> live (inserted 1) ->
+        verify-lot PASS -> record=1.
+        OPEN after close: (a) 12 ambiguous stems in 2 songs. S73r1304 Rattlesnake Road has an identical-size duplicate folder
+        "S73r1304_Rattlesnake Road_D"; T57a0014 Blanket has "T57a0014_Blanket_Bbm" (same sizes, different filename case).
+        Neither blocks the lot; hide the duplicates with a guarded b2_hide_file script if wanted (keep Blanket_Bbm NoLeads.wav,
+        it is the only NoLead and now has a row). (b) R67a2774 / R67a2784 each still have ~9-10 legacy rows pointing at loose
+        files in the CIRRUS folder, outside any song folder: not checked whether stubs. (c) R82a8884 has no audio.
+        (d) T57a0014 and T57a0024 are on the EBR bad-split list. work_queue: none to resolve. Checked 2026-10-23: 209 mix_stems rows / 29 songs tagged
+        source_lot='260720_TEXAS WIVES_5_Heartland' (208 recorded + the 1 inserted NoLead row), and work_queue has 0 rows
+        (open or resolved) for those SKUs, so no UPDATE was run.
+    [x] INTAKE LOT_260707_TEXAS WIVES 2  (ad hoc folder in 2. ATMOS_Shipping)  20 song folders / 123 audio files / ~1.5 GB
+        PASS 2026-10-27, record=1 recorded 123, verify-lot 123/123 fully verified, 0 failures, 0 warnings.
+        Lot value passed to every endpoint = "INTAKE LOT_260707_TEXAS WIVES 2", so mix_stems.source_lot is that exact string
+        (the DB lot is "260707_TEXAS WIVES_2", lot_id 7582, 30 songs on the July intake audit; only 20 are in this folder, the other
+        10 e.g. R48a5334 were NOT touched). create-stems live inserted 2 rows (R82a8824 STRINGS, R82a8834 STRINGS). 20/20 titles linked.
+        Starting state (create-stems dry run + check_old_keys.js): 11 S20d songs had Neon rows pointing at keys with NOTHING in B2;
+        R48a5384, S13a4154/4164/4184 had stubs; S33a48984 was already real and identical; 3 songs (R25a4414, R82a8824, R82a8834)
+        had ALL rows in B2 folders with a TYPO'D SKU (R25a44054_, R82a87614_, R82a87624_: extra digit), stubs only.
+        LESSONS (read before the next intake-lot upload):
+        1. Local lot folders carried the musical key (..._Gm, ..._E) and 3 had truncated SKUs (R82a_, S13a_). B2/Neon folder names have
+           none of that. Renamed 20 folders to the exact existing B2 folder names (from inspect_lot_stems.js key-folders) BEFORE uploading;
+           precheck_lot.js then showed 0 real-file overwrites (DIFF 0). Truncated SKUs came from a Neon title lookup.
+        2. When the existing B2 folder itself has a typo'd SKU, renaming cannot fix it (that SKU is not in titles, upload-lot blocks).
+           Upload under the CORRECT folder name, then repoint the stub rows: NEW repoint_typo_rows.js (variant of repoint_stub_rows.js,
+           which cannot see typo-folder rows). Dry run first; stub-only, exactly one same-size real object, compare-and-swap. Applied 11
+           (R25a4414 4, R82a8834 7) + 4 (R82a8824) rows.
+        3. Neon FULL.mp3 rows can point at keys with NO object in B2 (no local mp3 in the lot). verify-lot does NOT catch this (it only
+           checks local files) and the player prefers FULL.mp3. After every lot run /api/b2/regen-mp3 as a dry run; here regenerable was 21
+           (this lot's FULL.mp3 rows incl. 3 stub rows repointed with repoint_stub_mp3s.js "<lot>", plus ~3 others elsewhere).
+           apply=1&limit=1 test (R48a5384 The Last Sundown, played fine) then full: 20 made, 0 failed. After: regenerable 0, noSource 33
+           (the old no-usable-wav list, outside this lot).
+        4. R82a8824 Big Sky Country local files were named HAUS_BIG SKY COUNTRY_D_R82a_*.wav (capitals/spaces), not the app convention
+           HAUS_BigSkyCountry_D_R82a_*.wav that its Neon rows use. First upload put 5 misnamed objects in B2. Erik chose: rename local files
+           to the convention, re-upload (5 files), repoint, and HIDE the 5 misnamed objects with hide_misnamed_bigsky.js (b2_hide_file only;
+           guards: no Neon row references them, same-size properly named twin exists). The PNO_STRINGS stem kept its label.
+        Upload: 114 up + 3 retried (transient B2 "incident id" errors on 3 big S20d wavs) = 117, then 5 for Big Sky Country; 6 skipped as same.
+        Order used (base= on EVERY call): create-stems dry run -> upload-lot dry run (3 blocked: truncated SKUs) -> inspect_lot_stems.js,
+        precheck_lot.js, check_old_keys.js -> folder renames -> upload-lot live -> repoint_typo_rows.js dry/live -> misnamed-file rename +
+        re-upload -> repoint again -> hide_misnamed_bigsky.js -> create-stems live (inserted 2) -> verify-lot PASS -> record=1 ->
+        repoint_stub_mp3s.js -> regen-mp3 (test, full, dry run).
+        LEFT AS IS: stub rows with no local source: R25a4414 DNB.wav + STING.wav, R82a8824 ALT.wav (3 rows). The 5 hidden Big Sky objects and the
+        old typo-folder stub objects remain in B2 (hide later if wanted). Orphan stub rows under typo SKUs that are not in titles
+        (R25a44054, R82a87614, R82a87624, R48a5344) show up in regen-mp3 noSource: probably July-intake leftovers, NOT verified, not touched.
+        New scripts: repoint_typo_rows.js, hide_misnamed_bigsky.js. work_queue: preview 2026-10-27 = 0 open rows for source_lot='INTAKE LOT_260707_TEXAS WIVES 2',
+        so no UPDATE was run (nothing to resolve).
     [ ] INTAKE LOT_251120_SOHO4_16
     [x] INTAKE LOT_251124_SNAPPED_47
         CLOSED via lot_pipeline.py, PASS. (Exact file counts not re-confirmed
