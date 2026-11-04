@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HAUS Music — Catalog</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
+  --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
+  --accent:#1a1a18;--radius:10px;--radius-sm:6px;
+  --blue:#1a6cf6;--blue-bg:#eef4fe;--blue-text:#1251c2;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);min-height:100vh}
+.topbar{background:var(--bg3);border-bottom:0.5px solid var(--border);padding:16px 24px;display:flex;align-items:center;gap:16px;position:sticky;top:0;z-index:10}
+.topbar-brand{font-weight:700;font-size:16px;letter-spacing:0.02em}
+.topbar-sub{font-size:12px;color:var(--text3)}
+.guest-banner{background:var(--blue-bg);color:var(--blue-text);font-size:12px;padding:8px 24px;text-align:center}
+.wrap{max-width:900px;margin:0 auto;padding:28px 20px}
+.search-row{display:flex;gap:8px;margin-bottom:18px;flex-wrap:wrap}
+.search-row input, .search-row select{
+  font-family:inherit;font-size:13px;padding:9px 12px;border:0.5px solid var(--border2);
+  border-radius:var(--radius-sm);background:var(--bg3);color:var(--text);outline:none
+}
+.search-row input{flex:1;min-width:200px}
+.search-row input:focus, .search-row select:focus{border-color:var(--accent)}
+.btn{display:inline-flex;align-items:center;gap:5px;padding:9px 14px;font-size:13px;border:0.5px solid var(--border2);
+  border-radius:var(--radius-sm);background:var(--bg3);color:var(--text2);cursor:pointer;font-family:inherit}
+.btn.primary{background:var(--accent);color:#fff;border-color:var(--accent)}
+.results-head{font-size:12px;color:var(--text3);margin-bottom:10px}
+.track-table{width:100%;border-collapse:collapse;background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.track-table th{text-align:left;font-size:11px;font-weight:600;color:var(--text3);text-transform:uppercase;letter-spacing:0.03em;padding:10px 14px;border-bottom:0.5px solid var(--border)}
+.track-table td{padding:11px 14px;font-size:13px;border-bottom:0.5px solid var(--border)}
+.track-table tr:last-child td{border-bottom:none}
+.track-table tr:hover td{background:var(--bg2)}
+.empty-state{text-align:center;padding:50px 20px;color:var(--text3)}
+.empty-state i{font-size:28px;display:block;margin-bottom:8px}
+.loadmore{text-align:center;margin-top:16px}
+.footnote{font-size:11px;color:var(--text3);margin-top:22px;text-align:center;line-height:1.6}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <span class="topbar-brand">HAUS</span>
+  <span class="topbar-sub">Music Library</span>
+</div>
+<div class="guest-banner">Browsing as a guest — read-only catalog search. Contact HAUS to license tracks or request an account.</div>
+
+<div class="wrap">
+  <div class="search-row">
+    <input type="text" id="q" placeholder="Search by title…" oninput="debouncedSearch()">
+    <select id="genre" onchange="runSearch(true)"><option value="">All genres</option></select>
+    <select id="mood" onchange="runSearch(true)"><option value="">All moods</option></select>
+  </div>
+  <div class="results-head" id="results-head"></div>
+  <div id="results"></div>
+  <div class="loadmore" id="loadmore" style="display:none">
+    <button class="btn" onclick="loadMore()"><i class="ti ti-chevron-down"></i> Load more</button>
+  </div>
+  <div class="footnote">Showing title, key, tempo, mood and genre only. No audio preview or licensing is available in guest mode.</div>
+</div>
+
+<script>
+const PAGE_SIZE = 30
+let offset = 0
+let lastQuery = ''
+let debounceTimer = null
+let totalShown = 0
+
+function debouncedSearch() {
+  clearTimeout(debounceTimer)
+  debounceTimer = setTimeout(() => runSearch(true), 300)
+}
+
+async function loadFacets() {
+  const r = await fetch('/api/public/catalog?limit=1')
+  const data = await r.json()
+  if (!data.ok || !data.facets) return
+  const gEl = document.getElementById('genre')
+  const mEl = document.getElementById('mood')
+  data.facets.genres.forEach(g => { if (g) gEl.insertAdjacentHTML('beforeend', `<option value="${escapeAttr(g)}">${escapeHtml(g)}</option>`) })
+  data.facets.moods.forEach(m => { if (m) mEl.insertAdjacentHTML('beforeend', `<option value="${escapeAttr(m)}">${escapeHtml(m)}</option>`) })
+}
+
+async function runSearch(reset) {
+  if (reset) { offset = 0; totalShown = 0; document.getElementById('results').innerHTML = '' }
+  const q = document.getElementById('q').value.trim()
+  const genre = document.getElementById('genre').value
+  const mood = document.getElementById('mood').value
+  const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+  if (q) params.set('q', q)
+  if (genre) params.set('genre', genre)
+  if (mood) params.set('mood', mood)
+
+  const r = await fetch('/api/public/catalog?' + params.toString())
+  const data = await r.json()
+  if (!data.ok) {
+    document.getElementById('results').innerHTML = `<div class="empty-state"><i class="ti ti-alert-circle"></i><p>Couldn't load the catalog right now.</p></div>`
+    return
+  }
+  renderResults(data.tracks, reset)
+}
+
+function renderResults(tracks, reset) {
+  const el = document.getElementById('results')
+  if (reset && tracks.length === 0) {
+    el.innerHTML = `<div class="empty-state"><i class="ti ti-search-off"></i><p>No tracks match that search.</p></div>`
+    document.getElementById('loadmore').style.display = 'none'
+    document.getElementById('results-head').textContent = ''
+    return
+  }
+  if (reset) {
+    el.innerHTML = `<table class="track-table"><thead><tr><th>Title</th><th>Key</th><th>BPM</th><th>Mood</th><th>Genre</th></tr></thead><tbody id="track-rows"></tbody></table>`
+  }
+  const body = document.getElementById('track-rows')
+  body.insertAdjacentHTML('beforeend', tracks.map(t => `
+    <tr>
+      <td>${escapeHtml(t.title || '—')}</td>
+      <td>${escapeHtml(t.key || '—')}</td>
+      <td>${t.bpm != null ? t.bpm : '—'}</td>
+      <td>${escapeHtml(t.mood || '—')}</td>
+      <td>${escapeHtml(t.primary_genre_name || '—')}</td>
+    </tr>`).join(''))
+  totalShown += tracks.length
+  offset += tracks.length
+  document.getElementById('results-head').textContent = `${totalShown} track${totalShown !== 1 ? 's' : ''} shown`
+  document.getElementById('loadmore').style.display = tracks.length === PAGE_SIZE ? 'block' : 'none'
+}
+
+function loadMore() { runSearch(false) }
+
+function escapeHtml(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+function escapeAttr(s) { return escapeHtml(s) }
+
+loadFacets()
+runSearch(true)
+</script>
+</body>
+</html>
