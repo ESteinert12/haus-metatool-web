@@ -195,7 +195,7 @@ app.get('/haus-api.js', (req, res) => {
 // backup and GET /api.js returned this file, connection string and all. Serve only
 // the handful of things the browser actually asks for.
 app.use('/assets', express.static(path.join(__dirname, 'assets')))
-for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'ebr-shared.js', 'producer.html', 'client-portal.html']) {
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'ebr-shared.js', 'producer.html', 'client-portal.html', 'guest.html']) {
   app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
 }
 
@@ -213,7 +213,14 @@ const PUBLIC_ROUTES = [
   'POST /auth/login',
   'GET /auth/me',
   'GET /pg/status',
-  'GET /cfg/server-paths'
+  'GET /cfg/server-paths',
+  // Guest catalog browse (guest.html) -- fully anonymous, no session of any
+  // kind required. Read-only, metadata-only (title/key/bpm/mood/genre), same
+  // fields and query shape as the existing client-portal library search --
+  // no licensing, pricing, writer, or financial data exposed here, and no
+  // audio streaming (client-portal.html itself has none yet either, so this
+  // doesn't add a new capability beyond what paying clients already get).
+  'GET /public/catalog'
 ]
 // Routes that can do damage no amount of SQL could reproduce: host side effects,
 // bucket mutations, and config the whole team shares. Admin only.
@@ -1578,6 +1585,54 @@ app.get('/api/portal/library', async (req, res) => {
     }
 
     res.json({ ok: true, tracks: result.rows, facets })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// ── Guest catalog browse (guest.html) -- fully public, no login of any kind.
+// Deliberately the narrowest possible read: same shape as /api/portal/library
+// above (title/key/bpm/mood/genre only), capped lower (max 100 vs 200) and
+// with no facets=true support (that's a convenience for the paying-client
+// UI, not needed for a simple public search box). No pricing, licensing,
+// writer/composer identity, or sku_root-adjacent internal fields -- sku_root
+// itself is omitted too, since it's an internal catalog identifier, not
+// something a guest has any use for.
+app.get('/api/public/catalog', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const q      = (req.query.q || '').trim()
+    const genre  = (req.query.genre || '').trim()
+    const mood   = (req.query.mood || '').trim()
+    const limit  = Math.min(parseInt(req.query.limit, 10) || 30, 100)
+    const offset = Math.max(parseInt(req.query.offset, 10) || 0, 0)
+
+    const where = []
+    const params = []
+    if (q) { params.push(`%${q}%`); where.push(`t.title ILIKE $${params.length}`) }
+    if (genre) { params.push(genre); where.push(`pg.primary_genre_name = $${params.length}`) }
+    if (mood) { params.push(`%${mood}%`); where.push(`t.mood ILIKE $${params.length}`) }
+    const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : ''
+
+    params.push(limit, offset)
+    const result = await _pgRetry(
+      `SELECT t.title, t.key, t.bpm, t.mood, pg.primary_genre_name
+         FROM titles t
+         LEFT JOIN primary_genres pg ON pg.primary_genre_id = t.primary_genre_id
+         ${whereSql}
+        ORDER BY t.title
+        LIMIT $${params.length - 1} OFFSET $${params.length}`,
+      params
+    )
+
+    const [genres, moods] = await Promise.all([
+      _pgRetry(`SELECT DISTINCT primary_genre_name FROM primary_genres ORDER BY primary_genre_name`),
+      _pgRetry(`SELECT DISTINCT mood FROM titles WHERE mood IS NOT NULL AND mood <> '' ORDER BY mood LIMIT 200`)
+    ])
+
+    res.json({
+      ok: true,
+      tracks: result.rows,
+      facets: { genres: genres.rows.map(r => r.primary_genre_name), moods: moods.rows.map(r => r.mood) }
+    })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 

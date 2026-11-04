@@ -187,23 +187,33 @@ select.form-input{cursor:pointer}
 </head>
 <body>
 
-<div id="drag"><span id="drag-title">HAUS Producer Portal</span></div>
+<div id="drag"><span id="drag-title">HAUS Composer Portal</span></div>
 
 <!-- ── LOGIN ── -->
 <div id="login-screen">
   <div class="login-card">
     <div class="login-logo">HAUS</div>
-    <div class="login-sub">Producer & Editor Portal</div>
-    <label class="form-label">Who are you?</label>
-    <select class="form-input" id="login-select" style="margin-bottom:16px">
-      <option value="">— Select your ID —</option>
-      <option value="R13a|Ben Zwerin|Composer|#2563eb">R13a — Ben Zwerin (Composer)</option>
-      <option value="R48a|R48a Composer|Composer|#7c3aed">R48a — Composer</option>
-      <option value="R03b|R03b Composer|Composer|#059669">R03b — Composer</option>
-      <option value="ED01|Maya Lin|Editor|#d97706">ED01 — Maya Lin (Editor)</option>
-      <option value="ED02|James Park|Editor|#dc2626">ED02 — James Park (Editor)</option>
-    </select>
-    <button class="btn primary" style="width:100%" onclick="doLogin()"><i class="ti ti-arrow-right"></i> Enter</button>
+    <div class="login-sub">Composer Portal</div>
+    <div id="login-error" style="display:none;font-size:12px;color:var(--red-text);background:var(--red-bg);border-radius:var(--radius-sm);padding:8px 10px;margin-bottom:12px"></div>
+    <label class="form-label">Email</label>
+    <input class="form-input" id="login-email" type="email" autocomplete="username" style="margin-bottom:12px">
+    <label class="form-label">Password</label>
+    <input class="form-input" id="login-password" type="password" autocomplete="current-password" style="margin-bottom:16px" onkeydown="if(event.key==='Enter')doLogin()">
+    <button class="btn primary" style="width:100%" id="login-btn" onclick="doLogin()"><i class="ti ti-arrow-right"></i> Log in</button>
+  </div>
+</div>
+
+<!-- ── CHANGE PASSWORD (forced on first login) ── -->
+<div id="change-pw-screen" style="display:none">
+  <div class="login-card">
+    <div class="login-logo">HAUS</div>
+    <div class="login-sub">Set a new password to continue</div>
+    <div id="change-pw-error" style="display:none;font-size:12px;color:var(--red-text);background:var(--red-bg);border-radius:var(--radius-sm);padding:8px 10px;margin-bottom:12px"></div>
+    <label class="form-label">Current password</label>
+    <input class="form-input" id="change-pw-old" type="password" style="margin-bottom:12px">
+    <label class="form-label">New password (12+ characters)</label>
+    <input class="form-input" id="change-pw-new" type="password" style="margin-bottom:16px">
+    <button class="btn primary" style="width:100%" onclick="doChangePassword()"><i class="ti ti-check"></i> Set password &amp; continue</button>
   </div>
 </div>
 
@@ -213,10 +223,13 @@ select.form-input{cursor:pointer}
     <span class="topbar-brand">HAUS</span>
     <div class="nav-tabs">
       <button class="nav-tab active" onclick="switchTab('assignments',this)"><i class="ti ti-checklist"></i> Assignments</button>
-      <button class="nav-tab" onclick="switchTab('playlists',this)"><i class="ti ti-playlist"></i> Playlists</button>
-      <button class="nav-tab" onclick="switchTab('ideas',this)"><i class="ti ti-bulb"></i> Ideas</button>
+      <button class="nav-tab" onclick="switchTab('titles',this)"><i class="ti ti-music"></i> My Titles</button>
     </div>
     <div class="topbar-right">
+      <div style="position:relative">
+        <button class="btn" onclick="toggleNotifications()"><i class="ti ti-bell"></i><span id="notif-badge" class="nav-badge" style="display:none"></span></button>
+        <div id="notif-dropdown" style="display:none;position:absolute;right:0;top:calc(100% + 6px);width:320px;max-height:380px;overflow-y:auto;background:var(--bg3);border:0.5px solid var(--border2);border-radius:var(--radius);box-shadow:0 8px 24px rgba(0,0,0,0.12);z-index:50"></div>
+      </div>
       <div class="user-chip">
         <div class="avatar-sm" id="portal-avatar"></div>
         <span id="portal-user-label"></span>
@@ -250,237 +263,103 @@ select.form-input{cursor:pointer}
     </div>
   </div>
 
-  <!-- ── PLAYLISTS ── -->
-  <div class="section" id="tab-playlists">
-    <div class="two-pane split">
-      <div class="left-pane">
-        <div class="pane-header">
-          <span style="font-size:13px;font-weight:600;flex:1">My Playlists</span>
-          <button class="btn primary" onclick="newPlaylist()"><i class="ti ti-plus"></i> New</button>
-        </div>
-        <div class="pane-scroll" id="playlist-list"></div>
-      </div>
-      <div class="right-pane">
-        <div id="playlist-detail" style="display:flex;flex-direction:column;height:100%">
-          <div class="empty-state" style="flex:1"><i class="ti ti-playlist"></i><p>Select or create a playlist</p></div>
-        </div>
-      </div>
-    </div>
+  <!-- ── MY TITLES ── -->
+  <div class="section" id="tab-titles">
+    <div class="pane-scroll" id="titles-list" style="padding:16px;overflow-y:auto;height:100%"></div>
   </div>
 
-  <!-- ── IDEAS ── -->
-  <div class="section" id="tab-ideas">
-    <div class="ideas-layout">
-      <div class="feed">
-        <div class="feed-header">
-          <span style="font-size:13px;font-weight:600;flex:1">Team Ideas</span>
-          <div class="filter-tabs">
-            <button class="filter-tab active" onclick="setIdeaFilter('all',this)">All</button>
-            <button class="filter-tab" onclick="setIdeaFilter('mine',this)">Mine</button>
-          </div>
-        </div>
-        <div class="feed-items" id="ideas-feed"></div>
-        <div class="compose-box">
-          <div class="compose-inner">
-            <textarea class="compose-textarea" id="idea-compose" placeholder="Share an idea, reference, or note with the team…" rows="2" oninput="autoResize(this)"></textarea>
-            <button class="btn primary" onclick="postIdea()"><i class="ti ti-send"></i></button>
-          </div>
-          <div class="compose-opts">
-            <span style="font-size:11px;color:var(--text3)">Attach:</span>
-            <button class="btn" onclick="attachRef()" style="font-size:11px;padding:3px 8px"><i class="ti ti-music"></i> Track ref</button>
-            <button class="btn" onclick="attachLink()" style="font-size:11px;padding:3px 8px"><i class="ti ti-link"></i> Link</button>
-            <select class="form-input" id="idea-tag" style="width:auto;font-size:11px;padding:3px 8px">
-              <option value="">No tag</option>
-              <option value="vibe">Vibe</option>
-              <option value="feedback">Feedback</option>
-              <option value="reference">Reference</option>
-              <option value="question">Question</option>
-            </select>
-          </div>
-        </div>
-      </div>
-      <div class="comments-pane">
-        <div class="comments-header" id="comments-header">Comments</div>
-        <div class="comments-scroll" id="comments-scroll">
-          <div class="placeholder-pane"><i class="ti ti-message-circle"></i><p>Click an idea to see its thread</p></div>
-        </div>
-        <div class="comment-compose">
-          <input class="form-input" id="comment-input" placeholder="Reply…" style="font-size:12px" onkeydown="if(event.key==='Enter')postComment()">
-          <button class="btn primary" onclick="postComment()" style="padding:5px 9px"><i class="ti ti-send" style="font-size:13px"></i></button>
-        </div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- Add Track Modal -->
-<div class="modal-overlay" id="add-track-modal">
-  <div class="modal">
-    <div class="modal-header">
-      <div class="modal-title">Add tracks</div>
-      <button class="btn" onclick="closeAddTrackModal()" style="padding:4px 8px"><i class="ti ti-x"></i></button>
-    </div>
-    <div style="margin-bottom:10px">
-      <input class="form-input" id="track-search" placeholder="Search by title, key, composer…" oninput="renderTrackPicker(this.value)">
-    </div>
-    <div class="modal-body" id="track-picker" style="max-height:320px"></div>
-    <div style="margin-top:14px;display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" onclick="closeAddTrackModal()">Cancel</button>
-      <button class="btn primary" onclick="confirmAddTracks()"><i class="ti ti-check"></i> Add selected</button>
-    </div>
-  </div>
-</div>
-
-<!-- New external link modal -->
-<div class="modal-overlay" id="add-link-modal">
-  <div class="modal" style="width:400px">
-    <div class="modal-header">
-      <div class="modal-title">Add external track</div>
-      <button class="btn" onclick="closeAddLinkModal()" style="padding:4px 8px"><i class="ti ti-x"></i></button>
-    </div>
-    <div class="form-group" style="margin-bottom:10px">
-      <label class="form-label" style="display:block;margin-bottom:5px">Title / label</label>
-      <input class="form-input" id="ext-title" placeholder="e.g. Hans Zimmer — Inception Theme">
-    </div>
-    <div class="form-group" style="margin-bottom:16px">
-      <label class="form-label" style="display:block;margin-bottom:5px">URL</label>
-      <input class="form-input" id="ext-url" placeholder="https://open.spotify.com/…">
-    </div>
-    <div style="display:flex;justify-content:flex-end;gap:8px">
-      <button class="btn" onclick="closeAddLinkModal()">Cancel</button>
-      <button class="btn primary" onclick="confirmAddLink()"><i class="ti ti-plus"></i> Add</button>
-    </div>
-  </div>
 </div>
 
 <script>
 const MONTHS = ['January','February','March','April','May','June','July','August','September','October','November','December']
 
-// ── Mock catalog tracks ───────────────────────────────────────
-const CATALOG_TRACKS = [
-  { id:'t01', title:'Tension Rise', composer:'R13a', key:'Cm', genre:'Cinematic', duration:'2:34' },
-  { id:'t02', title:'Midnight Drive', composer:'R48a', key:'Am', genre:'Electronic', duration:'3:12' },
-  { id:'t03', title:'Urban Pulse', composer:'R03b', key:'Gm', genre:'Hip-Hop', duration:'2:48' },
-  { id:'t04', title:'Neon Horizon', composer:'R13a', key:'Dm', genre:'Synthwave', duration:'3:45' },
-  { id:'t05', title:'Storm Front', composer:'R03b', key:'Em', genre:'Cinematic', duration:'2:20' },
-  { id:'t06', title:'Summer Drift', composer:'R48a', key:'C', genre:'Pop', duration:'2:54' },
-  { id:'t07', title:'Deep Current', composer:'R13a', key:'Bm', genre:'Ambient', duration:'4:10' },
-  { id:'t08', title:'City After Dark', composer:'R03b', key:'F#m', genre:'Lo-Fi', duration:'3:02' },
-  { id:'t09', title:'Cascade', composer:'R48a', key:'G', genre:'Orchestral', duration:'2:38' },
-  { id:'t10', title:'Fault Line', composer:'R13a', key:'Dm', genre:'Thriller', duration:'1:58' },
-]
-
-// ── Mock assignments ──────────────────────────────────────────
-const ALL_ASSIGNMENTS = [
-  { id:'A001', title:'Cinematic trailer cut — 0:30', type:'Edit', assigneeId:'R13a', track:'HAUS_TensionRise_Cm_R13a', brief:'Trim the full to exactly 0:30 for trailer sync. Fade begins at 0:27. Keep the main hook at 0:14–0:20. Deliver WAV + MP3.', dueDate:'2026-06-20', status:'In Progress', priority:'High', files:['HAUS_TensionRise_Cm_R13a_FULL.wav','HAUS_TensionRise_Cm_R13a_FULL.mp3'], deliverables:[], created:'2026-06-10', notes:'For Netflix review — deadline is firm.' },
-  { id:'A004', title:'Master — streaming loudness', type:'Master', assigneeId:'R13a', track:'HAUS_NeonHorizon_Dm_R13a', brief:'Master to -14 LUFS integrated for streaming. No limiting artifacts. Deliver as 24bit WAV.', dueDate:'2026-06-25', status:'Pending', priority:'Normal', files:['HAUS_NeonHorizon_Dm_R13a_FULL.wav'], deliverables:[], created:'2026-06-13', notes:'' },
-  { id:'A002', title:'Stem split — full stems package', type:'Stem Split', assigneeId:'R48a', track:'HAUS_MidnightDrive_Am_R48a', brief:'Export all stems: Melody, Bass, Drums, Pads, FX as 24bit WAV. Include a stereo mixdown.', dueDate:'2026-06-18', status:'Pending', priority:'Normal', files:['HAUS_MidnightDrive_Am_R48a_FULL.wav'], deliverables:[], created:'2026-06-12', notes:'' },
-  { id:'A003', title:'Alt version — underscore / no melody', type:'Alt Version', assigneeId:'R03b', track:'HAUS_UrbanPulse_Gm_R03b', brief:'Create an underscore version with the lead melody muted. Keep energy and rhythm intact.', dueDate:'2026-06-15', status:'Needs Review', priority:'Urgent', files:['HAUS_UrbanPulse_Gm_R03b_FULL.wav'], deliverables:['HAUS_UrbanPulse_Gm_R03b_UNDRSCR.wav'], created:'2026-06-08', notes:'Hulu needs this asap' },
-  { id:'A005', title:'Mix revision — client notes applied', type:'Mix', assigneeId:'R03b', track:'HAUS_StormFront_Em_R03b', brief:'Reduce low end by 3–4dB below 80Hz. Bring strings up +2dB in chorus. Deliver updated FULL.', dueDate:'2026-06-14', status:'Delivered', priority:'High', files:['HAUS_StormFront_Em_R03b_FULL.wav'], deliverables:['HAUS_StormFront_Em_R03b_FULL_v2.wav','HAUS_StormFront_Em_R03b_FULL_v2.mp3'], created:'2026-06-07', notes:'' },
-  { id:'A006', title:'60s cut — broadcast version', type:'Edit', assigneeId:'ED01', track:'HAUS_SummerDrift_C_R48a', brief:'Edit full 2:34 to exactly 0:60. Maintain energy arc. Broadcast safe: -23 LUFS.', dueDate:'2026-06-22', status:'Pending', priority:'High', files:['HAUS_SummerDrift_C_R48a_FULL.wav'], deliverables:[], created:'2026-06-14', notes:'' },
-  { id:'A007', title:'30s + 15s cuts for social', type:'Edit', assigneeId:'ED01', track:'HAUS_NeonHorizon_Dm_R13a', brief:'Cut a 0:30 and a 0:15. Both end on a natural downbeat. Deliver WAV + MP3 for each.', dueDate:'2026-06-19', status:'In Progress', priority:'Normal', files:['HAUS_NeonHorizon_Dm_R13a_FULL.wav'], deliverables:[], created:'2026-06-11', notes:'' },
-  { id:'A008', title:'Cue sheet prep — HBO package', type:'Edit', assigneeId:'ED02', track:'HAUS_StormFront_Em_R03b', brief:'Prepare cue sheet entries for the 3-track HBO background license package. Include timecodes, composers, durations.', dueDate:'2026-06-17', status:'Needs Review', priority:'Urgent', files:[], deliverables:['HBO_CueSheet_Draft_v1.pdf'], created:'2026-06-09', notes:'Legal review pending' },
-]
-
-// ── Playlists data ────────────────────────────────────────────
-let PLAYLISTS = [
-  {
-    id:'pl01', name:'Netflix Brief — Dramatic Tension', emoji:'🎬', createdBy:'R13a',
-    shared: true,
-    tracks: [
-      { type:'haus', trackId:'t01' },
-      { type:'haus', trackId:'t05' },
-      { type:'haus', trackId:'t10' },
-      { type:'external', title:'Ennio Morricone — The Ecstasy of Gold', url:'https://open.spotify.com/track/0mXuMVCOiAhPlHJXxLortn' },
-    ]
-  },
-  {
-    id:'pl02', name:'Synthwave / Neon References', emoji:'🌆', createdBy:'R13a',
-    shared: false,
-    tracks: [
-      { type:'haus', trackId:'t04' },
-      { type:'haus', trackId:'t02' },
-      { type:'external', title:'Perturbator — Neo Tokyo', url:'https://open.spotify.com/track/6JJrn07vgBEWMmBmVMTzYS' },
-      { type:'external', title:'Kavinsky — Nightcall', url:'https://open.spotify.com/track/0U0ldCRmgCqhVvD5XlYfO7' },
-    ]
-  },
-  {
-    id:'pl03', name:'Hulu — Underscore Moods', emoji:'📺', createdBy:'R03b',
-    shared: true,
-    tracks: [
-      { type:'haus', trackId:'t03' },
-      { type:'haus', trackId:'t07' },
-      { type:'haus', trackId:'t08' },
-    ]
-  },
-]
-
-// ── Ideas data ────────────────────────────────────────────────
-let IDEAS = [
-  {
-    id:'i01', authorId:'R13a', authorName:'Ben Zwerin', time:'Jun 14, 9:22am',
-    body:'Working on the Netflix brief — I think we need something darker in the low end, almost like a heartbeat pulse. Checked out some Trent Reznor work for reference.',
-    ref: { type:'haus', trackId:'t01', title:'Tension Rise' },
-    tag:'vibe', likes:['R48a','R03b'], comments:[
-      { id:'c01', authorId:'R03b', authorName:'R03b', time:'9:45am', body:'Agreed — maybe layer a sub 808 pulse at 60bpm. I can try a version.' },
-      { id:'c02', authorId:'ED01', authorName:'Maya Lin', time:'10:12am', body:'Reel already has that feel at 0:42, worth listening.' },
-    ]
-  },
-  {
-    id:'i02', authorId:'R48a', authorName:'R48a Composer', time:'Jun 13, 2:15pm',
-    body:'For the Hulu underscore brief — I think the reference playlist is missing some lo-fi / late night stuff. Urban Pulse is close but needs to breathe more.',
-    ref: { type:'external', title:'Nujabes — Feather', url:'https://youtu.be/r2t2OLEG4v4' },
-    tag:'reference', likes:['R13a'], comments:[
-      { id:'c03', authorId:'R13a', authorName:'Ben Zwerin', time:'2:40pm', body:'Adding Nujabes to the Hulu playlist now.' },
-    ]
-  },
-  {
-    id:'i03', authorId:'ED01', authorName:'Maya Lin', time:'Jun 12, 11:00am',
-    body:'Quick question on the Netflix 30s cut — should the drop hit before or after the title card? I have versions of both, not sure which direction they want.',
-    ref: null,
-    tag:'question', likes:[], comments:[
-      { id:'c04', authorId:'R13a', authorName:'Ben Zwerin', time:'11:22am', body:'Hit before — they want the impact on the title.' },
-    ]
-  },
-  {
-    id:'i04', authorId:'R03b', authorName:'R03b Composer', time:'Jun 11, 4:00pm',
-    body:'Submitted the underscore for Hulu review. Stripped the melody entirely and layered room tone underneath. Feels way more like background TV now.',
-    ref: null,
-    tag:'feedback', likes:['R13a','R48a','ED01','ED02'], comments:[]
-  },
-]
-
 // ── State ─────────────────────────────────────────────────────
 let currentUser = null
+let assignments = []
+let titles = []
+let notifications = []
 let assignFilter = 'all'
 let selectedAssignId = null
-let selectedPlaylistId = null
-let selectedIdeaId = null
-let ideaFilter = 'all'
-let pickerSelected = new Set()
-let pendingLinkTarget = null // 'playlist' or 'idea'
+
+// ── Fetch helpers ─────────────────────────────────────────────
+async function _get(path) {
+  const r = await fetch(path, { credentials: 'include' })
+  return r.json()
+}
+async function _post(path, body) {
+  const r = await fetch(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}), credentials: 'include' })
+  return r.json()
+}
 
 // ── Auth ──────────────────────────────────────────────────────
-function doLogin() {
-  const val = document.getElementById('login-select').value
-  if (!val) { alert('Please select your ID'); return }
-  const [id, name, role, color] = val.split('|')
-  currentUser = { id, name, role, color }
-  document.getElementById('login-screen').style.display = 'none'
-  document.getElementById('app-shell').classList.add('visible')
-  const initials = name.split(/[\s.]+/).map(w=>w[0]).join('').toUpperCase().slice(0,2)
-  document.getElementById('portal-avatar').textContent = initials
-  document.getElementById('portal-avatar').style.background = color
-  document.getElementById('portal-user-label').textContent = `${name} (${id})`
-  document.getElementById('drag-title').textContent = `HAUS Portal — ${name}`
-  renderStats(); renderAssignList()
-  renderPlaylistList(); renderIdeasFeed()
+async function checkSession() {
+  const data = await _get('/api/writer-portal/auth/me')
+  if (data.user) {
+    currentUser = data.user
+    if (currentUser.must_change_password) { showChangePassword() } else { enterApp() }
+  } else {
+    showLogin()
+  }
 }
-function doLogout() {
-  currentUser = null; selectedAssignId = null; selectedPlaylistId = null; selectedIdeaId = null
-  document.getElementById('app-shell').classList.remove('visible')
+
+function showLogin() {
   document.getElementById('login-screen').style.display = 'flex'
-  document.getElementById('login-select').value = ''
+  document.getElementById('change-pw-screen').style.display = 'none'
+  document.getElementById('app-shell').classList.remove('visible')
+}
+function showChangePassword() {
+  document.getElementById('login-screen').style.display = 'none'
+  document.getElementById('change-pw-screen').style.display = 'flex'
+  document.getElementById('app-shell').classList.remove('visible')
+}
+
+async function doLogin() {
+  const email = document.getElementById('login-email').value.trim()
+  const password = document.getElementById('login-password').value
+  const errEl = document.getElementById('login-error')
+  errEl.style.display = 'none'
+  if (!email || !password) { errEl.textContent = 'Email and password are required.'; errEl.style.display = 'block'; return }
+  const btn = document.getElementById('login-btn')
+  btn.disabled = true
+  const data = await _post('/api/writer-portal/auth/login', { email, password })
+  btn.disabled = false
+  if (!data.ok) { errEl.textContent = data.error || 'Login failed.'; errEl.style.display = 'block'; return }
+  currentUser = data.user
+  document.getElementById('login-password').value = ''
+  if (currentUser.must_change_password) { showChangePassword() } else { enterApp() }
+}
+
+async function doChangePassword() {
+  const oldPassword = document.getElementById('change-pw-old').value
+  const newPassword = document.getElementById('change-pw-new').value
+  const errEl = document.getElementById('change-pw-error')
+  errEl.style.display = 'none'
+  const data = await _post('/api/writer-portal/auth/change-password', { oldPassword, newPassword })
+  if (!data.ok) { errEl.textContent = data.error || 'Could not change password.'; errEl.style.display = 'block'; return }
+  document.getElementById('change-pw-old').value = ''
+  document.getElementById('change-pw-new').value = ''
+  enterApp()
+}
+
+async function doLogout() {
+  await _post('/api/writer-portal/auth/logout')
+  currentUser = null; assignments = []; titles = []; notifications = []
+  showLogin()
+}
+
+function enterApp() {
+  document.getElementById('login-screen').style.display = 'none'
+  document.getElementById('change-pw-screen').style.display = 'none'
+  document.getElementById('app-shell').classList.add('visible')
+  const name = currentUser.display_name || currentUser.composer_name || currentUser.email
+  const initials = name.split(/[\s.]+/).filter(Boolean).map(w => w[0]).join('').toUpperCase().slice(0, 2)
+  document.getElementById('portal-avatar').textContent = initials
+  document.getElementById('portal-avatar').style.background = 'var(--accent)'
+  document.getElementById('portal-user-label').textContent = `${name} (${currentUser.composer_id})`
+  document.getElementById('drag-title').textContent = `HAUS Composer Portal — ${name}`
+  loadAssignments()
+  loadTitles()
+  loadNotifications()
 }
 
 // ── Tab nav ───────────────────────────────────────────────────
@@ -491,374 +370,192 @@ function switchTab(id, btn) {
   btn.classList.add('active')
 }
 
-// ── Assignments ───────────────────────────────────────────────
-function myAssignments() {
-  return currentUser ? ALL_ASSIGNMENTS.filter(a => a.assigneeId === currentUser.id) : []
+// ── Assignments (real data from /api/writer-portal/my-assignments) ──────
+async function loadAssignments() {
+  const data = await _get('/api/writer-portal/my-assignments')
+  if (!data.ok) { document.getElementById('assign-list').innerHTML = `<div class="empty-state"><i class="ti ti-alert-circle"></i><p>${escapeHtml(data.error || 'Could not load assignments')}</p></div>`; return }
+  assignments = data.assignments
+  renderStats(); renderAssignList()
 }
+
 function renderStats() {
-  const mine = myAssignments()
-  const c = {pending:0,active:0,review:0,done:0}
-  mine.forEach(a => { if(a.status==='Pending')c.pending++; else if(a.status==='In Progress')c.active++; else if(a.status==='Needs Review')c.review++; else if(a.status==='Delivered')c.done++ })
+  const c = { Pending: 0, 'In Progress': 0, 'Needs Review': 0, Delivered: 0 }
+  assignments.forEach(a => { if (c[a.status] !== undefined) c[a.status]++ })
   document.getElementById('stat-bar').innerHTML = `
-    <div class="stat-item"><div class="stat-num">${mine.length}</div><div class="stat-lbl">Total</div></div>
-    <div class="stat-item"><div class="stat-num" style="color:var(--text3)">${c.pending}</div><div class="stat-lbl">Pending</div></div>
-    <div class="stat-item"><div class="stat-num" style="color:var(--blue)">${c.active}</div><div class="stat-lbl">In Progress</div></div>
-    <div class="stat-item"><div class="stat-num" style="color:var(--amber)">${c.review}</div><div class="stat-lbl">Needs Review</div></div>
-    <div class="stat-item"><div class="stat-num" style="color:var(--green)">${c.done}</div><div class="stat-lbl">Delivered</div></div>`
+    <div class="stat-item"><div class="stat-num">${assignments.length}</div><div class="stat-lbl">Total</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--text3)">${c.Pending}</div><div class="stat-lbl">Pending</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--blue)">${c['In Progress']}</div><div class="stat-lbl">In Progress</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--amber)">${c['Needs Review']}</div><div class="stat-lbl">Needs Review</div></div>
+    <div class="stat-item"><div class="stat-num" style="color:var(--green)">${c.Delivered}</div><div class="stat-lbl">Delivered</div></div>`
 }
+
 function setAssignFilter(f, btn) {
   assignFilter = f
   document.querySelectorAll('#tab-assignments .filter-tab').forEach(t => t.classList.remove('active'))
   btn.classList.add('active'); renderAssignList()
 }
+
 function renderAssignList() {
-  const items = assignFilter === 'all' ? myAssignments() : myAssignments().filter(a => a.status === assignFilter)
-  const sc = {Pending:'gray','In Progress':'blue','Needs Review':'amber',Delivered:'green'}
-  const today = new Date(); today.setHours(0,0,0,0)
+  const items = assignFilter === 'all' ? assignments : assignments.filter(a => a.status === assignFilter)
+  const sc = { Pending: 'gray', 'In Progress': 'blue', 'Needs Review': 'amber', Delivered: 'green' }
+  const today = new Date(); today.setHours(0, 0, 0, 0)
   document.getElementById('assign-list').innerHTML = items.length === 0
     ? `<div class="empty-state"><i class="ti ti-circle-check"></i><p>Nothing here</p></div>`
     : items.map(a => {
-        const due = a.dueDate ? new Date(a.dueDate+'T12:00:00') : null
-        const diff = due ? Math.ceil((due-today)/86400000) : null
-        let dueLabel = a.dueDate ? `Due ${fmtDate(a.dueDate)}` : ''
+        const due = a.due_date ? new Date(a.due_date) : null
+        const diff = due ? Math.ceil((due - today) / 86400000) : null
+        let dueLabel = a.due_date ? `Due ${fmtDate(a.due_date)}` : ''
         let dueClass = ''
-        if(diff !== null && a.status !== 'Delivered') {
-          if(diff < 0){ dueLabel='Overdue'; dueClass='overdue' }
-          else if(diff <= 2){ dueLabel=diff===0?'Due today':`Due in ${diff}d`; dueClass='due-soon' }
+        if (diff !== null && a.status !== 'Delivered') {
+          if (diff < 0) { dueLabel = 'Overdue'; dueClass = 'overdue' }
+          else if (diff <= 2) { dueLabel = diff === 0 ? 'Due today' : `Due in ${diff}d`; dueClass = 'due-soon' }
         }
-        return `<div class="assign-item${selectedAssignId===a.id?' selected':''}" onclick="selectAssignment('${a.id}')">
+        return `<div class="assign-item${selectedAssignId === a.assignment_id ? ' selected' : ''}" onclick="selectAssignment(${a.assignment_id})">
           <div class="assign-item-top">
             <div style="display:flex;gap:7px;flex:1;min-width:0">
               <div class="priority-dot ${a.priority}" style="margin-top:5px"></div>
-              <div class="assign-item-title">${a.title}</div>
+              <div class="assign-item-title">${escapeHtml(a.title)}</div>
             </div>
-            <span class="pill ${sc[a.status]||'gray'}">${a.status}</span>
+            <span class="pill ${sc[a.status] || 'gray'}">${escapeHtml(a.status)}</span>
           </div>
           <div class="assign-item-meta" style="margin-left:14px">
-            <span>${a.type}</span>${dueLabel?`<span>·</span><span class="${dueClass}">${dueLabel}</span>`:''}
+            <span>${escapeHtml(a.type || '—')}</span>${dueLabel ? `<span>·</span><span class="${dueClass}">${dueLabel}</span>` : ''}
           </div>
         </div>`
       }).join('')
 }
+
+const WRITER_ALLOWED_TRANSITIONS = {
+  'Pending': ['In Progress'],
+  'In Progress': ['Needs Review'],
+  'Needs Review': ['In Progress']
+}
+
 function selectAssignment(id) {
   selectedAssignId = id; renderAssignList()
-  const a = ALL_ASSIGNMENTS.find(x => x.id === id); if(!a) return
-  const sc = {Pending:'gray','In Progress':'blue','Needs Review':'amber',Delivered:'green'}
+  const a = assignments.find(x => x.assignment_id === id); if (!a) return
+  const sc = { Pending: 'gray', 'In Progress': 'blue', 'Needs Review': 'amber', Delivered: 'green' }
+  const sourceFiles = (a.files || []).filter(f => f.kind === 'source')
+  const deliverables = (a.files || []).filter(f => f.kind === 'deliverable')
   document.getElementById('assign-detail').innerHTML = `
     <div style="margin-bottom:14px">
-      <div style="font-size:16px;font-weight:600;margin-bottom:6px;line-height:1.4">${a.title}</div>
+      <div style="font-size:16px;font-weight:600;margin-bottom:6px;line-height:1.4">${escapeHtml(a.title)}</div>
       <div style="display:flex;gap:5px;flex-wrap:wrap">
-        <span class="pill ${sc[a.status]}">${a.status}</span>
-        <span class="pill gray">${a.type}</span>
-        <span class="pill ${a.priority==='Urgent'?'red':a.priority==='High'?'amber':'gray'}">${a.priority}</span>
+        <span class="pill ${sc[a.status]}">${escapeHtml(a.status)}</span>
+        <span class="pill gray">${escapeHtml(a.type || '—')}</span>
+        <span class="pill ${a.priority === 'Urgent' ? 'red' : a.priority === 'High' ? 'amber' : 'gray'}">${escapeHtml(a.priority)}</span>
       </div>
     </div>
     <div class="detail-block">
-      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px"><span style="color:var(--text3)">Track</span><span style="font-family:monospace;font-size:11px">${a.track}</span></div>
-      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--text3)">Due</span><span style="font-weight:500">${a.dueDate?fmtDateFull(a.dueDate):'—'}</span></div>
-      ${a.notes?`<div style="margin-top:9px;padding-top:9px;border-top:0.5px solid var(--border);font-size:12px;color:var(--amber-text)">${a.notes}</div>`:''}
+      <div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px"><span style="color:var(--text3)">Track</span><span style="font-family:monospace;font-size:11px">${escapeHtml(a.track || '—')}</span></div>
+      <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--text3)">Due</span><span style="font-weight:500">${a.due_date ? fmtDateFull(a.due_date) : '—'}</span></div>
+      ${a.notes ? `<div style="margin-top:9px;padding-top:9px;border-top:0.5px solid var(--border);font-size:12px;color:var(--amber-text)">${escapeHtml(a.notes)}</div>` : ''}
     </div>
     <div class="detail-block">
       <div class="section-lbl">Brief</div>
-      <div style="font-size:13px;color:var(--text);line-height:1.65">${a.brief}</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.65">${escapeHtml(a.brief_text || '')}</div>
     </div>
     <div class="detail-block">
       <div class="section-lbl">Source files</div>
-      ${a.files.map(f=>`<div class="file-row"><i class="ti ti-file-music"></i><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f}</span><button class="btn" style="padding:3px 7px;font-size:11px" onclick="alert('In production this downloads:\\n${f}')"><i class="ti ti-download"></i></button></div>`).join('')||'<p style="font-size:12px;color:var(--text3)">None attached</p>'}
+      ${sourceFiles.length ? sourceFiles.map(f => `<div class="file-row"><i class="ti ti-file-music"></i><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(f.filename)}</span></div>`).join('') : '<p style="font-size:12px;color:var(--text3)">None attached</p>'}
     </div>
     <div class="detail-block">
       <div class="section-lbl">Deliverables</div>
-      ${a.deliverables.map(f=>`<div class="deliv-row"><i class="ti ti-circle-check"></i><span style="flex:1">${f}</span></div>`).join('')}
-      ${a.status!=='Delivered'?`<div class="upload-zone" onclick="triggerUpload('${a.id}')" ondragover="dragOver(event,this)" ondragleave="dragLeave(this)" ondrop="handleDrop(event,'${a.id}',this)"><input type="file" id="fi-${a.id}" multiple onchange="handleFiles(event,'${a.id}')"><i class="ti ti-cloud-upload"></i><p>Drop files or click to upload</p></div>`:''}
+      ${deliverables.length ? deliverables.map(f => `<div class="deliv-row"><i class="ti ti-circle-check"></i><span style="flex:1">${escapeHtml(f.filename)}</span></div>`).join('') : '<p style="font-size:12px;color:var(--text3)">None yet</p>'}
+      <p style="font-size:11px;color:var(--text3);margin-top:8px"><i class="ti ti-info-circle"></i> File delivery isn't wired up yet — send finished files to HAUS the way you do today, then move this to "Needs Review" below.</p>
     </div>`
   const nextActions = {
-    'Pending':`<button class="btn primary" onclick="setAssignStatus('${id}','In Progress')"><i class="ti ti-play"></i> Start working</button>`,
-    'In Progress':`<button class="btn primary" onclick="submitForReview('${id}')"><i class="ti ti-send"></i> Submit for review</button>`,
-    'Needs Review':`<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--amber-text)"><i class="ti ti-clock"></i> Waiting on review</div>`,
-    'Delivered':`<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--green-text)"><i class="ti ti-circle-check"></i> Complete</div>`
+    'Pending': `<button class="btn primary" onclick="setAssignStatus(${id},'In Progress')"><i class="ti ti-play"></i> Start working</button>`,
+    'In Progress': `<button class="btn primary" onclick="setAssignStatus(${id},'Needs Review')"><i class="ti ti-send"></i> Submit for review</button>`,
+    'Needs Review': `<button class="btn" onclick="setAssignStatus(${id},'In Progress')"><i class="ti ti-arrow-back"></i> Pull back to In Progress</button>`,
+    'Delivered': `<div style="display:flex;align-items:center;gap:6px;font-size:12px;color:var(--green-text)"><i class="ti ti-circle-check"></i> Complete</div>`
   }
   const ab = document.getElementById('assign-action-bar')
   ab.style.display = 'flex'
-  ab.innerHTML = `<div style="flex:1;font-size:11px;color:var(--text3)">${a.id}</div>${nextActions[a.status]||''}`
+  ab.innerHTML = `<div style="flex:1;font-size:11px;color:var(--text3)">#${a.assignment_id}</div>${nextActions[a.status] || ''}`
 }
-function setAssignStatus(id, status) {
-  const a = ALL_ASSIGNMENTS.find(x=>x.id===id); if(a){ a.status=status; renderStats(); renderAssignList(); selectAssignment(id) }
-}
-function submitForReview(id) {
-  const a = ALL_ASSIGNMENTS.find(x=>x.id===id); if(!a) return
-  if(a.deliverables.length===0){ alert('Upload at least one deliverable first.'); return }
-  setAssignStatus(id, 'Needs Review')
-}
-function triggerUpload(id){ document.getElementById('fi-'+id)?.click() }
-function dragOver(e,el){ e.preventDefault(); el.classList.add('drag-over') }
-function dragLeave(el){ el.classList.remove('drag-over') }
-function handleDrop(e,id,el){ e.preventDefault(); el.classList.remove('drag-over'); addDelivs(id,Array.from(e.dataTransfer.files).map(f=>f.name)) }
-function handleFiles(e,id){ addDelivs(id,Array.from(e.target.files).map(f=>f.name)) }
-function addDelivs(id,names){ const a=ALL_ASSIGNMENTS.find(x=>x.id===id); if(a){ a.deliverables.push(...names); selectAssignment(id); renderStats() } }
 
-// ── Playlists ─────────────────────────────────────────────────
-function renderPlaylistList() {
-  const el = document.getElementById('playlist-list')
-  if(!PLAYLISTS.length){ el.innerHTML=`<div class="empty-state"><i class="ti ti-playlist"></i><p>No playlists yet</p></div>`; return }
-  el.innerHTML = PLAYLISTS.map(pl => `
-    <div class="playlist-list-item${selectedPlaylistId===pl.id?' selected':''}" onclick="selectPlaylist('${pl.id}')">
-      <div class="playlist-thumb">${pl.emoji}</div>
-      <div class="playlist-info">
-        <div class="playlist-name">${pl.name}</div>
-        <div class="playlist-meta">${pl.tracks.length} track${pl.tracks.length!==1?'s':''} · by ${pl.createdBy}${pl.shared?' · <span style="color:var(--blue-text)">shared</span>':''}</div>
-      </div>
-      ${pl.shared?`<i class="ti ti-users" style="font-size:14px;color:var(--text3)"></i>`:''}
-    </div>`).join('')
+async function setAssignStatus(id, status) {
+  const data = await _post(`/api/writer-portal/assignments/${id}/status`, { status })
+  if (!data.ok) { alert(data.error || 'Could not update status.'); return }
+  await loadAssignments()
+  selectAssignment(id)
 }
-function selectPlaylist(id) {
-  selectedPlaylistId = id; renderPlaylistList()
-  const pl = PLAYLISTS.find(p=>p.id===id); if(!pl) return
-  const detail = document.getElementById('playlist-detail')
-  const resolveTrack = t => t.type==='haus' ? CATALOG_TRACKS.find(c=>c.id===t.trackId) : null
-  detail.innerHTML = `
-    <div class="pane-header" style="background:var(--bg3)">
-      <div style="flex:1;min-width:0">
-        <div style="font-size:15px;font-weight:600">${pl.emoji} ${pl.name}</div>
-        <div style="font-size:11px;color:var(--text3);margin-top:2px">${pl.tracks.length} tracks · by ${pl.createdBy}</div>
-      </div>
-      <button class="btn" onclick="toggleShare('${pl.id}')" style="font-size:11px">
-        <i class="ti ti-${pl.shared?'lock':'users'}"></i> ${pl.shared?'Make private':'Share'}
-      </button>
-      <button class="btn primary" onclick="openAddTrackModal('${pl.id}')" style="font-size:11px"><i class="ti ti-plus"></i> Add</button>
-    </div>
-    <div class="pane-scroll">
-      <div style="background:var(--bg3);border-bottom:0.5px solid var(--border)">
-        ${pl.tracks.length===0?`<div class="empty-state" style="padding:30px"><i class="ti ti-music-off"></i><p>No tracks yet — add some above</p></div>`
-          : pl.tracks.map((t,i) => {
-              if(t.type==='haus'){
-                const tr = resolveTrack(t)
-                if(!tr) return ''
-                return `<div class="track-row">
-                  <span class="track-num">${i+1}</span>
-                  <div class="track-row-info">
-                    <div class="track-row-title">${tr.title}</div>
-                    <div class="track-row-meta">${tr.composer} · ${tr.key} · ${tr.genre} · ${tr.duration}</div>
-                  </div>
-                  <div class="track-row-actions">
-                    <button class="btn" style="padding:3px 7px;font-size:11px" onclick="removeTrackFromPlaylist('${pl.id}',${i})"><i class="ti ti-x"></i></button>
-                  </div>
-                </div>`
-              } else {
-                return `<div class="track-row">
-                  <span class="track-num">${i+1}</span>
-                  <div class="track-row-info">
-                    <div class="track-row-title" style="display:flex;align-items:center;gap:5px">${t.title} <span class="ext-badge">EXT</span></div>
-                    <div class="track-row-meta"><a href="${t.url}" target="_blank" style="color:var(--blue-text);font-size:10px;text-decoration:none">${t.url.replace('https://','')}</a></div>
-                  </div>
-                  <div class="track-row-actions">
-                    <button class="btn" style="padding:3px 7px;font-size:11px" onclick="window.open('${t.url}','_blank')"><i class="ti ti-external-link"></i></button>
-                    <button class="btn" style="padding:3px 7px;font-size:11px" onclick="removeTrackFromPlaylist('${pl.id}',${i})"><i class="ti ti-x"></i></button>
-                  </div>
-                </div>`
-              }
-            }).join('')}
-      </div>
-    </div>`
+
+// ── My Titles (real data from /api/writer-portal/my-titles) ─────────────
+async function loadTitles() {
+  const data = await _get('/api/writer-portal/my-titles')
+  if (!data.ok) { document.getElementById('titles-list').innerHTML = `<div class="empty-state"><i class="ti ti-alert-circle"></i><p>${escapeHtml(data.error || 'Could not load titles')}</p></div>`; return }
+  titles = data.titles
+  renderTitles()
 }
-function toggleShare(id) {
-  const pl = PLAYLISTS.find(p=>p.id===id); if(pl){ pl.shared=!pl.shared; renderPlaylistList(); selectPlaylist(id) }
+
+function renderTitles() {
+  const el = document.getElementById('titles-list')
+  if (!titles.length) { el.innerHTML = `<div class="empty-state"><i class="ti ti-music-off"></i><p>No titles on file yet</p></div>`; return }
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse">
+    <thead><tr style="text-align:left;font-size:11px;color:var(--text3);text-transform:uppercase;letter-spacing:0.03em">
+      <th style="padding:8px 10px;border-bottom:0.5px solid var(--border)">Title</th>
+      <th style="padding:8px 10px;border-bottom:0.5px solid var(--border)">SKU</th>
+      <th style="padding:8px 10px;border-bottom:0.5px solid var(--border)">Genre</th>
+      <th style="padding:8px 10px;border-bottom:0.5px solid var(--border)">Status</th>
+      <th style="padding:8px 10px;border-bottom:0.5px solid var(--border)">Stems</th>
+      <th style="padding:8px 10px;border-bottom:0.5px solid var(--border)">Added</th>
+    </tr></thead>
+    <tbody>${titles.map(t => `
+      <tr>
+        <td style="padding:9px 10px;font-size:13px;border-bottom:0.5px solid var(--border)">${escapeHtml(t.title)}</td>
+        <td style="padding:9px 10px;font-size:12px;font-family:monospace;border-bottom:0.5px solid var(--border)">${escapeHtml(t.sku_root)}</td>
+        <td style="padding:9px 10px;font-size:13px;border-bottom:0.5px solid var(--border)">${escapeHtml(t.genre || '—')}</td>
+        <td style="padding:9px 10px;font-size:13px;border-bottom:0.5px solid var(--border)">${escapeHtml(t.status || '—')}</td>
+        <td style="padding:9px 10px;font-size:13px;border-bottom:0.5px solid var(--border)">${t.has_stems ? '<i class="ti ti-circle-check" style="color:var(--green)"></i>' : '<i class="ti ti-minus" style="color:var(--text3)"></i>'}</td>
+        <td style="padding:9px 10px;font-size:12px;color:var(--text3);border-bottom:0.5px solid var(--border)">${t.date_added ? fmtDate(t.date_added) : '—'}</td>
+      </tr>`).join('')}</tbody>
+  </table>`
 }
-function newPlaylist() {
-  const name = prompt('Playlist name:'); if(!name) return
-  const emoji = ['🎬','🌆','🎵','🌙','⚡','🎸','🌊','🔥'][Math.floor(Math.random()*8)]
-  const id = 'pl'+Date.now()
-  PLAYLISTS.push({ id, name, emoji, createdBy: currentUser.id, shared:false, tracks:[] })
-  renderPlaylistList(); selectPlaylist(id)
+
+// ── Notifications ─────────────────────────────────────────────
+async function loadNotifications() {
+  const data = await _get('/api/writer-portal/notifications')
+  if (!data.ok) return
+  notifications = data.notifications
+  const badge = document.getElementById('notif-badge')
+  if (data.unread_count > 0) { badge.textContent = data.unread_count; badge.style.display = 'inline-block' }
+  else { badge.style.display = 'none' }
 }
-function openAddTrackModal(playlistId) {
-  pendingLinkTarget = playlistId; pickerSelected = new Set()
-  document.getElementById('track-search').value = ''
-  renderTrackPicker(''); document.getElementById('add-track-modal').classList.add('open')
+
+function toggleNotifications() {
+  const dd = document.getElementById('notif-dropdown')
+  if (dd.style.display === 'block') { dd.style.display = 'none'; return }
+  dd.innerHTML = notifications.length === 0
+    ? `<div class="empty-state" style="padding:24px"><i class="ti ti-bell-off"></i><p>No notifications</p></div>`
+    : notifications.map(n => `
+      <div style="padding:10px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;${n.read_at ? '' : 'background:var(--blue-bg)'}" onclick="markNotificationRead(${n.notification_id})">
+        <div style="font-size:12px;color:var(--text)">${escapeHtml(n.message)}</div>
+        <div style="font-size:10px;color:var(--text3);margin-top:3px">${fmtDateFull(n.created_at)}</div>
+      </div>`).join('')
+  dd.style.display = 'block'
 }
-function closeAddTrackModal(){ document.getElementById('add-track-modal').classList.remove('open') }
-function renderTrackPicker(q) {
-  const filtered = q ? CATALOG_TRACKS.filter(t=>t.title.toLowerCase().includes(q)||t.composer.toLowerCase().includes(q)||t.key.toLowerCase().includes(q)) : CATALOG_TRACKS
-  document.getElementById('track-picker').innerHTML = filtered.map(t=>`
-    <div class="track-pick-row">
-      <input type="checkbox" ${pickerSelected.has(t.id)?'checked':''} onchange="togglePick('${t.id}',this.checked)">
-      <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:500">${t.title}</div>
-        <div style="font-size:11px;color:var(--text3)">${t.composer} · ${t.key} · ${t.genre} · ${t.duration}</div>
-      </div>
-    </div>`).join('')
+
+async function markNotificationRead(id) {
+  await _post(`/api/writer-portal/notifications/${id}/read`)
+  await loadNotifications()
+  toggleNotifications(); toggleNotifications()
 }
-function togglePick(id, checked){ checked ? pickerSelected.add(id) : pickerSelected.delete(id) }
-function confirmAddTracks() {
-  const pl = PLAYLISTS.find(p=>p.id===pendingLinkTarget); if(!pl) return
-  pickerSelected.forEach(id => {
-    if(!pl.tracks.find(t=>t.type==='haus'&&t.trackId===id)) pl.tracks.push({ type:'haus', trackId:id })
-  })
-  closeAddTrackModal(); renderPlaylistList(); selectPlaylist(pl.id)
-}
-function removeTrackFromPlaylist(plId, idx) {
-  const pl = PLAYLISTS.find(p=>p.id===plId); if(pl){ pl.tracks.splice(idx,1); selectPlaylist(plId); renderPlaylistList() }
-}
-function closeAddLinkModal(){ document.getElementById('add-link-modal').classList.remove('open') }
-function confirmAddLink() {
-  const title = document.getElementById('ext-title').value.trim()
-  const url   = document.getElementById('ext-url').value.trim()
-  if(!title||!url){ alert('Title and URL required'); return }
-  if(pendingLinkTarget && pendingLinkTarget.startsWith('pl')) {
-    const pl = PLAYLISTS.find(p=>p.id===pendingLinkTarget); if(pl) pl.tracks.push({ type:'external', title, url })
-    closeAddLinkModal(); renderPlaylistList(); selectPlaylist(pl.id)
-  } else if(pendingLinkTarget === 'idea') {
-    document.getElementById('idea-ref-preview').dataset.ref = JSON.stringify({ type:'external', title, url })
-    document.getElementById('idea-ref-preview').innerHTML = `<i class="ti ti-link"></i> ${title} <button class="btn" style="padding:1px 5px;margin-left:auto" onclick="clearRef()"><i class="ti ti-x"></i></button>`
-    document.getElementById('idea-ref-preview').style.display='flex'
-    closeAddLinkModal()
+
+document.addEventListener('click', (e) => {
+  const dd = document.getElementById('notif-dropdown')
+  if (dd && dd.style.display === 'block' && !e.target.closest('#notif-dropdown') && !e.target.closest('button[onclick="toggleNotifications()"]')) {
+    dd.style.display = 'none'
   }
-}
-
-// ── Ideas ─────────────────────────────────────────────────────
-function setIdeaFilter(f, btn) {
-  ideaFilter = f
-  document.querySelectorAll('#tab-ideas .filter-tab').forEach(t=>t.classList.remove('active'))
-  btn.classList.add('active'); renderIdeasFeed()
-}
-const TAG_COLORS = { vibe:'purple', feedback:'blue', reference:'green', question:'amber' }
-const USER_COLORS = { R13a:'#2563eb', R48a:'#7c3aed', R03b:'#059669', ED01:'#d97706', ED02:'#dc2626' }
-function initials(name){ return name.split(/[\s.]+/).map(w=>w[0]).join('').toUpperCase().slice(0,2) }
-
-function renderIdeasFeed() {
-  const ideas = ideaFilter === 'mine' ? IDEAS.filter(i=>i.authorId===currentUser.id) : IDEAS
-  const el = document.getElementById('ideas-feed')
-  el.innerHTML = ideas.length===0
-    ? `<div class="empty-state"><i class="ti ti-bulb"></i><p>No ideas yet — post one below</p></div>`
-    : ideas.map(idea => {
-        const liked = idea.likes.includes(currentUser.id)
-        let refHtml = ''
-        if(idea.ref) {
-          if(idea.ref.type==='haus'){
-            const tr = CATALOG_TRACKS.find(t=>t.id===idea.ref.trackId)
-            if(tr) refHtml=`<div class="idea-ref"><i class="ti ti-music"></i><span>${tr.title} — ${tr.composer} · ${tr.key}</span></div>`
-          } else {
-            refHtml=`<div class="idea-ref" onclick="window.open('${idea.ref.url}','_blank')"><i class="ti ti-link"></i><span>${idea.ref.title}</span><i class="ti ti-external-link" style="margin-left:auto;font-size:12px;color:var(--text3)"></i></div>`
-          }
-        }
-        return `<div class="idea-card" id="idea-${idea.id}">
-          <div class="idea-header">
-            <div class="idea-avatar" style="background:${USER_COLORS[idea.authorId]||'#888'}">${initials(idea.authorName)}</div>
-            <div style="flex:1">
-              <div style="display:flex;align-items:center;gap:6px">
-                <span class="idea-author">${idea.authorName}</span>
-                ${idea.tag?`<span class="pill ${TAG_COLORS[idea.tag]||'gray'}">${idea.tag}</span>`:''}
-              </div>
-              <div class="idea-time">${idea.time}</div>
-            </div>
-          </div>
-          <div class="idea-body">${idea.body}</div>
-          ${refHtml}
-          <div class="idea-actions">
-            <button class="idea-action-btn${liked?' liked':''}" onclick="toggleLike('${idea.id}')"><i class="ti ti-heart${liked?'-filled':''}"></i> ${idea.likes.length}</button>
-            <button class="idea-action-btn" onclick="openComments('${idea.id}')"><i class="ti ti-message-circle"></i> ${idea.comments.length}</button>
-          </div>
-        </div>`
-      }).join('')
-}
-
-function toggleLike(id) {
-  const idea = IDEAS.find(i=>i.id===id); if(!idea) return
-  const idx = idea.likes.indexOf(currentUser.id)
-  if(idx>-1) idea.likes.splice(idx,1); else idea.likes.push(currentUser.id)
-  renderIdeasFeed()
-  if(selectedIdeaId===id) openComments(id)
-}
-
-function openComments(id) {
-  selectedIdeaId = id
-  const idea = IDEAS.find(i=>i.id===id); if(!idea) return
-  document.getElementById('comments-header').textContent = `${idea.comments.length} comment${idea.comments.length!==1?'s':''}`
-  document.getElementById('comments-scroll').innerHTML = idea.comments.length===0
-    ? `<div class="placeholder-pane"><i class="ti ti-message-circle"></i><p>No comments yet</p></div>`
-    : idea.comments.map(c=>`
-        <div class="comment-row">
-          <div class="idea-avatar" style="background:${USER_COLORS[c.authorId]||'#888'};width:26px;height:26px;font-size:9px;flex-shrink:0">${initials(c.authorName)}</div>
-          <div class="comment-bubble">
-            <div class="comment-meta">
-              <span class="comment-author">${c.authorName}</span>
-              <span class="comment-time">${c.time}</span>
-            </div>
-            <div class="comment-body">${c.body}</div>
-          </div>
-        </div>`).join('')
-  document.getElementById('comment-input').focus()
-}
-
-function postComment() {
-  const input = document.getElementById('comment-input')
-  const body = input.value.trim(); if(!body || !selectedIdeaId) return
-  const idea = IDEAS.find(i=>i.id===selectedIdeaId); if(!idea) return
-  const now = new Date()
-  idea.comments.push({
-    id: 'c'+Date.now(), authorId: currentUser.id, authorName: currentUser.name,
-    time: now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'}), body
-  })
-  input.value = ''
-  openComments(selectedIdeaId); renderIdeasFeed()
-}
-
-function postIdea() {
-  const body = document.getElementById('idea-compose').value.trim(); if(!body) return
-  const tag  = document.getElementById('idea-tag').value
-  const refEl = document.getElementById('idea-ref-preview')
-  let ref = null
-  if(refEl && refEl.dataset.ref) { try{ ref = JSON.parse(refEl.dataset.ref) }catch{} }
-  const now = new Date()
-  IDEAS.unshift({
-    id: 'i'+Date.now(), authorId: currentUser.id, authorName: currentUser.name,
-    time: `${MONTHS[now.getMonth()].slice(0,3)} ${now.getDate()}, ${now.toLocaleTimeString('en-US',{hour:'numeric',minute:'2-digit'})}`,
-    body, ref, tag: tag||null, likes:[], comments:[]
-  })
-  document.getElementById('idea-compose').value = ''
-  document.getElementById('idea-tag').value = ''
-  if(refEl){ refEl.style.display='none'; delete refEl.dataset.ref }
-  renderIdeasFeed()
-}
-
-function attachRef() {
-  const list = CATALOG_TRACKS.map((t, i) => (i+1) + '. ' + t.title + ' (' + t.composer + ')').join('\n')
-  const input = prompt('Pick a track number:\n' + list)
-  if (!input) return
-  const track = CATALOG_TRACKS[parseInt(input) - 1]
-  if (!track) return
-  const refEl = getOrCreateRefPreview()
-  refEl.dataset.ref = JSON.stringify({ type:'haus', trackId: track.id, title: track.title })
-  refEl.innerHTML = '<i class="ti ti-music"></i> ' + track.title + ' — ' + track.composer + ' <button class="btn" style="padding:1px 5px;margin-left:auto" onclick="clearRef()"><i class="ti ti-x"></i></button>'
-  refEl.style.display = 'flex'
-}
-
-function attachLink() {
-  pendingLinkTarget = 'idea'
-  document.getElementById('ext-title').value = ''
-  document.getElementById('ext-url').value = ''
-  document.getElementById('add-link-modal').classList.add('open')
-}
-
-function getOrCreateRefPreview() {
-  let el = document.getElementById('idea-ref-preview')
-  if(!el){
-    el = document.createElement('div')
-    el.id = 'idea-ref-preview'
-    el.className = 'idea-ref'
-    el.style.cssText = 'display:none;margin-bottom:8px;align-items:center;gap:8px'
-    document.querySelector('.compose-opts').before(el)
-  }
-  return el
-}
-function clearRef(){
-  const el = document.getElementById('idea-ref-preview')
-  if(el){ el.style.display='none'; delete el.dataset.ref }
-}
+})
 
 // ── Utilities ─────────────────────────────────────────────────
-function fmtDate(s){ if(!s)return'—'; const d=new Date(s+'T12:00:00'); return `${MONTHS[d.getMonth()].slice(0,3)} ${d.getDate()}` }
-function fmtDateFull(s){ if(!s)return'—'; const d=new Date(s+'T12:00:00'); return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}` }
-function autoResize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px' }
+function fmtDate(s) { if (!s) return '—'; const d = new Date(s); return `${MONTHS[d.getMonth()].slice(0, 3)} ${d.getDate()}` }
+function fmtDateFull(s) { if (!s) return '—'; const d = new Date(s); return `${MONTHS[d.getMonth()]} ${d.getDate()}, ${d.getFullYear()}` }
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
+
+checkSession()
 </script>
 </body>
 </html>
