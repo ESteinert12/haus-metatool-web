@@ -273,7 +273,15 @@ app.use('/api', (req, res, next) => {
 
   if (PUBLIC_ROUTES.includes(sig)) return next()
   if (!req.session?.user) return res.status(401).json({ ok: false, error: 'Not logged in' })
-  if (ADMIN_ROUTES.includes(sig) && req.session.user.role !== 'admin') {
+  // Royalty tracker: real dollar figures, admin-only per Erik's 2026-11-04 call
+  // (see claude/handoff-2026-11-04-royalty-tracker-decisions-and-worktree-cleanup.md,
+  // item 5). Prefix-matched rather than listed in ADMIN_ROUTES because several of
+  // these routes carry a path param (:id) that ADMIN_ROUTES' exact-string match
+  // can't express -- same startsWith() style already used above for the portal
+  // guards, not a new pattern.
+  const isRoyaltyRoute = req.path === '/royalties' || req.path.startsWith('/royalties/') ||
+                         req.path === '/episode-reference' || req.path.startsWith('/episode-reference/')
+  if ((ADMIN_ROUTES.includes(sig) || isRoyaltyRoute) && req.session.user.role !== 'admin') {
     console.warn(`[authz] ${req.session.user.username} denied ${sig} (role=${req.session.user.role})`)
     return res.status(403).json({ ok: false, error: 'Admin only' })
   }

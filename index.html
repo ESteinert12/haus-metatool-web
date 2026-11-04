@@ -417,7 +417,7 @@ webview{flex:1;border:none}
   <div class="nav-item" data-section="composers"><i class="ti ti-microphone-2"></i> The Team</div>
   <div class="nav-item" data-section="ebr"><i class="ti ti-file-spreadsheet"></i> EBR</div>
   <div class="nav-item" data-section="cuesheets"><i class="ti ti-music-check"></i> Cue Sheets</div>
-  <div class="nav-item" data-section="royalties"><i class="ti ti-cash"></i> Royalties</div>
+  <div class="nav-item" data-admin-only data-section="royalties"><i class="ti ti-cash"></i> Royalties</div>
   <div class="nav-item" data-section="files"><i class="ti ti-folder"></i> Files</div>
 
   <div class="nav-section">Production</div>
@@ -6635,7 +6635,7 @@ async function openMetadataEditor(sku) {
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
           <div id="me-usage-stats" style="font-size:11px;color:#3a4f56">Loading usage…</div>
         </div>
-        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
+        <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)" data-admin-only>
           <div id="me-royalty-stats" style="font-size:11px;color:#3a4f56">Loading royalty earnings…</div>
         </div>
         <div style="margin-top:16px;padding-top:16px;border-top:1px solid var(--border)">
@@ -6663,7 +6663,7 @@ async function openMetadataEditor(sku) {
   // Load lot history into the metadata editor
   loadMetadataEditorLotHistory(sku)
   loadMetadataEditorUsageStats(sku)
-  loadMetadataEditorRoyaltyStats(sku)
+  if (currentUser?.role === 'admin') loadMetadataEditorRoyaltyStats(sku)
 }
 
 async function saveMetadataEditor(sku) {
@@ -9150,10 +9150,17 @@ function renderRoyaltyList() {
   el.innerHTML = royaltyStatementsCache.map(rs => {
     const active = rs.id === currentRoyaltyStatementId
     const warn = parseInt(rs.unmatched_count) + parseInt(rs.ambiguous_count)
+    // Reconciled (per Erik's 2026-11-04 call): every line is matched or explicitly
+    // rejected -- none left in needs-review (unmatched/ambiguous). No dollar-total
+    // tie-out requirement. Computed live from counts the list query already
+    // returns, same no-new-schema posture as the rest of this feature.
+    const reconciled = warn === 0 && parseInt(rs.line_count) > 0
     return `
       <div onclick="openRoyaltyDetail(${rs.id})"
         style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);${active ? 'background:#E7F0EA' : ''}">
-        <div style="font-size:12px;font-weight:600;color:#1a2226">${esc(rs.source)} ${esc(rs.period || '')}</div>
+        <div style="font-size:12px;font-weight:600;color:#1a2226">${esc(rs.source)} ${esc(rs.period || '')}
+          ${reconciled ? `<span style="font-size:9px;font-weight:700;color:#2e7d32;background:#E7F0EA;border-radius:3px;padding:1px 5px;margin-left:6px;vertical-align:middle">RECONCILED</span>` : ''}
+        </div>
         <div style="font-size:10px;color:#4b5a5e;margin-top:2px">${esc(rs.source_filename)} · fmt ${rs.format}</div>
         <div style="font-size:10px;color:#4b5a5e;margin-top:4px">
           ${rs.line_count} lines · $${parseFloat(rs.lines_total).toFixed(2)} · ${rs.confirmed_count} confirmed
