@@ -440,10 +440,37 @@ function parseEpisodeReferenceFile(filePath) {
 // normalized-title match only, never fuzzy. Multiple candidates -> ambiguous,
 // human picks; zero -> unmatched, human can search/override. A wrong
 // automatic match here means money attributed to the wrong song.
+// 2026-11-04 perf fix: matchLineToTitles used to .filter() the FULL titles
+// array (per real-catalog counts, ~33,000 rows) on every single call, and a
+// real statement runs 30,000-80,000 lines -- a worst case over a billion
+// string comparisons for one import, run synchronously on Node's single
+// thread (blocking every other request on the server for the duration).
+// Fixed with a Map keyed by normTitle, built ONCE per distinct titlesIndex
+// array (cached in a WeakMap so it's transparent to every caller -- nothing
+// about the public matchLineToTitles(line, titlesIndex) signature changed,
+// same inputs/outputs, same candidates/order/counts, just O(1) lookups
+// instead of an O(n) scan per line). Verified against the real catalog after
+// this change: identical matched/ambiguous/unmatched counts as before
+// (31744/27/3010 on the same real BMI file used in prior live verification).
+const _royaltyTitleIndexCache = new WeakMap()
+function _royaltyTitleIndexFor(titlesIndex) {
+  let idx = _royaltyTitleIndexCache.get(titlesIndex)
+  if (!idx) {
+    idx = new Map()
+    for (const t of titlesIndex) {
+      if (!idx.has(t.normTitle)) idx.set(t.normTitle, [])
+      idx.get(t.normTitle).push(t)
+    }
+    _royaltyTitleIndexCache.set(titlesIndex, idx)
+  }
+  return idx
+}
+
 function matchLineToTitles(line, titlesIndex) {
+  const byNorm = _royaltyTitleIndexFor(titlesIndex)
   const norm = line.titleNormalized
   if (norm) {
-    const exact = titlesIndex.filter(t => t.normTitle === norm)
+    const exact = byNorm.get(norm) || []
     if (exact.length === 1) return { status: 'matched', candidates: exact, confidence: 'exact' }
     if (exact.length > 1) return { status: 'ambiguous', candidates: exact, confidence: 'exact-multiple' }
 
@@ -461,7 +488,7 @@ function matchLineToTitles(line, titlesIndex) {
     // in this file.
     const withThe = normTitle('THE ' + (line.titleRaw || ''))
     if (withThe && withThe !== norm) {
-      const withTheMatches = titlesIndex.filter(t => t.normTitle === withThe)
+      const withTheMatches = byNorm.get(withThe) || []
       if (withTheMatches.length === 1) return { status: 'matched', candidates: withTheMatches, confidence: 'exact-with-article' }
       if (withTheMatches.length > 1) return { status: 'ambiguous', candidates: withTheMatches, confidence: 'exact-with-article-multiple' }
     }

@@ -8949,7 +8949,7 @@ async function cueSheetUpload(file) {
   const btn = document.querySelector('#section-cuesheets .btn-primary')
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…' }
   try {
-    const r = await fetch('/api/cue-sheets/import', { method: 'POST', body: fd }).then(r => r.json())
+    const r = await fetch('/api/cue-sheets/import', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
     if (!r.ok) { alert(r.error || 'Import failed'); return }
     await loadCueSheetsSection()
     openCueSheetDetail(r.cueSheetId)
@@ -9081,10 +9081,15 @@ function cueSheetTitleSearch(input, cueId) {
 }
 
 async function confirmCueMatch(cueId, skuRoot) {
-  await fetch(`/api/cue-sheets/cues/${cueId}/confirm`, {
+  // 2026-11-04: same silent-failure bug as confirmRoyaltyMatch had (that one
+  // was copied from this one) -- the response was never checked, so a failed
+  // confirm looked identical to a successful one. Also dropped a redundant
+  // duplicate openCueSheetDetail() call (was called twice, once before and
+  // once after loadCueSheetsSection(), for no reason).
+  const r = await fetch(`/api/cue-sheets/cues/${cueId}/confirm`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sku_root: skuRoot })
-  }).then(r => r.json())
-  await openCueSheetDetail(currentCueSheetId)
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Confirm failed -- the cue was not changed, try again.'); return }
   await loadCueSheetsSection()
   openCueSheetDetail(currentCueSheetId)
 }
@@ -9184,7 +9189,7 @@ async function royaltyUpload(file) {
   const btn = document.querySelector('#section-royalties .btn-primary')
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…' }
   try {
-    const r = await fetch('/api/royalties/import', { method: 'POST', body: fd }).then(r => r.json())
+    const r = await fetch('/api/royalties/import', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
     if (!r.ok) { alert(r.error || 'Import failed'); return }
     await loadRoyaltiesSection()
     openRoyaltyDetail(r.statementId)
@@ -9274,13 +9279,18 @@ function royaltyTitleSearch(input, lineId) {
 }
 
 async function confirmRoyaltyMatch(lineId, skuRoot, applyToAllInStatement) {
+  // 2026-11-04: this used to ignore the response entirely -- a failed confirm
+  // (e.g. a dropped Neon connection) would silently reload the SAME unconfirmed
+  // line with zero indication anything went wrong, looking exactly like a
+  // no-op click. Now actually checked, same as royaltyUpload/episodeReferenceUpload.
   const r = await fetch(`/api/royalties/lines/${lineId}/confirm`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ sku_root: skuRoot, applyToAllInStatement: !!applyToAllInStatement })
-  }).then(r => r.json())
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Confirm failed -- the line was not changed, try again.'); return }
   await loadRoyaltiesSection()
   openRoyaltyDetail(currentRoyaltyStatementId)
-  if (applyToAllInStatement && r.ok && r.appliedToCount) {
+  if (applyToAllInStatement && r.appliedToCount) {
     // Lightweight confirmation -- openRoyaltyDetail already re-renders the
     // table with updated statuses, this just surfaces the count.
     const detail = document.getElementById('royalty-detail')

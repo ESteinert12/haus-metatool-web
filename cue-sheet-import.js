@@ -818,7 +818,35 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 // unreliable enough to be worse than no auto-match at all. Anything that
 // isn't an exact normalized-title match comes back unmatched and goes
 // through the manual search-to-confirm picker in the UI instead of a guess.
+// 2026-11-04 perf fix: matchCueToTitles used to .filter() the FULL titles
+// array (per real-catalog counts, ~33,000 rows) up to 3 times per cue, for
+// every cue in a cue sheet -- same O(cues x titles) problem as
+// matchLineToTitles in royalty-import.js (see that function's own comment),
+// fixed the same way: three Maps (by normTitleStrict / normTitle / camelKey),
+// built ONCE per distinct titlesIndex array and cached in a WeakMap, so this
+// is transparent to every caller -- same signature, same candidates/order/
+// counts, just O(1) lookups instead of an O(n) scan per cue per key.
+const _cueTitleIndexCache = new WeakMap();
+function _cueTitleIndexFor(titlesIndex) {
+  let idx = _cueTitleIndexCache.get(titlesIndex);
+  if (!idx) {
+    const byStrict = new Map(), byNorm = new Map(), byCamel = new Map();
+    for (const t of titlesIndex) {
+      if (!byStrict.has(t.normTitleStrict)) byStrict.set(t.normTitleStrict, []);
+      byStrict.get(t.normTitleStrict).push(t);
+      if (!byNorm.has(t.normTitle)) byNorm.set(t.normTitle, []);
+      byNorm.get(t.normTitle).push(t);
+      if (!byCamel.has(t.camelKey)) byCamel.set(t.camelKey, []);
+      byCamel.get(t.camelKey).push(t);
+    }
+    idx = { byStrict, byNorm, byCamel };
+    _cueTitleIndexCache.set(titlesIndex, idx);
+  }
+  return idx;
+}
+
 function matchCueToTitles(cue, titlesIndex) {
+  const { byStrict, byNorm, byCamel } = _cueTitleIndexFor(titlesIndex);
   // Strict pass first: match the cue's title AS WRITTEN against the
   // catalog's title AS WRITTEN (no suffix stripping on either side). Tried
   // before the stripped pass because the catalog can and does contain two
@@ -828,7 +856,7 @@ function matchCueToTitles(cue, titlesIndex) {
   // correctly and never reaches the stripped comparison below.
   const strictNorm = cue.titleNormalizedStrict;
   if (strictNorm) {
-    const strictExact = titlesIndex.filter(t => t.normTitleStrict === strictNorm);
+    const strictExact = byStrict.get(strictNorm) || [];
     if (strictExact.length === 1) return { status: 'matched', candidates: strictExact, confidence: 'exact-strict' };
     if (strictExact.length > 1) return { status: 'ambiguous', candidates: strictExact, confidence: 'exact-strict-multiple' };
   }
@@ -840,7 +868,7 @@ function matchCueToTitles(cue, titlesIndex) {
   // "Thunder MAIN").
   const norm = cue.titleNormalized;
   if (norm) {
-    const exact = titlesIndex.filter(t => t.normTitle === norm);
+    const exact = byNorm.get(norm) || [];
     if (exact.length === 1) return { status: 'matched', candidates: exact, confidence: 'exact' };
     if (exact.length > 1) return { status: 'ambiguous', candidates: exact, confidence: 'exact-multiple' };
   }
@@ -850,7 +878,7 @@ function matchCueToTitles(cue, titlesIndex) {
   // exact match -- against a second, precomputed key (titlesIndex[].camelKey,
   // set wherever titlesIndex is built in api.js) -- never a fuzzy guess.
   if (cue.filenameCamelKey) {
-    const camelExact = titlesIndex.filter(t => t.camelKey === cue.filenameCamelKey);
+    const camelExact = byCamel.get(cue.filenameCamelKey) || [];
     if (camelExact.length === 1) return { status: 'matched', candidates: camelExact, confidence: 'filename-exact' };
     if (camelExact.length > 1) return { status: 'ambiguous', candidates: camelExact, confidence: 'filename-exact-multiple' };
   }
