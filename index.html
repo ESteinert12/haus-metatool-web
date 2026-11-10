@@ -8325,9 +8325,16 @@ function _syncTagFieldDone(fieldId) {
   input.classList.toggle('field-done', hasTags)
 }
 
-// Auto-add tag when user clicks a datalist suggestion (no Enter needed)
-function onTagPickerInput(input, callback) {
+// Auto-add tag when user clicks a datalist suggestion (no Enter needed).
+// It must NEVER fire while the user is typing: "King" is a known KSL, so adding on every
+// exact match grabbed "King" mid-way through "Kings of Leon", cleared the box, and each
+// retry added another chip (and inserted it into the ksl table). A datalist PICK arrives as
+// an 'input' event with inputType 'insertReplacementText' (or none); typing is
+// 'insertText' / 'deleteContentBackward' / 'insertFromPaste' and is ignored here.
+// 'change' (commit on blur) is passed without a typing inputType and is still honoured.
+function onTagPickerInput(input, callback, ev) {
   clearTimeout(input._tpt)
+  if (ev && ev.type === 'input' && ev.inputType && ev.inputType !== 'insertReplacementText') return
   const val = input.value.trim()
   if (!val || val.length < 2 || !input.list) return
   const match = Array.from(input.list.options).some(o => o.value.toLowerCase() === val.toLowerCase())
@@ -11429,7 +11436,7 @@ async function loadIntakeTrackForm(idx) {
     <div id="${fieldId}-tags" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:5px"></div>
     <div style="display:flex;gap:5px">
       <input class="form-input" style="flex:1" list="${dlId}" placeholder="${ph} — Enter to add new" id="${fieldId}-new"
-        oninput="onTagPickerInput(this, () => addIntakeTagNew('${fieldId}'))"
+        oninput="onTagPickerInput(this, () => addIntakeTagNew('${fieldId}'), event)"
         onchange="onTagPickerInput(this, () => addIntakeTagNew('${fieldId}'))"
         onkeydown="if(event.key==='Enter'){event.preventDefault();addIntakeTagNew('${fieldId}')}">
       <datalist id="${dlId}">${opts}</datalist>
@@ -11565,7 +11572,7 @@ async function loadIntakeTrackForm(idx) {
         <div id="m2tags-${i}" style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:5px"></div>
         <div style="display:flex;gap:5px">
           <input class="form-input" style="flex:1" list="mood2-dl-${i}" id="m2sel-${i}" placeholder="Add mood…"
-            oninput="onTagPickerInput(this, () => addIntakeMoodTag(${i}))"
+            oninput="onTagPickerInput(this, () => addIntakeMoodTag(${i}), event)"
             onchange="onTagPickerInput(this, () => addIntakeMoodTag(${i}))"
             onkeydown="if(event.key==='Enter'){event.preventDefault();addIntakeMoodTag(${i})}">
           <datalist id="mood2-dl-${i}">${mood2Opts}</datalist>
@@ -12926,7 +12933,7 @@ function fqSelect(skuRoot) {
       </div>
       <div style="display:flex;gap:6px;margin-bottom:20px">
         <input id="fq-mood2-input" list="fq-mood2-dl" placeholder="Add mood…"
-          oninput="onTagPickerInput(this, fqAddMood2)"
+          oninput="onTagPickerInput(this, fqAddMood2, event)"
           onchange="onTagPickerInput(this, fqAddMood2)"
           onkeydown="if(event.key==='Enter'){event.preventDefault();fqAddMood2()}"
           style="flex:1;height:34px;padding:0 10px;border:1px solid #c5d9ef;border-radius:var(--radius);background:#e8f1fb;color:#2c5f8a;font-size:13px;box-sizing:border-box">

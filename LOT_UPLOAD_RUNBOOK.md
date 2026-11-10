@@ -306,6 +306,51 @@ Tick these off. 30 lots.
         (R25a44054, R82a87614, R82a87624, R48a5344) show up in regen-mp3 noSource: probably July-intake leftovers, NOT verified, not touched.
         New scripts: repoint_typo_rows.js, hide_misnamed_bigsky.js. work_queue: preview 2026-10-27 = 0 open rows for source_lot='INTAKE LOT_260707_TEXAS WIVES 2',
         so no UPDATE was run (nothing to resolve).
+    [x] upload only  (ad hoc folder in 2. ATMOS_Shipping)  1 song folder / 6 audio files / ~0.09 GB  (R82a8854 Snakeskin Boots)
+        PASS 2026-11-03, record=1 recorded 6, verify-lot 6/6 fully verified, 0 failures, 0 warnings.
+        Lot value passed to every endpoint = "upload only", so mix_stems.source_lot is that exact string.
+        Folder arrived as 6 LOOSE wav files (no song folder). Local song folder created: "R82a8854_Snakeskin Boots_F"
+        (B2: nimbus/R82_Steve Mayone_NIMBUS/R82a8854_Snakeskin Boots_F/). Brand-new in B2 (no objects under the SKU), so no overwrites.
+        precheck_lot.js could not derive a composer folder (no keyed rows yet); the upload-lot dry run's composerFolders did (siblings R82a8864/74/94).
+        TRAP: R82a8854 already had 8 legacy mix_stems rows with b2_key NULL. create-stems counts (sku, stem, filename) matches as
+        alreadyRecorded even when keyless, so 5 files were skipped and verify-lot would have failed. Fixed with link_null_rows.js (new, scoped
+        to the lot, dry run default, --live applies): linked 5 keyless rows (BUMPER, DNB, FULL.wav, NoDNB, STINGa); create-stems inserted STINGb.
+        LEFT AS IS: keyless rows with no local source: ALT.wav, STING.wav, FULL.mp3 (no mp3 in B2 for this song; regen-mp3 cannot see it).
+        regen-mp3 dry run after the lot: broken 33, regenerable 0, noSource 33 (unchanged).
+        work_queue: preview 2026-11-03 = 0 open rows for source_lot='upload only', so no UPDATE was run (nothing to resolve).
+        Snakeskin Boots playback confirmed by Erik 2026-11-03 (plays with no FULL.mp3). OPEN: set folder back to online-only in Finder.
+    [x] 260717_TEXAS WIVES_4  (ATMOS_Shipping/260717_TEXAS WIVES_4)  30 song folders / 183 audio files uploaded or skipped (+11 S33 mp3s held out) / ~2.7 GB
+        PASS 2026-11-04, record=1 recorded 183, verify-lot 183/183 fully verified, 0 failures, 0 warnings.
+        Lot value passed to every endpoint = "260717_TEXAS WIVES_4", so mix_stems.source_lot is that exact string.
+        All 30 titles already had 194 legacy Neon rows (no size); 130 pointed at stub objects at the SAME key as the lot's folder names, so
+        upload-lot overwrote the stubs in place (stubOver 130); 44 S33 wavs were already real and identical (skipped). create-stems inserted 0 rows.
+        precheck_lot.js predicted DIFF 13: 11 S33a49xxx FULL.mp3 (B2 real copy larger than the lot's) + 2 R82a8874 Saddle Rash ALTa/ALTb.
+        Erik's choices: KEEP B2's S33 mp3s (11 lot mp3s moved to "_held_mp3_260717" beside the lot, delete when comfortable), LOT WINS for the 2 Saddle Rash ALTs
+        (old versions retained: check_precheck_versions.js oldRetained 2, oldGone 0, b2-versions-check-1793797394789.json).
+        Live upload: 138 uploaded + 1 retry (C27a2844 BUMPERb.wav, "no tomes available") / 44 skipped, 0 failed at the end.
+        T55a0144 Countryside Abandon: all 7 keys were absent from B2, and the FULL.wav row (id 617981) pointed at a stray FLAT key under
+        'T55_Jeffrey+Richardi_NIMBUS/' ('+' in the composer folder, no song folder). create-stems calls it alreadyRecorded, so verify-lot failed 1 (missingFromDb)
+        until the new script repoint_missing_rows.js (dry run default, --live) repointed that row to the correct key: updated 1 of 1.
+        regen-mp3 dry run after the lot: broken 14, regenerable 0, noSource 14 (was 33; 19 stub FULL.mp3 rows were replaced by this lot's mp3s).
+        The 10 noSource entries sampled are not in this lot (R25a44054, R48a5344, R82a87614 ... typo-SKU orphans from 260707); the other 4 were not listed.
+        LEFT AS IS: the 11 held S33 mp3 rows keep legacy rows without size/sha1 (not covered by record=1).
+        work_queue: preview 2026-11-04 = 0 open rows for source_lot='260717_TEXAS WIVES_4', so no UPDATE was run (nothing to resolve).
+        Erik reported the post-lot check 'successful' 2026-11-04 (which songs were played was not stated). OPEN: set folder back to online-only in Finder; delete _held_mp3_260717 when comfortable.
+    [x] INTAKE LOT_250827_SOHO4_06_Tension (EX)  (ATMOS_Shipping)  30 song folders / 169 audio files / ~1.15 GB (+ "1. SOHO4 06.csv", not uploaded)
+        PASS 2026-11-05, record=1 recorded 169, verify-lot 169/169 fully verified, 0 failures, 0 warnings.
+        Lot value passed to every endpoint = "INTAKE LOT_250827_SOHO4_06_Tension (EX)", so mix_stems.source_lot is that exact string.
+        All 30 titles were brand new in B2 and Neon had 0 mix_stems rows for them (check_old_keys 0 legacy rows, create-stems titlesWithNoAudio 30), so no overwrites possible.
+        precheck_lot.js printed "NO composer folder derivable" for every folder (no keyed rows yet) -> not useful for a lot of brand-new songs; the upload-lot dry run's composerFolders was the source.
+        upload-lot dry run BLOCKED 6 folders ("no existing B2 folder for this composer/collection to derive from"): T37a0064-T37a0114 (SOHO TENSION). Composer T37 = Julio Mazzeu
+        (composers table); his earlier songs are in cirrus (album digit 3) but these have digit 4, so the nimbus composer folder is "nimbus/T37_Julio Mazzeu_NIMBUS" (b2ComposerFolder rule).
+        Uploaded with upload_new_composer_songs.py (edited LOT_DIR / COMPOSER_FOLDER / SONG_FOLDERS; backup .bak-20261105): 41 files, 0 failed. Folder names kept as on disk
+        (contain '#' and '?'; the catalogue already has 1020 keys with '#' and 120 with '?').
+        Other 24 folders: upload-lot live with allowSkips=1 (skips only the 6 T37 folders): 125 uploaded + 3 transient "no tomes available"; re-run uploaded the 3.
+        create-stems (whole lot, after both uploads): dry rowsToCreate 169, ambiguous 0, then live inserted 169. new script find_composer.js (read-only: composer name, titles, stems for a 3-char prefix).
+        regen-mp3 dry run after the lot: mp3Rows 28,637, broken 14, regenerable 0, noSource 14 (unchanged from after 260717).
+        NOTE: T37a0054 Wicked Swag is a T37 title in Neon with no stems and no folder in this lot (not touched).
+        work_queue: preview 2026-11-05 = 30 open rows for source_lot='INTAKE LOT_250827_SOHO4_06_Tension (EX)'; UPDATE run with resolved_by='lot-upload-250827-SOHO4-06'; Erik reported 'success'
+        (the UPDATE's own rows-affected count was not pasted; expected 30). Whether any new songs were played was not stated. OPEN: set folder back to online-only in Finder.
     [ ] INTAKE LOT_251120_SOHO4_16
     [x] INTAKE LOT_251124_SNAPPED_47
         CLOSED via lot_pipeline.py, PASS. (Exact file counts not re-confirmed
