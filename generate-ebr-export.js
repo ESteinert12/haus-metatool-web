@@ -132,10 +132,12 @@ async function run() {
     JOIN team_writers tw ON tw.team_id = t.team_id
     LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
     LEFT JOIN latest_ack ack ON ack.sku_root = t.sku_root
+    LEFT JOIN teams tm ON tm.team_id = t.team_id
     WHERE COALESCE(t.status,'active') = 'active'
       AND COALESCE(t.is_jup,false)    = false
       AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
       AND ae.sku_root IS NULL
+      AND COALESCE(tm.composer_prefix,'') !~* 'X'
       AND ($1::boolean OR ack.status IS DISTINCT FROM 'RA')
     GROUP BY t.sku_root, t.title, t.team_id, t.created_at
     HAVING count(tw.id) > 0 AND bool_or(tw.pro IS DISTINCT FROM 'SESAC')  -- exclude only if EVERY writer is SESAC (pure-SESAC title, not an EBR/joint ASCAP-BMI work); a mixed SESAC+ASCAP/BMI title is eligible, SESAC writer included in the row

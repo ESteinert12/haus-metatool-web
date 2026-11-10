@@ -114,9 +114,10 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
   await ensureEbrTables(pgPool);
 
   const { rows: titleRows } = await pgPool.query(
-    `SELECT t.sku_root, t.title, t.team_id, t.is_jup, ack.status AS ack_status
+    `SELECT t.sku_root, t.title, t.team_id, t.is_jup, tm.composer_prefix, ack.status AS ack_status
      FROM titles t
      JOIN lot_titles lt ON lt.sku_root = t.sku_root
+     LEFT JOIN teams tm ON tm.team_id = t.team_id
      LEFT JOIN LATERAL (
        SELECT status FROM ebr_acknowledgments a2
         WHERE a2.sku_root = t.sku_root
@@ -160,6 +161,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
     const badSplit = w.length > 0 && Math.abs(splitSum - 100) > SPLIT_TOLERANCE_PCT;
     if (t.ack_status === 'RA')                skipped.push({ sku: t.sku_root, reason: 'already accepted by MusicMark' });
     else if (t.is_jup)                        skipped.push({ sku: t.sku_root, reason: 'JUP title — not supported yet' });
+    else if (/x/i.test(t.composer_prefix || '')) skipped.push({ sku: t.sku_root, reason: 'X-composer team — excluded from EBR' });
     else if (!w.length)                       skipped.push({ sku: t.sku_root, reason: 'no writers on file' });
     else if (w.every(x => x.pro === 'SESAC'))  skipped.push({ sku: t.sku_root, reason: 'all writers SESAC — not an EBR/joint ASCAP-BMI work' });
     else if (badSplit)                        skipped.push({ sku: t.sku_root, reason: `writer splits sum to ${splitSum}%, not ~100% — fix before export` });

@@ -8665,6 +8665,7 @@ async function ebrLoadTitles(lotIds, dateFrom, dateTo, includeAccepted) {
      FROM titles t
      JOIN lot_titles lt ON lt.sku_root = t.sku_root
      JOIN lots l        ON l.lot_id    = lt.lot_id
+     LEFT JOIN teams tm ON tm.team_id = t.team_id
      LEFT JOIN LATERAL (
        SELECT status FROM ebr_acknowledgments a2
         WHERE a2.sku_root = t.sku_root
@@ -8673,6 +8674,7 @@ async function ebrLoadTitles(lotIds, dateFrom, dateTo, includeAccepted) {
      WHERE COALESCE(t.status,'active') = 'active'
        AND COALESCE(t.is_jup,false)    = false
        AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
+       AND COALESCE(tm.composer_prefix,'') !~* 'X'
        AND l.lot_id = ANY($1::int[])
        AND t.created_at >= COALESCE($2::timestamptz, '-infinity')
        AND t.created_at <= COALESCE($3::timestamptz, 'infinity')
@@ -9322,6 +9324,11 @@ const EBR_GAP_CTE = `
   )
 `
 
+// Shared predicate: excludes titles whose team's composer_prefix marks them as an
+// X-composer team (e.g. X59/X76/X77). Requires a `LEFT JOIN teams tm ON tm.team_id = t.team_id`
+// in the query that uses this.
+const EBR_X_COMPOSER_EXCLUDE = `COALESCE(tm.composer_prefix,'') !~* 'X'`
+
 async function ebrGapCount() {
   const rows = await pgQ(`
     ${EBR_GAP_CTE}
@@ -9329,10 +9336,12 @@ async function ebrGapCount() {
     FROM titles t
     JOIN gap g ON g.sku_root = t.sku_root
     LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
+    LEFT JOIN teams tm ON tm.team_id = t.team_id
     WHERE COALESCE(t.status,'active') = 'active'
       AND COALESCE(t.is_jup,false)    = false
       AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
       AND ae.sku_root IS NULL
+      AND ${EBR_X_COMPOSER_EXCLUDE}
   `)
   return (Array.isArray(rows) && rows.length) ? parseInt(rows[0].n, 10) : 0
 }
@@ -9354,10 +9363,12 @@ async function ebrLoadGapPage() {
     FROM titles t
     JOIN gap g ON g.sku_root = t.sku_root
     LEFT JOIN already_exported ae ON ae.sku_root = t.sku_root
+    LEFT JOIN teams tm ON tm.team_id = t.team_id
     WHERE COALESCE(t.status,'active') = 'active'
       AND COALESCE(t.is_jup,false)    = false
       AND COALESCE(t.description,'') NOT ILIKE '%SOLD TO A&E%'
       AND ae.sku_root IS NULL
+      AND ${EBR_X_COMPOSER_EXCLUDE}
     ORDER BY t.title ASC
     LIMIT $1 OFFSET $2
   `, [ebrGapState.pageSize, ebrGapState.offset])
