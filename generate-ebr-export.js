@@ -81,7 +81,7 @@ function ebrBuildRow(title, writersByTeam, stemsBySku) {
     if (n <= EBR_MAX_ORIGINAL_PUBS) {
       set(`Original Pub Name ${n}`, pub.name);
       set(`Original Pub PR Affiliation ${n}`, pub.pro);
-      set(`Original Pub World Own Share ${n}`, w.split_pct != null ? (w.split_pct / 2) : '');
+      set(`Original Pub World Own Share ${n}`, w.split_pct != null ? w.split_pct : '');
       set(`Original Pub IPI Name# ${n}`, pub.ipi);
       set(`Original Pub Controlled (Y/N) ${n}`, 'YES');
     }
