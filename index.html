@@ -8930,7 +8930,7 @@ function renderCueSheetList() {
   el.innerHTML = cueSheetsCache.map(cs => {
     const label = cs.episode || cs.program || cs.source_filename
     const active = cs.id === currentCueSheetId
-    const warn = parseInt(cs.unmatched_count) + parseInt(cs.ambiguous_count)
+    const warn = parseInt(cs.unmatched_count) + parseInt(cs.ambiguous_count) + (parseInt(cs.suggested_count) || 0)
     return `
       <div onclick="openCueSheetDetail(${cs.id})"
         style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);${active ? 'background:#E7F0EA' : ''}">

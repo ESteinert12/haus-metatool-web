@@ -166,6 +166,146 @@ function tokenOverlapScore(a, b) {
   return union ? inter / union : 0;
 }
 
+// 2026-11-11: a broader, looser companion to parseHausFilenameTitle above.
+// That function only recognizes ONE exact filename shape (the 5-part
+// HAUS-shipped-master convention with a key + composer-id segment). A full
+// corpus scan found 21,041 of 45,434 HAUS-prefixed cues (46%) use a
+// different, looser convention instead -- no key, no composer id, a
+// variable number of underscore segments, sometimes a reel/take number
+// (R04A, S21), and a grab-bag of trailing mix/version tags (confirmed real,
+// frequency-counted across the full corpus: FULL, DNB, BUMPER, MAIN, "FULL
+// MIX", ALT, STING, NODRUMS, "BASS+DRUMS", BUMP, NOLEAD, PERC, DRUMS, MIX,
+// etc., several with a trailing disambiguating letter like BUMPERA/STINGB).
+// These cues came back from matchCueToTitles as 'unmatched' with no way to
+// ever resolve them (AP7 7163 GEORGIA GAMBLER BACK.xlsx's HAUS_ScrapMetal_
+// FULL / HAUS_ToughDecision_FULL / HAUS_Any Way You Can_FULL MIX, etc.).
+//
+// deCamelCaseTitle/extractCueFilenameTitle below recover a real, spaced-out
+// title from this looser shape: strip the HAUS_/AETNHAUS_ prefix, strip
+// trailing "technical" segments (mix/version tag, reel/take number, musical
+// key, BPM marker) from the END ONLY until a non-technical segment is hit,
+// then de-camelCase whatever's left (the same transform index.html's own
+// deCamelCase() uses for the forward direction, so a solid-camelCase title
+// segment like "ScrapMetal" still recovers "Scrap Metal" even though this
+// convention has no key/composer-id to anchor on). A segment that already
+// has literal spaces (e.g. "Any Way You Can") passes through unchanged.
+//
+// This is still only used to build a comparison STRING for an exact
+// normTitle() match (a new 4th pass in matchCueToTitles, below) -- never
+// itself a fuzzy guess. Deliberately NOT the same thing as the token-overlap
+// fuzzy fallback Kyle removed 2026-10 (see matchCueToTitles's own comment):
+// that was unreliable specifically because it compared an un-decoded
+// crunched title ("DEADLYDELIGHT") against a spaced catalog title word-by-
+// word -- de-camelCasing first and then requiring an EXACT match sidesteps
+// that failure mode entirely rather than re-attempting it.
+function deCamelCaseTitle(str) {
+  if (!str) return str;
+  return String(str)
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2')
+    .replace(/_/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+// Known trailing mix/version words, longest-alike-prefix first so e.g.
+// "FULLMIX"/"STINGER"/"BUMPER" aren't cut short by "FULL"/"STING"/"BUMP"
+// matching first. Each may carry a short trailing disambiguator (a letter or
+// 1-2 digits -- BUMPERA, STINGB, ALT3) -- confirmed real, not a guess.
+const CUE_FILENAME_SUFFIX_BASE_WORDS = [
+  'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'BUMPER', 'BUMP', 'STINGER', 'STING',
+  'MAIN', 'ALT', 'NODRUMS', 'NOLEAD', 'NOVOX', 'NOPERC', 'NOBASS', 'NOSYNTHS',
+  'PERCONLY', 'PERC', 'DRUMS', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
+  'NA', 'LOWGTR',
+];
+const CUE_FILENAME_SUFFIX_RE = new RegExp(
+  `^(?:${CUE_FILENAME_SUFFIX_BASE_WORDS.join('|')})[A-Z0-9]{0,2}$`, 'i'
+);
+// A reel/take number segment: optional composer-prefix letter + 1-3 digits +
+// optional 1-2 letters (R04A, S21, S24B, R85, 12A, C38A, C53A, T04b) -- same
+// shape used all over the real corpus for a revision/reel marker, never part
+// of a song title. The letter set (R/S/C/T/X/Z) is every composer-SKU-prefix
+// letter actually used in the real `titles` table (confirmed via a direct
+// query 2026-11-11, not guessed -- counts were R 17202, S 12068, C 2113,
+// T 1584, X 30, Z 14), not just the R/S originally spotted in the corpus.
+const CUE_FILENAME_REEL_RE = /^[RSCTXZ]?\d{1,3}[A-Z]{0,2}$/i;
+// Same shape, but for the LEADING-segment strip only (see
+// extractCueFilenameTitle below): requires the composer-prefix letter,
+// unlike the trailing form above. A trailing bare number (e.g. "12A") is a
+// confirmed-real reel shorthand with no regression seen across two full
+// corpus verification passes, but a LEADING bare number is far more likely
+// to be real title content -- confirmed real 2026-11-11: "HAUS_247_Em_
+// R17a_DNB" decoded down to just "EM" because "247" (plausibly "24/7", a
+// real title) was wrongly chopped as if it were a reel code. The one
+// confirmed-real case that motivated leading-strip at all ("HAUS_R37_
+// ShookUpNotStirred_Fm_FULL") always had a letter, so requiring one here
+// keeps that case working while fixing the false-positive.
+const CUE_FILENAME_LEADING_REEL_RE = /^[RSCTXZ]\d{1,3}[A-Z]{0,2}$/i;
+// A BPM marker (140BPM, BPM120) -- technical, never part of a title.
+const CUE_FILENAME_BPM_RE = /^(?:\d{2,3}BPM|BPM\d{2,3})$/i;
+// Literal "KEY" + note-letter tokens (KEYD, KEYE, KEYEb, KEYGb, KEYAb) --
+// confirmed real, a different convention from the bare-note-letter key
+// segment HAUS_FILENAME_KEY_RE already covers (e.g. "Fm", "Csharpm").
+const CUE_FILENAME_KEYWORD_RE = /^KEY[A-G](?:sharp|flat|##?|bb?)?$/i;
+// A looser key-spelling check used ONLY for filename-decode purposes --
+// confirmed real alternate spellings ("Amin", "Cmin", "Eminor", "EflatMin",
+// "Fsharpminor") that HAUS_FILENAME_KEY_RE does not accept. Deliberately
+// NOT edited into HAUS_FILENAME_KEY_RE itself: that regex is kept an exact
+// structural copy of index.html's canonical COMP_RE/KEY_RE2 for the strict
+// shipped-filename validator and the separate composer-key-validation
+// feature, and loosening it here would risk changing behavior there too.
+const CUE_FILENAME_KEY_LOOSE_RE = /^[A-Ga-g](?:sharp|flat|##?|bb?)?(?:m|min|minor|maj|major)?$/i;
+
+function _isTechnicalFilenameToken(tok) {
+  if (!tok) return false;
+  const t = tok.trim();
+  if (!t) return false;
+  if (!/[A-Za-z0-9]/.test(t)) return true; // pure punctuation joiner (+, &, -)
+  return CUE_FILENAME_SUFFIX_RE.test(t) || CUE_FILENAME_REEL_RE.test(t) ||
+    CUE_FILENAME_BPM_RE.test(t) || CUE_FILENAME_KEYWORD_RE.test(t) ||
+    CUE_FILENAME_KEY_LOOSE_RE.test(t);
+}
+
+// Returns a de-camelCased, spaced-out best-guess title recovered from a
+// HAUS_/AETNHAUS_-prefixed filename that does NOT fit parseHausFilenameTitle's
+// strict 5-part shape, or null if the string isn't HAUS_/AETNHAUS_-prefixed
+// at all (never guesses on a non-HAUS filename or a real free-text title).
+function extractCueFilenameTitle(raw) {
+  if (!raw) return null;
+  const noExt = String(raw).replace(/\.[^.]+$/, '');
+  if (!/^(HAUS|AETNHAUS)(JUP)?[_ ]/i.test(noExt)) return null;
+  let segments = noExt.split('_');
+  segments = segments.slice(1); // drop the HAUS/AETNHAUS(JUP) prefix segment
+  // A reel/take number can also appear as the FIRST segment right after the
+  // prefix instead of (or as well as) trailing -- confirmed real:
+  // "HAUS_R37_ShookUpNotStirred_Fm_FULL". Strip it once, only when it's
+  // unambiguously reel-shaped (never a mix/suffix word or musical key here --
+  // those are only ever trailing in the real corpus -- to minimize the
+  // (small, structurally unlikely) chance of chopping a real title that
+  // happens to start with something number-shaped).
+  if (segments.length > 1 && CUE_FILENAME_LEADING_REEL_RE.test(segments[0].trim())) {
+    segments = segments.slice(1);
+  }
+  // Strip trailing segments from the END ONLY while every whitespace-
+  // separated word in the last remaining segment is itself a technical
+  // token (covers multi-word trailing tags split across underscores too,
+  // e.g. "..._FULL_NOLEAD", as well as a single segment containing several
+  // space-separated technical words, e.g. "..._BASS + DRUM MIX").
+  while (segments.length > 1) {
+    const last = segments[segments.length - 1].trim();
+    if (!last) { segments.pop(); continue; }
+    const words = last.split(/\s+/).filter(Boolean);
+    if (words.length && words.every(_isTechnicalFilenameToken)) {
+      segments.pop();
+    } else {
+      break;
+    }
+  }
+  if (!segments.length) return null;
+  const title = deCamelCaseTitle(segments.join(' '));
+  return title || null;
+}
+
 // ── Format sniffing ──────────────────────────────────────────────────────
 function sniffFormat(filePath, origName) {
   const ext = (origName || filePath).toLowerCase().split('.').pop();
@@ -1816,6 +1956,12 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
     // null when titleRaw isn't a recognizable HAUS-convention filename --
     // see parseHausFilenameTitle's own comment.
     cue.filenameCamelKey = parseHausFilenameTitle(cue.titleRaw);
+    // Broader companion for the looser filename convention -- see
+    // extractCueFilenameTitle's own comment. Also null (no guess) for a
+    // genuine free-text title or a filename extractCueFilenameTitle can't
+    // confidently decode.
+    const decodedTitle = extractCueFilenameTitle(cue.titleRaw);
+    cue.filenameDecodedNorm = decodedTitle ? normTitle(decodedTitle) : null;
     if (format === 'C') {
       cue.isHaus = true;
       cue.classifyReason = 'pre-filtered source (already HAUS-only)';
@@ -1834,12 +1980,19 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 // {sku_root, title, team_id} pulled fresh from Postgres by the caller --
 // this module never talks to the DB directly, so it stays testable and
 // reusable outside the live app.
-// Exact-only matching (no fuzzy/token-overlap fallback -- removed 2026-10 per
-// Kyle: real HAUS filenames crunch words together ("DEADLYDELIGHT") while
-// catalog titles are spaced ("Deadly Delight"), so token-overlap scoring was
-// unreliable enough to be worse than no auto-match at all. Anything that
-// isn't an exact normalized-title match comes back unmatched and goes
-// through the manual search-to-confirm picker in the UI instead of a guess.
+// Exact matching for the first four passes (no fuzzy/token-overlap fallback
+// -- removed 2026-10 per Kyle: real HAUS filenames crunch words together
+// ("DEADLYDELIGHT") while catalog titles are spaced ("Deadly Delight"), so
+// token-overlap scoring directly on the raw title was unreliable enough to
+// be worse than no auto-match at all). Anything that isn't an exact
+// normalized-title match after all four passes comes back unmatched and
+// goes through the manual search-to-confirm picker in the UI, same as
+// before -- EXCEPT for a bounded 'suggested' tier added 2026-11-11 (see
+// _fuzzyMatchDecodedTitle's own comment) that only ever scores an already
+// de-camelCased, decoded title -- never the raw crunched one Kyle's note is
+// about -- and only surfaces a candidate when it's both high-scoring and
+// clearly ahead of the next-best one; that result is still never
+// 'matched', always 'suggested', still requiring a human to confirm.
 // 2026-11-04 perf fix: matchCueToTitles used to .filter() the FULL titles
 // array (per real-catalog counts, ~33,000 rows) up to 3 times per cue, for
 // every cue in a cue sheet -- same O(cues x titles) problem as
@@ -1848,11 +2001,55 @@ function parseCueSheetFile(filePath, origName, hausPublisherNames = new Set()) {
 // built ONCE per distinct titlesIndex array and cached in a WeakMap, so this
 // is transparent to every caller -- same signature, same candidates/order/
 // counts, just O(1) lookups instead of an O(n) scan per cue per key.
+// Catalog titles carrying a leading brand/series prefix that a HAUS_ cue
+// filename never spells out at all (confirmed real, 2026-11-11: 447 titles
+// in the live catalog start with "TBT ", e.g. "TBT Sting Goes Solo
+// Universal" <-> cue filename "HAUS_StingGoesSoloUniversal90BPM_NA_R04a_
+// FULL" decodes to "Sting Goes Solo Universal" with no TBT anywhere --
+// composer prefix R only, confirmed via direct query, not guessed).
+// Confirmed no existing non-prefixed duplicate title collides with any of
+// the 447 real TBT titles today, but this is intentionally NOT special-
+// cased to require that -- the alias is just an extra byNorm entry pointing
+// at the same title row, so if a future catalog title ever does legitimately
+// collide with a stripped-prefix form, the existing 2+ candidates ->
+// 'ambiguous' handling applies automatically, same as any other pass.
+const CUE_TITLE_BRAND_PREFIXES = [/^TBT\s+/i];
+function _stripCueTitleBrandPrefix(title) {
+  for (const re of CUE_TITLE_BRAND_PREFIXES) {
+    if (re.test(title)) return title.replace(re, '');
+  }
+  return null;
+}
+
+// "Squash" equivalence: uppercase, strip EVERY non-alphanumeric character
+// (all spacing and punctuation, not just underscores/dashes the way
+// normTitle does). Still a deterministic, one-to-one normalization -- same
+// rigor class as normTitle/normTitleStrict/camelKey, just a more aggressive
+// one -- never a scored/heuristic guess, and still subject to the same
+// 2+-candidates -> 'ambiguous' fallback as every other exact pass.
+// Confirmed real and necessary 2026-11-11 via a direct real-corpus
+// breakdown: 263 of 342 distinct cues that failed every other exact pass
+// turned out to be real catalog titles differing ONLY in spacing/
+// punctuation the filename convention doesn't preserve at all -- e.g. a
+// catalog title "Road Hogs" shipped as a cue filename "HAUS_ROADHOGS_...",
+// "24 7" as "HAUS_247_...", "SIB CymbalCrash 1" as "HAUS_SIBCymbalCrash1_
+// ...". Every sampled case was manually eyeballed correct before adding
+// this.
+function squash(s) {
+  return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '');
+}
+
 const _cueTitleIndexCache = new WeakMap();
 function _cueTitleIndexFor(titlesIndex) {
   let idx = _cueTitleIndexCache.get(titlesIndex);
   if (!idx) {
     const byStrict = new Map(), byNorm = new Map(), byCamel = new Map();
+    // 2026-11-11: word -> [titles] inverted index, built once alongside the
+    // others, so the bounded fuzzy pass below only scores catalog titles
+    // that share at least one real word with the cue instead of scanning
+    // all ~33,000 rows per residual cue.
+    const byWord = new Map();
+    const bySquash = new Map();
     for (const t of titlesIndex) {
       if (!byStrict.has(t.normTitleStrict)) byStrict.set(t.normTitleStrict, []);
       byStrict.get(t.normTitleStrict).push(t);
@@ -1860,15 +2057,81 @@ function _cueTitleIndexFor(titlesIndex) {
       byNorm.get(t.normTitle).push(t);
       if (!byCamel.has(t.camelKey)) byCamel.set(t.camelKey, []);
       byCamel.get(t.camelKey).push(t);
+      for (const w of new Set((t.normTitle || '').split(' ').filter(Boolean))) {
+        if (!byWord.has(w)) byWord.set(w, []);
+        byWord.get(w).push(t);
+      }
+      const sq = squash(t.title);
+      if (sq) {
+        if (!bySquash.has(sq)) bySquash.set(sq, []);
+        bySquash.get(sq).push(t);
+      }
+      // Brand-prefix alias: also index this title under its prefix-stripped
+      // norm/squash, so a cue decoded WITHOUT the brand prefix still hits
+      // pass 4/5.
+      const stripped = _stripCueTitleBrandPrefix(t.title);
+      if (stripped) {
+        const strippedNorm = normTitle(stripped);
+        if (strippedNorm && strippedNorm !== t.normTitle) {
+          if (!byNorm.has(strippedNorm)) byNorm.set(strippedNorm, []);
+          byNorm.get(strippedNorm).push(t);
+        }
+        const strippedSquash = squash(stripped);
+        if (strippedSquash && strippedSquash !== sq) {
+          if (!bySquash.has(strippedSquash)) bySquash.set(strippedSquash, []);
+          bySquash.get(strippedSquash).push(t);
+        }
+      }
     }
-    idx = { byStrict, byNorm, byCamel };
+    idx = { byStrict, byNorm, byCamel, byWord, bySquash };
     _cueTitleIndexCache.set(titlesIndex, idx);
   }
   return idx;
 }
 
+// Bounded fuzzy pass, run only after every exact pass has failed. Deliberately
+// conservative (see extractCueFilenameTitle's own comment on why this is
+// NOT a re-introduction of the fuzzy matching Kyle removed 2026-10): only
+// ever scores the DECODED/de-camelCased title against catalog candidates
+// that already share a real word with it (never the raw crunched filename
+// against the full catalog), and only returns a suggestion when the best
+// score is both high in absolute terms and clearly ahead of the runner-up --
+// anything less certain stays unmatched, same as today, for the manual
+// search-to-confirm picker to handle. Never auto-confirmed: callers must
+// treat 'suggested' as requiring a human click, same posture as every other
+// suggestion feature in this app (episode-reference suggest, royalty-tracker
+// title suggestions).
+const FUZZY_MIN_SCORE = 0.8;
+const FUZZY_MIN_MARGIN = 0.3;
+// A word shared with more than this many catalog titles is too common to be
+// a useful disambiguating signal (e.g. "THE", "LOVE") -- skip it as a
+// candidate source entirely rather than pulling in thousands of unrelated
+// rows to score. Also caps the worst-case cost of this pass.
+const FUZZY_MAX_CANDIDATES_PER_WORD = 200;
+function _fuzzyMatchDecodedTitle(decodedNorm, byWord) {
+  if (!decodedNorm) return null;
+  const words = decodedNorm.split(' ').filter(Boolean);
+  if (words.length < 2) return null; // too short to score reliably
+  const candidates = new Map(); // sku_root -> title row
+  for (const w of words) {
+    const titlesForWord = byWord.get(w);
+    if (!titlesForWord || titlesForWord.length > FUZZY_MAX_CANDIDATES_PER_WORD) continue;
+    for (const t of titlesForWord) candidates.set(t.sku_root, t);
+  }
+  if (!candidates.size) return null;
+  let best = null, bestScore = -1, second = -1;
+  for (const t of candidates.values()) {
+    const score = tokenOverlapScore(decodedNorm, t.normTitle || '');
+    if (score > bestScore) { second = bestScore; bestScore = score; best = t; }
+    else if (score > second) { second = score; }
+  }
+  if (!best || bestScore < FUZZY_MIN_SCORE) return null;
+  if (second >= 0 && (bestScore - second) < FUZZY_MIN_MARGIN) return null; // too ambiguous, don't guess
+  return { candidate: best, score: bestScore };
+}
+
 function matchCueToTitles(cue, titlesIndex) {
-  const { byStrict, byNorm, byCamel } = _cueTitleIndexFor(titlesIndex);
+  const { byStrict, byNorm, byCamel, byWord, bySquash } = _cueTitleIndexFor(titlesIndex);
   // Strict pass first: match the cue's title AS WRITTEN against the
   // catalog's title AS WRITTEN (no suffix stripping on either side). Tried
   // before the stripped pass because the catalog can and does contain two
@@ -1905,6 +2168,41 @@ function matchCueToTitles(cue, titlesIndex) {
     if (camelExact.length > 1) return { status: 'ambiguous', candidates: camelExact, confidence: 'filename-exact-multiple' };
   }
 
+  // 2026-11-11: fallback for the looser HAUS_<title>_<suffix> filename
+  // convention (no key/composer-id segment) that parseHausFilenameTitle
+  // above doesn't recognize -- see extractCueFilenameTitle's own comment.
+  // Still an exact match against the catalog's normTitle, same standard as
+  // the stripped pass above -- just comparing a better-decoded string.
+  if (cue.filenameDecodedNorm) {
+    const decodedExact = byNorm.get(cue.filenameDecodedNorm) || [];
+    if (decodedExact.length === 1) return { status: 'matched', candidates: decodedExact, confidence: 'filename-decoded-exact' };
+    if (decodedExact.length > 1) return { status: 'ambiguous', candidates: decodedExact, confidence: 'filename-decoded-exact-multiple' };
+
+    // Squash pass: still an exact-equivalence match (see squash()'s own
+    // comment), just under a more aggressive normalization that also closes
+    // gaps like a missing space before a trailing digit ("Road Hogs" vs
+    // "ROADHOGS") or an apostrophe/period the filename convention drops
+    // entirely ("What Guilt?" vs "WHATGUILT"). Confirmed real and needed
+    // against the live corpus, not guessed.
+    const squashKey = squash(cue.filenameDecodedNorm);
+    const squashExact = squashKey ? (bySquash.get(squashKey) || []) : [];
+    if (squashExact.length === 1) return { status: 'matched', candidates: squashExact, confidence: 'filename-decoded-squash' };
+    if (squashExact.length > 1) return { status: 'ambiguous', candidates: squashExact, confidence: 'filename-decoded-squash-multiple' };
+
+    // Only after the decoded title also fails to match exactly: a bounded,
+    // high-confidence-only fuzzy suggestion (see _fuzzyMatchDecodedTitle's
+    // own comment). Never 'matched' -- always 'suggested', requiring a
+    // human to click Confirm, same as every other suggestion feature here.
+    const fuzzy = _fuzzyMatchDecodedTitle(cue.filenameDecodedNorm, byWord);
+    if (fuzzy) {
+      return {
+        status: 'suggested',
+        candidates: [fuzzy.candidate],
+        confidence: `fuzzy-suggested:${fuzzy.score.toFixed(2)}`,
+      };
+    }
+  }
+
   return { status: 'unmatched', candidates: [] };
 }
 
@@ -1913,6 +2211,8 @@ module.exports = {
   normTitleStrict,
   titleToCamelKey,
   parseHausFilenameTitle,
+  extractCueFilenameTitle,
+  deCamelCaseTitle,
   tokenOverlapScore,
   sniffFormat,
   parseCueSheetFile,
