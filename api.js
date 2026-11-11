@@ -5356,6 +5356,47 @@ async function _pgRetry(sql, params = [], label = 'query') {
   throw last
 }
 
+// A single checked-out client can't resume mid-transaction after a dropped
+// connection (the exact "Connection terminated unexpectedly" Neon
+// serverless-wake-up failure mode documented elsewhere in this codebase --
+// see claude/handoff-2026-10-21-royalty-tracker-title-matching-and-safety-incident.md),
+// so this retries the WHOLE attempt -- fresh connection, fresh BEGIN, all of
+// `fn`'s writes, COMMIT -- rather than retrying one query at a time the way
+// `_pgRetry` does against the shared pool. On any error, ROLLBACK is
+// attempted (best-effort; a dead connection may not accept it, which is
+// fine -- the server-side transaction is gone with the connection either
+// way) and the client is always released. `fn` receives the checked-out
+// client and MUST use `client.query(...)`, never `_pgRetry`/`pgPool.query`,
+// for every statement that needs to be part of the transaction.
+// A non-transient error (anything that isn't this known connection-drop
+// class) is NOT retried -- it throws immediately on attempt 1, same
+// first-attempt-fails-fast behavior as `_pgRetry`, so callers can rely on
+// errors like a thrown "duplicate" marker (see importOneCueSheet) never
+// silently retrying 4 times before surfacing.
+async function _pgRetryTransaction(fn, label, attempts = 4) {
+  let last
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    const client = await pgPool.connect()
+    try {
+      await client.query('BEGIN')
+      const result = await fn(client)
+      await client.query('COMMIT')
+      return result
+    } catch (e) {
+      try { await client.query('ROLLBACK') } catch {}
+      last = e
+      const transient = /terminated|ECONNRESET|ETIMEDOUT|ENOTFOUND|EPIPE|Connection|socket|starting up|shutting down|timeout/i.test(e.message || '')
+      if (!transient || attempt === attempts - 1) throw e
+      const wait = 1000 * Math.pow(2, attempt)
+      console.warn(`[pg] ${label} failed (${e.message}) — retrying whole transaction, attempt ${attempt + 1}/${attempts - 1} in ${wait}ms`)
+      await new Promise(r => setTimeout(r, wait))
+    } finally {
+      client.release()
+    }
+  }
+  throw last
+}
+
 // ─── Refresh the stub audit from LIVE state ─────────────────────────────────
 // /api/b2/recovery-from-dropbox and /api/b2/start-recovery read their work list
 // from B2_FULL_STUB_AUDIT.csv -- a STATIC snapshot taken 2026-08-10, before the
@@ -7691,6 +7732,51 @@ app.post('/api/clients/import-csv', upload.single('file'), async (req, res) => {
 // file for that episode (unless replace=true), and inserts cues + parties.
 // hausPublisherNames/titlesIndex are passed in (not re-fetched per file) so a
 // bulk import of many files only hits those two tables once for the batch.
+const CUE_SHEET_CUE_COLS = ['cue_sheet_id', 'seq', 'title_raw', 'title_normalized', 'usage_type', 'duration',
+  'is_haus_cue', 'classify_reason', 'classify_confidence', 'match_status', 'matched_sku_root', 'match_confidence']
+const CUE_SHEET_PARTY_COLS = ['cue_id', 'name', 'role', 'pro', 'split_pct']
+const CUE_SHEET_BULK_CHUNK = 500
+
+// Shared batch-insert helper: builds one multi-row `INSERT ... VALUES
+// (...),(...),...` per CHUNK rows (same pattern as the royalty tracker's
+// insertRoyaltyLinesBulk) instead of one round-trip per row. `rowsFn` takes
+// a chunk of `items` and returns the flat per-row value arrays for that
+// chunk -- kept as a function (not pre-built once for all items) so a
+// RETURNING-id caller can map chunk results back to their source items.
+async function _bulkInsert(client, table, cols, items, rowsFn, { returning } = {}) {
+  const out = []
+  for (let i = 0; i < items.length; i += CUE_SHEET_BULK_CHUNK) {
+    const chunk = items.slice(i, i + CUE_SHEET_BULK_CHUNK)
+    if (!chunk.length) continue
+    const values = [], params = []
+    chunk.forEach((item, idx) => {
+      const row = rowsFn(item)
+      const base = idx * cols.length
+      values.push(`(${cols.map((_, j) => `$${base + j + 1}`).join(',')})`)
+      params.push(...row)
+    })
+    const sql = `INSERT INTO ${table} (${cols.join(',')}) VALUES ${values.join(',')}` + (returning ? ` RETURNING ${returning}` : '')
+    const res = await client.query(sql, params)
+    if (returning) out.push(...res.rows.map(r => r[returning]))
+  }
+  return out
+}
+
+// Shared by both the single-file and bulk import routes. Parses one file,
+// resolves/creates its episode, dedupes against a prior import of the same
+// file for that episode (unless replace=true), and inserts cues + parties.
+// hausPublisherNames/titlesIndex are passed in (not re-fetched per file) so a
+// bulk import of many files only hits those two tables once for the batch.
+//
+// Everything that writes (episode resolve/create, the replace-mode delete,
+// the cue_sheets row, every cue + party insert) happens inside ONE
+// `_pgRetryTransaction` attempt -- a connection drop partway through used to
+// mean a partially-imported cue sheet with no rollback (the exact bug this
+// codebase already hit once for real in the royalty tracker, see
+// claude/handoff-2026-10-21-royalty-tracker-title-matching-and-safety-incident.md),
+// and in replace mode it was worse: the old cue sheet was deleted BEFORE the
+// new insert loop ran, so a failure there left the episode with no complete
+// cue sheet at all. Now either the whole import lands or none of it does.
 async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesIndex, replace, importedBy) {
   const parsed = parseCueSheetFile(filePath, origName, hausPublisherNames)
 
@@ -7700,101 +7786,125 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
   if (parsed.format === 'EBR_SKIP') {
     return { ok: false, origName, error: `"${origName}" looks like an EBR registration-template export, not a cue sheet -- not imported. That belongs to the separate EBR pipeline.` }
   }
-
-  // Resolve (or create) the episodes row this cue sheet belongs to -- keyed
-  // on (program, episode_num) so a second source for the same episode
-  // (the PRO's own export, the production company's, our internal log)
-  // links to the SAME episode instead of creating a disconnected duplicate.
-  const program = (parsed.meta.program || '').trim() || null
-  const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '')
-  const existingEpisode = await _pgRetry(
-    `SELECT id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
-    [program, episodeNum], 'cue-sheets episode lookup'
-  )
-  let episodeId
-  if (existingEpisode.rows.length) {
-    episodeId = existingEpisode.rows[0].id
-  } else {
-    const newEpisode = await _pgRetry(
-      `INSERT INTO episodes (program, episode_title, episode_num, air_date) VALUES ($1,$2,$3,$4) RETURNING id`,
-      [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null], 'cue-sheets episode insert'
-    )
-    episodeId = newEpisode.rows[0].id
+  // A recognized format that still yielded zero cues almost always means the
+  // real file defeated that format's header/column detection on some layout
+  // variant outside whatever sample files it was built against -- NOT that
+  // this episode genuinely has no cues. Surfacing it as a plain `ok:true,
+  // totalCues:0` would look identical to a legitimately empty sheet, so this
+  // comes back as an explicit, reviewable failure instead.
+  if (!parsed.cues.length) {
+    return { ok: false, origName, error: `"${origName}" was recognized as format ${parsed.format} but 0 cues were parsed from it -- likely a layout variant this format's detection doesn't handle, not a genuinely empty cue sheet. Not imported; have someone check the file's header/column layout before retrying.` }
   }
 
-  // Dedupe: re-uploading the exact same file for the same episode is an easy
-  // mistake (and the UI gives no indication a sheet was already imported) --
-  // without this a resubmit silently doubles every cue. Require an explicit
-  // replace=true to overwrite rather than failing silently or duplicating.
-  const dup = await _pgRetry(
-    `SELECT id, imported_at FROM cue_sheets WHERE episode_id = $1 AND source_filename = $2 LIMIT 1`,
-    [episodeId, origName], 'cue-sheets dedupe check'
-  )
-  if (dup.rows.length && !replace) {
-    return {
-      ok: false, origName,
-      error: `"${origName}" was already imported for this episode (cue sheet #${dup.rows[0].id}, imported ${dup.rows[0].imported_at}). Pass replace=true to re-import and overwrite it.`,
-      duplicateOfCueSheetId: dup.rows[0].id,
-    }
-  }
-  if (dup.rows.length && replace) {
-    // ON DELETE CASCADE on cue_sheet_cues/cue_sheet_cue_parties takes the old
-    // cues and parties with it.
-    await _pgRetry(`DELETE FROM cue_sheets WHERE id = $1`, [dup.rows[0].id], 'cue-sheets dedupe delete')
-  }
-
-  const sheetRow = await _pgRetry(
-    `INSERT INTO cue_sheets (episode_id, source_filename, format, cue_sheet_ref, imported_by)
-     VALUES ($1,$2,$3,$4,$5) RETURNING id`,
-    [episodeId, origName, parsed.format, parsed.meta.cueSheetId || null, importedBy || null], 'cue-sheets sheet insert'
-  )
-  const cueSheetId = sheetRow.rows[0].id
-
-  const hausCues = parsed.cues.filter(c => c.isHaus)
-  // matchCueToTitles only ever returns 'matched' | 'ambiguous' | 'unmatched'
-  // (fuzzy/'suggested' matching was removed 2026-10 per Kyle -- see that
-  // function's own comment) -- counts here cover exactly those three.
-  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
-
-  for (const cue of hausCues) {
-    const m = matchCueToTitles(cue, titlesIndex)
-    if (m.status === 'matched') matchedCount++
-    else if (m.status === 'ambiguous') ambiguousCount++
-    else unmatchedCount++
-
-    const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
-
-    const cueRow = await _pgRetry(
-      `INSERT INTO cue_sheet_cues
-         (cue_sheet_id, seq, title_raw, title_normalized, usage_type, duration,
-          is_haus_cue, classify_reason, classify_confidence, match_status,
-          matched_sku_root, match_confidence)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-      [cueSheetId, cue.seq, cue.titleRaw, cue.titleNormalized, cue.usage || null, cue.duration || null,
-       true, cue.classifyReason || null, cue.classifyConfidence || null, m.status,
-       matchedSku, m.confidence || null], 'cue-sheets cue insert'
-    )
-    const cueId = cueRow.rows[0].id
-
-    for (const p of cue.parties) {
-      await _pgRetry(
-        `INSERT INTO cue_sheet_cue_parties (cue_id, name, role, pro, split_pct)
-         VALUES ($1,$2,$3,$4,$5)`,
-        [cueId, p.name || null, p.role || null, p.pro || null, p.pct ? parseFloat(p.pct) || null : null], 'cue-sheets cue party insert'
+  try {
+    return await _pgRetryTransaction(async (client) => {
+      // Resolve (or create) the episodes row this cue sheet belongs to --
+      // keyed on (program, episode_num) so a second source for the same
+      // episode (the PRO's own export, the production company's, our
+      // internal log) links to the SAME episode instead of creating a
+      // disconnected duplicate.
+      const program = (parsed.meta.program || '').trim() || null
+      const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '')
+      const existingEpisode = await client.query(
+        `SELECT id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
+        [program, episodeNum]
       )
-    }
-  }
+      let episodeId
+      if (existingEpisode.rows.length) {
+        episodeId = existingEpisode.rows[0].id
+      } else {
+        const newEpisode = await client.query(
+          `INSERT INTO episodes (program, episode_title, episode_num, air_date) VALUES ($1,$2,$3,$4) RETURNING id`,
+          [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null]
+        )
+        episodeId = newEpisode.rows[0].id
+      }
 
-  return {
-    ok: true,
-    origName,
-    cueSheetId,
-    format: parsed.format,
-    totalCues: parsed.cues.length,
-    hausCues: hausCues.length,
-    matched: matchedCount,
-    ambiguous: ambiguousCount,
-    unmatched: unmatchedCount,
+      // Dedupe: re-uploading the exact same file for the same episode is an
+      // easy mistake (and the UI gives no indication a sheet was already
+      // imported) -- without this a resubmit silently doubles every cue.
+      // Require an explicit replace=true to overwrite rather than failing
+      // silently or duplicating. The delete (replace mode) and everything
+      // that follows share this same transaction, so a failure anywhere
+      // after the delete rolls the delete back too, instead of leaving the
+      // episode with no cue sheet at all.
+      const dup = await client.query(
+        `SELECT id, imported_at FROM cue_sheets WHERE episode_id = $1 AND source_filename = $2 LIMIT 1`,
+        [episodeId, origName]
+      )
+      if (dup.rows.length && !replace) {
+        const err = new Error('cue sheet duplicate, not a transient failure -- do not retry')
+        err.cueSheetDuplicate = dup.rows[0]
+        throw err
+      }
+      if (dup.rows.length && replace) {
+        // ON DELETE CASCADE on cue_sheet_cues/cue_sheet_cue_parties takes the
+        // old cues and parties with it.
+        await client.query(`DELETE FROM cue_sheets WHERE id = $1`, [dup.rows[0].id])
+      }
+
+      const sheetRow = await client.query(
+        `INSERT INTO cue_sheets (episode_id, source_filename, format, cue_sheet_ref, imported_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+        [episodeId, origName, parsed.format, parsed.meta.cueSheetId || null, importedBy || null]
+      )
+      const cueSheetId = sheetRow.rows[0].id
+
+      const hausCues = parsed.cues.filter(c => c.isHaus)
+      // matchCueToTitles only ever returns 'matched' | 'ambiguous' | 'unmatched'
+      // (fuzzy/'suggested' matching was removed 2026-10 per Kyle -- see that
+      // function's own comment) -- counts here cover exactly those three.
+      let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+      const matchResults = hausCues.map(cue => {
+        const m = matchCueToTitles(cue, titlesIndex)
+        if (m.status === 'matched') matchedCount++
+        else if (m.status === 'ambiguous') ambiguousCount++
+        else unmatchedCount++
+        const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
+        return { cue, status: m.status, confidence: m.confidence || null, matchedSku }
+      })
+
+      // Batch-insert every cue (chunked multi-row INSERT...RETURNING id --
+      // Postgres returns RETURNING rows in the same order as the VALUES
+      // list, so the ids line up 1:1 with matchResults without needing a
+      // round-trip per cue), then use those ids to batch-insert every party.
+      const cueIds = await _bulkInsert(
+        client, 'cue_sheet_cues', CUE_SHEET_CUE_COLS, matchResults,
+        mr => [cueSheetId, mr.cue.seq, mr.cue.titleRaw, mr.cue.titleNormalized, mr.cue.usage || null, mr.cue.duration || null,
+          true, mr.cue.classifyReason || null, mr.cue.classifyConfidence || null, mr.status, mr.matchedSku, mr.confidence],
+        { returning: 'id' }
+      )
+
+      const partyRows = []
+      matchResults.forEach((mr, idx) => {
+        for (const p of mr.cue.parties) partyRows.push([cueIds[idx], p])
+      })
+      await _bulkInsert(
+        client, 'cue_sheet_cue_parties', CUE_SHEET_PARTY_COLS, partyRows,
+        ([cueId, p]) => [cueId, p.name || null, p.role || null, p.pro || null, p.pct ? (parseFloat(p.pct) || null) : null]
+      )
+
+      return {
+        ok: true,
+        origName,
+        cueSheetId,
+        format: parsed.format,
+        totalCues: parsed.cues.length,
+        hausCues: hausCues.length,
+        matched: matchedCount,
+        ambiguous: ambiguousCount,
+        unmatched: unmatchedCount,
+      }
+    }, 'cue-sheets import')
+  } catch (e) {
+    if (e.cueSheetDuplicate) {
+      return {
+        ok: false, origName,
+        error: `"${origName}" was already imported for this episode (cue sheet #${e.cueSheetDuplicate.id}, imported ${e.cueSheetDuplicate.imported_at}). Pass replace=true to re-import and overwrite it.`,
+        duplicateOfCueSheetId: e.cueSheetDuplicate.id,
+      }
+    }
+    throw e
   }
 }
 
