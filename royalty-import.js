@@ -69,6 +69,36 @@ function num(s) {
   return isNaN(n) ? 0 : n;
 }
 
+// SESAC's Earnings column (both the current-format parseSESAC and the
+// true-no-marker-legacy parseSESAC_LEGACY) carries dollar amounts in several
+// real shapes confirmed by reading the actual files, not guessed:
+//   plain decimal      "0.00456500"   (current-format files from 2018Q4 on)
+//   dollar-prefixed     "$1.130"       (current-format files 2016Q1-2018Q3;
+//                                       legacy files throughout)
+//   parenthesized       "($1.220)"     (negative -- confirmed on real files
+//                                       in both current-format 2016Q4/2017Q1
+//                                       and legacy SESAC_1709/2017Q2)
+//   minus-then-dollar   "-$1.620"      (confirmed on real file SESAC_16Q3)
+// num()/parseFloat silently returns 0 (not NaN -- isNaN("$1.13") is true, so
+// num() hits its own NaN guard) for any of the first three non-plain shapes,
+// which is how this went unnoticed until the first real dry run against
+// historical files: statement totals for the affected files looked like
+// "$0.00" across the board rather than erroring loudly.
+function parseMoneyAmount(s) {
+  if (s == null) return 0;
+  let v = String(s).trim();
+  if (!v) return 0;
+  let negative = false;
+  const paren = v.match(/^\(([^()]*)\)$/);
+  if (paren) { negative = true; v = paren[1].trim(); }
+  if (v.startsWith('-')) { negative = true; v = v.slice(1); }
+  v = v.replace(/^\$/, '').trim();
+  if (v.startsWith('-')) { negative = true; v = v.slice(1); } // handles "$-1.62" too, just in case
+  const n = parseFloat(v);
+  if (isNaN(n)) return 0;
+  return negative ? -Math.abs(n) : n;
+}
+
 function stripQuotes(s) {
   return (s || '').replace(/^"|"$/g, '');
 }
@@ -283,7 +313,7 @@ function parseSESAC(filePath) {
     const f = splitCsvLine(rows[i]).map(stripQuotes);
     if (f.length < 32) continue;
     if (!f[3] || !f[3].trim()) continue; // stray subtotal/footer rows with enough commas to pass the length check
-    const amount = num(f[31]);
+    const amount = parseMoneyAmount(f[31]);
     lines.push({
       titleRaw: f[3],
       titleNormalized: normTitle(f[3]),
@@ -321,13 +351,15 @@ function parseASCAP_DOM(filePath) {
   const rows = content.split(/\r?\n/);
   const lines = [];
   let statementTotal = 0;
-  let year = null, quarter = null;
+  const periodCounts = new Map(); // (year,quarter) pair -> row count, for majority vote below
   for (let i = 1; i < rows.length; i++) {
     if (!rows[i]) continue;
     const f = splitCsvLine(rows[i]).map(stripQuotes);
     if (f.length < 32) continue;
-    year = year || f[0];
-    quarter = quarter || f[1];
+    if (f[0] && f[1]) {
+      const key = `${f[0]}\u0000${f[1]}`;
+      periodCounts.set(key, (periodCounts.get(key) || 0) + 1);
+    }
     if (!f[19] || !f[19].trim()) continue; // stray subtotal/footer rows
     const amount = num(f[29]) + num(f[31]); // Dollars + Premium Dollars
     lines.push({
@@ -350,8 +382,18 @@ function parseASCAP_DOM(filePath) {
     });
     statementTotal += amount;
   }
+  // Majority/mode vote: whichever (year,quarter) pair appears on the most
+  // rows wins, rather than whichever row happens to come first. See the
+  // comment above the loop for the real-data evidence this is safe.
+  let year = null, quarter = null, bestCount = -1;
+  for (const [key, cnt] of periodCounts) {
+    if (cnt > bestCount) {
+      bestCount = cnt;
+      [year, quarter] = key.split('\u0000');
+    }
+  }
   return {
-    meta: { source: 'ASCAP', period: year && quarter ? `${year}Q${quarter}` : null, statementTotal },
+    meta: { source: 'ASCAP', period: (year && quarter) ? `${year}Q${quarter}` : null, statementTotal },
     lines,
   };
 }
@@ -524,11 +566,12 @@ function parseSESAC_LEGACY(filePath) {
     if (!title || !title.trim()) continue; // stray subtotal/footer rows
     year = year || g('YEAR');
     qtr = qtr || g('QTR');
-    // Legacy SESAC's Earnings column carries a literal leading '$' (confirmed
-    // on real data, e.g. "$2.71") -- the current format's Earnings column does
-    // not (plain decimal, e.g. "0.00456500"), so this strip is scoped to this
-    // legacy parser only, not the shared num()/parseSESAC used by current files.
-    const amount = num((g('EARNINGS') || '').replace(/^\$/, ''));
+    // Legacy SESAC's Earnings column carries the same $/parens shapes as the
+    // current-format parser (confirmed on real file SESAC_1709/2017Q2, which
+    // has BOTH "$2.71"-style and "($4.48)"-style values) -- use the same
+    // shared parseMoneyAmount() helper rather than a narrower $-only strip,
+    // which would have silently zeroed out the parenthesized-negative rows.
+    const amount = parseMoneyAmount(g('EARNINGS'));
     const episodeTitle = g('EPISODE TITLE')
     const episodeNumber = g('EPISODE NUMBER')
     lines.push({
