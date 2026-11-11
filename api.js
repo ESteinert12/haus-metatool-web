@@ -8126,31 +8126,22 @@ app.get('/api/cue-sheets/title-search', async (req, res) => {
 // shape as importOneCueSheet, manual-confirm only (this one involves real
 // money, so there is an even stronger case than cue sheets to never
 // silently write a confirmed match without a human in the loop).
-// One multi-row INSERT per 500-row chunk instead of one query per line --
-// same fix, same reasoning, as ebr-ack-import.js's insertAckRowsBulk()
-// (commit 732eaef): a real statement here runs 30k-80k lines (confirmed
-// against Erik's own BMI/ASCAP archive), so one-row-at-a-time would be slow
-// AND multiply the odds of hitting a transient Neon drop mid-import.
-const ROYALTY_LINES_BULK_CHUNK = 500
+//
+// 2026-11-11: wrapped in `_pgRetryTransaction` + `_bulkInsert` (the pattern
+// built for cue-sheets' importOneCueSheet -- see that function's own
+// comment). Before this, the dedupe checks, the `royalty_statements` row,
+// and every line insert were separate unwrapped `_pgRetry` calls -- a
+// connection drop mid-import (e.g. chunk 40 of 70 on a real 30k-80k-line
+// statement) landed a partial set of lines under a statement row that looks
+// complete, with no rollback and nothing tying it back to an incomplete
+// import. Flagged but not fixed in
+// claude/handoff-2026-11-11-cue-sheet-import-guardrails-and-royalty-transaction-gap.md
+// ("both the royalty tracker and the EBR acknowledgment importer currently
+// batch inserts in groups of 500 with per-chunk retry, but neither is atomic
+// across chunks"). Now either the whole statement lands -- dedupe checks,
+// `royalty_statements` row, and every line -- or none of it does.
 const ROYALTY_LINE_COLS = ['statement_id', 'title_raw', 'title_normalized', 'payee_name', 'payee_role', 'amount',
   'usage_type', 'country', 'work_id', 'show_name', 'episode_name', 'bonus_amount', 'match_status', 'matched_sku_root']
-async function insertRoyaltyLinesBulk(rows) {
-  for (let i = 0; i < rows.length; i += ROYALTY_LINES_BULK_CHUNK) {
-    const chunk = rows.slice(i, i + ROYALTY_LINES_BULK_CHUNK)
-    const values = []
-    const params = []
-    chunk.forEach((row, idx) => {
-      const base = idx * ROYALTY_LINE_COLS.length
-      values.push(`(${ROYALTY_LINE_COLS.map((_, j) => `$${base + j + 1}`).join(',')})`)
-      params.push(...row)
-    })
-    await _pgRetry(
-      `INSERT INTO royalty_statement_lines (${ROYALTY_LINE_COLS.join(',')}) VALUES ${values.join(',')}`,
-      params,
-      'royalty-import bulk insert lines'
-    )
-  }
-}
 
 async function importOneRoyaltyStatement(filePath, origName, titlesIndex, importedBy) {
   const parsed = parseRoyaltyStatementFile(filePath)
@@ -8159,78 +8150,86 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
     return { ok: false, origName, error: `Unrecognized royalty statement format for "${origName}" -- not imported. Known formats: BMI, SESAC (domestic/international), ASCAP (domestic/foreign), SOCAN.` }
   }
 
-  // Dedupe on (source, format, period), NOT filename. ASCAP's own export
-  // tool names files with an opaque batch ID that carries no period at all
-  // (confirmed on real files: "36077668.csv" tells you nothing about which
-  // quarter it covers -- only the file's own content does). A re-download of
-  // the SAME quarter gets a brand-new random filename, so filename-only dedup
-  // would silently let the same money get imported twice under two
-  // statement rows. Still also check filename as a secondary guard (catches
-  // a literal re-upload of the identical file before its period is even
-  // parsed out, and catches formats where period parsing might fail/be null).
-  const dupByPeriod = parsed.meta.period
-    ? await _pgRetry(
-        `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 LIMIT 1`,
-        [parsed.meta.source, parsed.format, parsed.meta.period],
-        'royalty-import dedupe-by-period'
+  try {
+    return await _pgRetryTransaction(async (client) => {
+      // Dedupe on (source, format, period), NOT filename. ASCAP's own export
+      // tool names files with an opaque batch ID that carries no period at all
+      // (confirmed on real files: "36077668.csv" tells you nothing about which
+      // quarter it covers -- only the file's own content does). A re-download of
+      // the SAME quarter gets a brand-new random filename, so filename-only dedup
+      // would silently let the same money get imported twice under two
+      // statement rows. Still also check filename as a secondary guard (catches
+      // a literal re-upload of the identical file before its period is even
+      // parsed out, and catches formats where period parsing might fail/be null).
+      const dupByPeriod = parsed.meta.period
+        ? await client.query(
+            `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 LIMIT 1`,
+            [parsed.meta.source, parsed.format, parsed.meta.period]
+          )
+        : { rows: [] }
+      if (dupByPeriod.rows.length) {
+        const err = new Error('royalty statement duplicate (by period), not a transient failure -- do not retry')
+        err.royaltyDuplicate = {
+          error: `A ${parsed.meta.source} ${parsed.format} statement for period ${parsed.meta.period} was already imported as "${dupByPeriod.rows[0].source_filename}" (statement #${dupByPeriod.rows[0].id}, imported ${dupByPeriod.rows[0].imported_at}). If this is a genuine re-export of the same period (not a new period), delete the existing statement first -- re-importing both would double-count that period's money.`,
+          duplicateOfStatementId: dupByPeriod.rows[0].id,
+        }
+        throw err
+      }
+      const dup = await client.query(
+        `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 LIMIT 1`,
+        [origName]
       )
-    : { rows: [] }
-  if (dupByPeriod.rows.length) {
-    return {
-      ok: false, origName,
-      error: `A ${parsed.meta.source} ${parsed.format} statement for period ${parsed.meta.period} was already imported as "${dupByPeriod.rows[0].source_filename}" (statement #${dupByPeriod.rows[0].id}, imported ${dupByPeriod.rows[0].imported_at}). If this is a genuine re-export of the same period (not a new period), delete the existing statement first -- re-importing both would double-count that period's money.`,
-      duplicateOfStatementId: dupByPeriod.rows[0].id,
+      if (dup.rows.length) {
+        const err = new Error('royalty statement duplicate (by filename), not a transient failure -- do not retry')
+        err.royaltyDuplicate = {
+          error: `"${origName}" was already imported (statement #${dup.rows[0].id}, imported ${dup.rows[0].imported_at}). Delete it first to re-import.`,
+          duplicateOfStatementId: dup.rows[0].id,
+        }
+        throw err
+      }
+
+      const statementRow = await client.query(
+        `INSERT INTO royalty_statements (source, format, period, source_filename, statement_total, imported_by)
+         VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
+        [parsed.meta.source, parsed.format, parsed.meta.period || null, origName, parsed.meta.statementTotal || 0, importedBy || null]
+      )
+      const statementId = statementRow.rows[0].id
+
+      let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+      const lineRows = []
+
+      for (const line of parsed.lines) {
+        const m = matchLineToTitles(line, titlesIndex)
+        if (m.status === 'matched') matchedCount++
+        else if (m.status === 'ambiguous') ambiguousCount++
+        else unmatchedCount++
+
+        const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
+
+        lineRows.push([statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
+           line.usageType || null, line.country || null, line.workId || null, line.showName || null, line.episodeName || null,
+           line.bonusAmount || null, m.status, matchedSku])
+      }
+
+      await _bulkInsert(client, 'royalty_statement_lines', ROYALTY_LINE_COLS, lineRows, row => row)
+
+      return {
+        ok: true,
+        origName,
+        statementId,
+        format: parsed.format,
+        totalLines: parsed.lines.length,
+        matched: matchedCount,
+        ambiguous: ambiguousCount,
+        unmatched: unmatchedCount,
+        statementTotal: parsed.meta.statementTotal,
+      }
+    }, 'royalty-import')
+  } catch (e) {
+    if (e.royaltyDuplicate) {
+      return { ok: false, origName, ...e.royaltyDuplicate }
     }
-  }
-  const dup = await _pgRetry(
-    `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 LIMIT 1`,
-    [origName],
-    'royalty-import dedupe-by-filename'
-  )
-  if (dup.rows.length) {
-    return {
-      ok: false, origName,
-      error: `"${origName}" was already imported (statement #${dup.rows[0].id}, imported ${dup.rows[0].imported_at}). Delete it first to re-import.`,
-      duplicateOfStatementId: dup.rows[0].id,
-    }
-  }
-
-  const statementRow = await _pgRetry(
-    `INSERT INTO royalty_statements (source, format, period, source_filename, statement_total, imported_by)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-    [parsed.meta.source, parsed.format, parsed.meta.period || null, origName, parsed.meta.statementTotal || 0, importedBy || null],
-    'royalty-import insert statement'
-  )
-  const statementId = statementRow.rows[0].id
-
-  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
-  const lineRows = []
-
-  for (const line of parsed.lines) {
-    const m = matchLineToTitles(line, titlesIndex)
-    if (m.status === 'matched') matchedCount++
-    else if (m.status === 'ambiguous') ambiguousCount++
-    else unmatchedCount++
-
-    const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
-
-    lineRows.push([statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
-       line.usageType || null, line.country || null, line.workId || null, line.showName || null, line.episodeName || null,
-       line.bonusAmount || null, m.status, matchedSku])
-  }
-
-  await insertRoyaltyLinesBulk(lineRows)
-
-  return {
-    ok: true,
-    origName,
-    statementId,
-    format: parsed.format,
-    totalLines: parsed.lines.length,
-    matched: matchedCount,
-    ambiguous: ambiguousCount,
-    unmatched: unmatchedCount,
-    statementTotal: parsed.meta.statementTotal,
+    throw e
   }
 }
 

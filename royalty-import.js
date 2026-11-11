@@ -127,6 +127,61 @@ function headerMatches(headerFields, expected) {
   return true
 }
 
+// 2026-11-11: historical-format gap closed for BMI, ASCAP (domestic +
+// international) and SESAC. Verified file-by-file against Erik's real
+// ROYALTY STATEMENTS archive (45 BMI, 39 ASCAP domestic, 34 ASCAP
+// international, 42 SESAC csvs spanning 2014-2026) before writing any of
+// this -- see claude/handoff-2026-11-11-royalty-tracker-historical-formats.md
+// for the full per-shape breakdown. Three distinct kinds of drift found:
+//
+//   1. BMI and ASCAP_DOM: the OLD header is a strict prefix of the new one
+//      -- PRO added trailing columns later (BMI: "PERF DATE"; ASCAP_DOM:
+//      "Program Code"/"Performance Quarter", and ASCAP_DOM's earliest 2016
+//      files are missing "Type Of Right"/"Territory" too). Every column
+//      parseBMI/parseASCAP_DOM actually read sits well inside the shorter
+//      stable prefix in every real file checked (old and new alike), so
+//      checking only that prefix recognizes every era with the SAME parser
+//      -- no new parse function needed, just a shorter required header.
+//   2. ASCAP international (ASCAP_FOR): a REAL structural difference, not
+//      just added columns. Pre-2019 statements report money across five
+//      category columns ($ GENERAL/$ RADIO/$ TV/$ TV-FILM/$ CINEMA/$ TOTAL)
+//      instead of the current single ($ Amount) column, AND the column
+//      order/presence of "StatementDate"/"Type Of Right"/"Territory" varies
+//      across the 9 real old files on file (4 distinct sub-shapes seen).
+//      Verified against 2 real files (170 + 2,627 + 3,256 rows checked) that
+//      $ TOTAL always equals the sum of the 5 category columns (0 mismatches
+//      across 6,053 rows) -- safe to use $ TOTAL directly as the amount,
+//      same convention as the current format's single $ Amount column.
+//      New name-indexed parser (parseASCAP_FOR_LEGACY) handles all 4
+//      sub-shapes uniformly by looking up each needed field by header name
+//      instead of a hardcoded position, since position drifts between them.
+//   3. SESAC: 3 of the 42 real files on file have no identifying "SESAC
+//      QUARTERLY Royalty Statement" line at all (the header row IS the first
+//      line) -- and those 3 files are not even consistent with EACH OTHER:
+//      one has "StatementDate" inserted after "Song #", two have it inserted
+//      BEFORE "Song #" instead (one of those two even misspells the column
+//      "StatementtDate"). A hardcoded legacy position would silently misread
+//      "Song Title" as "StatementDate" or vice versa depending on which of
+//      these 3 files it hit. parseSESAC_LEGACY looks up every field by
+//      header name instead, which is immune to all three variants.
+//      (A 4th file in the same folder, "SESAC_PayConfirmation Table.csv",
+//      has NO earnings/dollar column at all -- it isn't a royalty statement,
+//      correctly stays UNKNOWN; flagged for Erik to confirm/move it.)
+const BMI_HEADER_MIN = EXPECTED_HEADERS.BMI.slice(0, 26) // through 'COMPANY NAME' -- drops trailing 'PERF DATE'
+const ASCAP_DOM_HEADER_MIN = EXPECTED_HEADERS.ASCAP_DOM.slice(0, 36) // through 'ROLE TYPE' -- drops trailing Licensor/Type Of Right/Territory/Program Code/Performance Quarter variants
+
+function isAscapForLegacyHeader(headerFields) {
+  // Current ASCAP_FOR has '$ AMOUNT'; every legacy sub-shape has '$ TOTAL'
+  // instead (plus the 5 category columns) -- distinctive, never collides
+  // with the current format or any other PRO's header.
+  return headerFields[0] === 'FILE TYPE' && headerFields.includes('WORK TITLE') && headerFields.includes('$ TOTAL')
+}
+
+function isSesacLegacyHeader(headerFields) {
+  const required = ['YEAR', 'QTR', 'SONG #', 'SONG TITLE', 'EARNINGS']
+  return required.every(f => headerFields.includes(f))
+}
+
 function sniffFormat(filePath) {
   const fullText = fs.readFileSync(filePath, 'utf8');
   const lines = fullText.split(/\r?\n/);
@@ -144,10 +199,12 @@ function sniffFormat(filePath) {
   }
 
   const headerFields = splitCsvLine(firstLine).map(f => stripQuotes(f).trim().toUpperCase());
-  if (headerMatches(headerFields, EXPECTED_HEADERS.BMI)) return 'BMI';
-  if (headerMatches(headerFields, EXPECTED_HEADERS.ASCAP_DOM)) return 'ASCAP_DOM';
+  if (headerMatches(headerFields, BMI_HEADER_MIN)) return 'BMI';
+  if (headerMatches(headerFields, ASCAP_DOM_HEADER_MIN)) return 'ASCAP_DOM';
   if (headerMatches(headerFields, EXPECTED_HEADERS.ASCAP_FOR)) return 'ASCAP_FOR';
   if (headerMatches(headerFields, EXPECTED_HEADERS.SOCAN)) return 'SOCAN';
+  if (isAscapForLegacyHeader(headerFields)) return 'ASCAP_FOR_LEGACY';
+  if (isSesacLegacyHeader(headerFields)) return 'SESAC_LEGACY';
 
   return 'UNKNOWN';
 }
@@ -378,14 +435,136 @@ function parseSOCAN(filePath) {
   };
 }
 
+// Generic header-name index: maps each uppercased header field to its
+// column position, first-occurrence-wins. Used by the legacy parsers below
+// instead of hardcoded positions, since real legacy files disagree with each
+// other on column order/presence (see sniffFormat's comment above) -- a
+// fixed position is provably wrong for at least one real file in each
+// legacy bucket, a by-name lookup is correct for all of them.
+function buildHeaderIndex(headerLine) {
+  const headerFields = splitCsvLine(headerLine).map(f => stripQuotes(f).trim().toUpperCase())
+  const idx = {}
+  headerFields.forEach((h, i) => { if (!(h in idx)) idx[h] = i })
+  return idx
+}
+
+const ASCAP_FOR_LEGACY_CATEGORY_COLS = ['$ GENERAL', '$ RADIO', '$ TV', '$ TV-FILM', '$ CINEMA']
+
+// Pre-~2019 ASCAP international distribution: money reported across 5
+// category columns instead of the current single "$ Amount" -- verified
+// against real files that "$ TOTAL" always equals their sum (0 mismatches
+// across 6,053 real rows checked, see sniffFormat's comment), so it's used
+// directly as the amount, same convention as the current format's $ Amount.
+// Column order/presence of StatementDate/Type Of Right/Territory varies
+// across real files (4 distinct sub-shapes seen) -- looked up by name, not
+// position, so this is correct for all of them without needing to special-
+// case each sub-shape.
+function parseASCAP_FOR_LEGACY(filePath) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const rows = content.split(/\r?\n/);
+  const idx = buildHeaderIndex(rows[0] || '')
+  const lines = [];
+  let statementTotal = 0;
+  let distDate = null;
+  for (let i = 1; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    const f = splitCsvLine(rows[i]).map(stripQuotes);
+    const g = (name) => (idx[name] != null && idx[name] < f.length) ? f[idx[name]] : null;
+    const title = g('WORK TITLE');
+    if (!title || !title.trim()) continue; // stray subtotal/footer rows
+    distDate = distDate || g('DISTRIBUTION DATE');
+    const amount = num(g('$ TOTAL'));
+    const activeCats = ASCAP_FOR_LEGACY_CATEGORY_COLS.filter(c => idx[c] != null && num(g(c)) !== 0)
+    const seriesName = g('SERIES NAME')
+    const programName = g('PROGRAM NAME')
+    lines.push({
+      titleRaw: title,
+      titleNormalized: normTitle(title),
+      payeeName: null,
+      payeeRole: null,
+      amount,
+      // Display-only (not used for matching) -- which of the 5 legacy
+      // category columns was actually populated for this row, in place of
+      // the current format's "Revenue Class Description" column, which this
+      // era of export doesn't have.
+      usageType: activeCats.length ? activeCats.join('+') : null,
+      country: g('COUNTRY NAME'),
+      workId: g('WORK ID'),
+      foreignSociety: g('LICENSOR'),
+      showName: (seriesName && seriesName.trim() && seriesName !== '-') ? seriesName : null,
+      episodeName: (programName && programName.trim()) ? programName : null,
+    });
+    statementTotal += amount;
+  }
+  return {
+    meta: { source: 'ASCAP', period: distDate, isForeignDistribution: true, statementTotal },
+    lines,
+  };
+}
+
+// Pre-2017Q3-ish SESAC exports with no "SESAC QUARTERLY Royalty Statement"
+// marker line -- the header row IS the first line. The 3 real files on file
+// disagree with EACH OTHER on where "StatementDate" sits relative to "Song
+// Title" (one has it before Song Title, two have it after -- one of those
+// two even misspells the column "StatementtDate") -- looked up by name, not
+// position, so correct regardless of which of the 3 real shapes a given
+// file turns out to be.
+function parseSESAC_LEGACY(filePath) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const rows = content.split(/\r?\n/);
+  const idx = buildHeaderIndex(rows[0] || '')
+  const lines = [];
+  let statementTotal = 0;
+  let year = null, qtr = null;
+  for (let i = 1; i < rows.length; i++) {
+    if (!rows[i]) continue;
+    const f = splitCsvLine(rows[i]).map(stripQuotes);
+    const g = (name) => (idx[name] != null && idx[name] < f.length) ? f[idx[name]] : null;
+    const title = g('SONG TITLE');
+    if (!title || !title.trim()) continue; // stray subtotal/footer rows
+    year = year || g('YEAR');
+    qtr = qtr || g('QTR');
+    // Legacy SESAC's Earnings column carries a literal leading '$' (confirmed
+    // on real data, e.g. "$2.71") -- the current format's Earnings column does
+    // not (plain decimal, e.g. "0.00456500"), so this strip is scoped to this
+    // legacy parser only, not the shared num()/parseSESAC used by current files.
+    const amount = num((g('EARNINGS') || '').replace(/^\$/, ''));
+    const episodeTitle = g('EPISODE TITLE')
+    const episodeNumber = g('EPISODE NUMBER')
+    lines.push({
+      titleRaw: title,
+      titleNormalized: normTitle(title),
+      payeeName: null,
+      payeeRole: null,
+      amount,
+      usageType: g('PERF TYPE') || g('PERF CATEGORY') || null,
+      country: g('SOCIETY COUNTRY'),
+      workId: g('SONG #'),
+      showName: g('PRODUCTION TITLE'),
+      episodeName: [episodeTitle, episodeNumber ? `(Ep ${episodeNumber})` : null].filter(Boolean).join(' ') || null,
+    });
+    statementTotal += amount;
+  }
+  return {
+    // These legacy files carry no "Affiliate No:"/"Distribution Period:"
+    // metadata lines (no metadata lines at all -- the header is line 1), so
+    // period falls back to the first data row's own Year/Qtr instead of
+    // being left null.
+    meta: { source: 'SESAC', period: (year && qtr) ? `${year}Q${qtr}` : null, affiliateNo: null, statementTotal },
+    lines,
+  };
+}
+
 function parseRoyaltyStatementFile(filePath) {
   const format = sniffFormat(filePath);
   if (format === 'UNKNOWN') return { format, meta: {}, lines: [] };
   const parsed = {
     BMI: parseBMI,
     SESAC: parseSESAC,
+    SESAC_LEGACY: parseSESAC_LEGACY,
     ASCAP_DOM: parseASCAP_DOM,
     ASCAP_FOR: parseASCAP_FOR,
+    ASCAP_FOR_LEGACY: parseASCAP_FOR_LEGACY,
     SOCAN: parseSOCAN,
   }[format](filePath);
   return { format, ...parsed };
