@@ -9304,15 +9304,219 @@ async function royaltyPreviewSingle(file) {
   const btn = document.querySelector('#section-royalties .btn-primary')
   if (btn) { btn.disabled = true; btn.textContent = 'Reading…' }
   try {
-    const fd = new FormData()
-    fd.append('file', file)
-    const r = await fetch('/api/royalties/preview', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+    const r = await royaltyFetchPreview(file, {})
+    if (r.unknownFormat) { showRoyaltyMappingModal(r.rowsPreview, file); return }
+    if (r.needsPeriod) { showRoyaltyPeriodOnlyModal(r, file); return }
     if (!r.ok) { alert(r.error || 'Could not read file'); return }
+    window._royaltyPendingMapping = null
     showRoyaltyPreviewModal(r, file)
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Statement' }
     document.getElementById('royalty-file-input').value = ''
   }
+}
+
+// Shared fetch helper for /api/royalties/preview -- the plain path, the
+// manual-mapping path, and the needs-just-a-period path all differ only in
+// which extra fields they attach.
+async function royaltyFetchPreview(file, extra) {
+  const fd = new FormData()
+  fd.append('file', file)
+  if (extra.manualMapping) fd.append('manualMapping', JSON.stringify(extra.manualMapping))
+  if (extra.matchedTemplateId) fd.append('matchedTemplateId', extra.matchedTemplateId)
+  if (extra.period) fd.append('period', extra.period)
+  return fetch('/api/royalties/preview', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+}
+
+// Target fields a human can map an unrecognized file's columns onto. title
+// and amount are the only two required -- everything else is optional and
+// left null/none if the file doesn't have an equivalent column.
+const ROYALTY_MAP_FIELDS = [
+  { key: 'title', label: 'Statement title', required: true },
+  { key: 'amount', label: 'Amount', required: true },
+  { key: 'payeeName', label: 'Payee name' },
+  { key: 'payeeRole', label: 'Payee role (writer/publisher)' },
+  { key: 'usageType', label: 'Usage type' },
+  { key: 'country', label: 'Country' },
+  { key: 'workId', label: 'Work ID' },
+  { key: 'showName', label: 'Show name' },
+  { key: 'episodeName', label: 'Episode name' },
+]
+
+// Shown when /api/royalties/preview comes back unknownFormat -- a format
+// sniffFormat() (and no saved royalty_format_templates row) recognizes.
+// Lets a human map columns by NAME, once, through the UI instead of
+// waiting on a code change -- see api.js's resolveRoyaltyStatementParse()
+// and royalty-import.js's parseWithManualMapping() for how this mapping is
+// actually applied, and how "remember this format" makes the NEXT file
+// with this exact header auto-match with zero further human input.
+function showRoyaltyMappingModal(rowsPreview, file) {
+  royaltyCloseModal()
+  window._royaltyPendingFile = file
+  window._royaltyMappingState = { rowsPreview, headerRowIndex: 0 }
+  renderRoyaltyMappingModal()
+}
+
+function renderRoyaltyMappingModal() {
+  const state = window._royaltyMappingState
+  const { rowsPreview, headerRowIndex } = state
+  const headerFields = rowsPreview[headerRowIndex] || []
+
+  const rowOptions = rowsPreview.map((row, i) =>
+    `<option value="${i}" ${i === headerRowIndex ? 'selected' : ''}>Row ${i + 1}: ${esc(row.slice(0, 4).join(' | '))}${row.length > 4 ? ' …' : ''}</option>`
+  ).join('')
+
+  const fieldSelect = (key, required) => `
+    <select id="royalty-map-${key}" style="font-size:12px;width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px" ${required ? 'onchange="royaltyUpdateMappingContinueState()"' : ''}>
+      <option value="">${required ? '— choose —' : '— none —'}</option>
+      ${headerFields.map((h, i) => `<option value="${esc(h)}">${esc(h || `(column ${i + 1})`)}</option>`).join('')}
+    </select>`
+
+  const fieldRows = ROYALTY_MAP_FIELDS.map(fld => `
+    <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px">
+      <div style="width:170px;font-size:12px;color:#1a2226">${esc(fld.label)}${fld.required ? ' <span style="color:#c0392b">*</span>' : ''}</div>
+      <div style="flex:1">${fieldSelect(fld.key, fld.required)}</div>
+    </div>`).join('')
+
+  const periodColumnOptions = headerFields.map(h => `<option value="${esc(h)}">${esc(h)}</option>`).join('')
+
+  let wrap = document.getElementById('royalty-preview-modal')
+  if (!wrap) {
+    wrap = document.createElement('div')
+    wrap.id = 'royalty-preview-modal'
+    wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center'
+    document.body.appendChild(wrap)
+  }
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:8px;padding:22px 26px;width:560px;max-width:94vw;max-height:88vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px;color:#1a2226">Unrecognized format — map its columns</div>
+      <div style="font-size:12px;color:#4b5a5e;margin-bottom:14px">This file doesn't match a known PRO export. Map its columns once below, and (by default) this exact format will be recognized automatically from now on — no app update needed.</div>
+
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;color:#4b5a5e;display:block;margin-bottom:3px">Which row is the header?</label>
+        <select id="royalty-map-header-row" style="font-size:12px;width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px" onchange="royaltyMappingHeaderRowChanged(this.value)">
+          ${rowOptions}
+        </select>
+      </div>
+
+      <div style="margin-bottom:12px">
+        <label style="font-size:11px;color:#4b5a5e;display:block;margin-bottom:3px">Source</label>
+        <select id="royalty-map-source" style="font-size:12px;width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+          <option value="BMI">BMI</option><option value="SESAC">SESAC</option><option value="ASCAP">ASCAP</option><option value="SOCAN">SOCAN</option><option value="OTHER">Other</option>
+        </select>
+      </div>
+
+      ${fieldRows}
+
+      <div style="margin:14px 0 6px;font-size:12px;font-weight:600;color:#1a2226">Period</div>
+      <div style="font-size:11px;color:#4b5a5e;margin-bottom:6px">
+        <label><input type="radio" name="royalty-map-period-mode" value="manual" checked onchange="royaltyMappingPeriodModeChanged('manual')"> I'll type it each time</label><br>
+        <label><input type="radio" name="royalty-map-period-mode" value="single_column" onchange="royaltyMappingPeriodModeChanged('single_column')"> One column has the full period</label><br>
+        <label><input type="radio" name="royalty-map-period-mode" value="year_quarter_columns" onchange="royaltyMappingPeriodModeChanged('year_quarter_columns')"> Separate Year + Quarter columns</label>
+      </div>
+      <div id="royalty-map-period-manual">
+        <input id="royalty-map-period-value" placeholder="e.g. 2024Q3" style="font-size:12px;width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+      </div>
+      <div id="royalty-map-period-single_column" style="display:none">
+        <select id="royalty-map-period-column" style="font-size:12px;width:100%;padding:3px 6px;border:1px solid var(--border);border-radius:4px"><option value="">— choose —</option>${periodColumnOptions}</select>
+      </div>
+      <div id="royalty-map-period-year_quarter_columns" style="display:none;gap:8px">
+        <select id="royalty-map-year-column" style="font-size:12px;flex:1;padding:3px 6px;border:1px solid var(--border);border-radius:4px"><option value="">Year column</option>${periodColumnOptions}</select>
+        <select id="royalty-map-quarter-column" style="font-size:12px;flex:1;padding:3px 6px;border:1px solid var(--border);border-radius:4px"><option value="">Quarter column</option>${periodColumnOptions}</select>
+      </div>
+
+      <div style="margin-top:14px;font-size:12px">
+        <label><input type="checkbox" id="royalty-map-save-template" checked> Remember this format for next time</label>
+        <input id="royalty-map-template-label" placeholder="optional label, e.g. &quot;BMI custom export&quot;" style="font-size:12px;width:100%;margin-top:6px;padding:3px 6px;border:1px solid var(--border);border-radius:4px">
+      </div>
+
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
+        <button class="btn" onclick="royaltyCloseModal()">Cancel</button>
+        <button class="btn btn-primary" id="royalty-map-continue-btn" disabled onclick="royaltyMappingContinue()">Preview with this mapping</button>
+      </div>
+    </div>`
+  royaltyUpdateMappingContinueState()
+}
+
+function royaltyMappingHeaderRowChanged(idx) {
+  window._royaltyMappingState.headerRowIndex = parseInt(idx, 10)
+  renderRoyaltyMappingModal()
+}
+
+function royaltyMappingPeriodModeChanged(mode) {
+  for (const m of ['manual', 'single_column', 'year_quarter_columns']) {
+    const el = document.getElementById(`royalty-map-period-${m}`)
+    if (el) el.style.display = (m !== mode) ? 'none' : (m === 'year_quarter_columns' ? 'flex' : 'block')
+  }
+}
+
+function royaltyUpdateMappingContinueState() {
+  const btn = document.getElementById('royalty-map-continue-btn')
+  if (!btn) return
+  const title = document.getElementById('royalty-map-title')?.value
+  const amount = document.getElementById('royalty-map-amount')?.value
+  btn.disabled = !(title && amount)
+}
+
+async function royaltyMappingContinue() {
+  const headerRowIndex = window._royaltyMappingState.headerRowIndex
+  const columnMap = {}
+  for (const fld of ROYALTY_MAP_FIELDS) {
+    const v = document.getElementById(`royalty-map-${fld.key}`)?.value
+    if (v) columnMap[fld.key] = v
+  }
+  const periodMode = document.querySelector('input[name="royalty-map-period-mode"]:checked').value
+  const manualMapping = {
+    headerRowIndex,
+    columnMap,
+    source: document.getElementById('royalty-map-source').value,
+    periodMode,
+    periodColumn: periodMode === 'single_column' ? document.getElementById('royalty-map-period-column').value : null,
+    yearColumn: periodMode === 'year_quarter_columns' ? document.getElementById('royalty-map-year-column').value : null,
+    quarterColumn: periodMode === 'year_quarter_columns' ? document.getElementById('royalty-map-quarter-column').value : null,
+    period: periodMode === 'manual' ? document.getElementById('royalty-map-period-value').value : null,
+  }
+  const saveAsTemplate = document.getElementById('royalty-map-save-template').checked
+  const templateLabel = document.getElementById('royalty-map-template-label').value || null
+
+  const file = window._royaltyPendingFile
+  const r = await royaltyFetchPreview(file, { manualMapping })
+  if (!r.ok) { alert(r.error || 'Could not preview with this mapping'); return }
+  window._royaltyPendingMapping = { manualMapping, saveAsTemplate, templateLabel }
+  showRoyaltyPreviewModal(r, file)
+}
+
+// Shown when a file auto-matches a SAVED template whose period can't be
+// derived from a column (periodMode 'manual') -- everything else about the
+// format is already known, so this only ever asks for the one thing that's
+// genuinely per-statement rather than per-format.
+function showRoyaltyPeriodOnlyModal(preview, file) {
+  royaltyCloseModal()
+  window._royaltyPendingFile = file
+  const wrap = document.createElement('div')
+  wrap.id = 'royalty-preview-modal'
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center'
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:8px;padding:22px 26px;width:380px;max-width:92vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px;color:#1a2226">What period is this statement?</div>
+      <div style="font-size:12px;color:#4b5a5e;margin-bottom:12px">Matched format: <b>${esc(preview.templateLabel || ('saved template #' + preview.matchedTemplateId))}</b> — this format can't tell the period from its own columns, so it's asked once per import.</div>
+      <input id="royalty-period-only-input" placeholder="e.g. 2024Q3" style="font-size:13px;width:100%;padding:5px 8px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box">
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:16px">
+        <button class="btn" onclick="royaltyCloseModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="royaltyPeriodOnlyContinue(${preview.matchedTemplateId})">Continue</button>
+      </div>
+    </div>`
+  document.body.appendChild(wrap)
+}
+
+async function royaltyPeriodOnlyContinue(matchedTemplateId) {
+  const period = document.getElementById('royalty-period-only-input').value.trim()
+  if (!period) { alert('Enter a period first'); return }
+  const file = window._royaltyPendingFile
+  const r = await royaltyFetchPreview(file, { matchedTemplateId, period })
+  if (!r.ok) { alert(r.error || 'Could not preview'); return }
+  window._royaltyPendingMapping = { matchedTemplateId, period }
+  showRoyaltyPreviewModal(r, file)
 }
 
 function royaltyCloseModal() {
@@ -9351,10 +9555,19 @@ function showRoyaltyPreviewModal(preview, file) {
 
 async function royaltyConfirmImport() {
   const file = window._royaltyPendingFile
+  const mapping = window._royaltyPendingMapping
   royaltyCloseModal()
   if (!file) return
   const fd = new FormData()
   fd.append('file', file)
+  if (mapping?.manualMapping) {
+    fd.append('manualMapping', JSON.stringify(mapping.manualMapping))
+    fd.append('saveAsTemplate', mapping.saveAsTemplate ? 'true' : 'false')
+    if (mapping.templateLabel) fd.append('templateLabel', mapping.templateLabel)
+  } else if (mapping?.matchedTemplateId) {
+    fd.append('matchedTemplateId', mapping.matchedTemplateId)
+    if (mapping.period) fd.append('period', mapping.period)
+  }
   const btn = document.querySelector('#section-royalties .btn-primary')
   if (btn) { btn.disabled = true; btn.textContent = 'Importing…' }
   try {
@@ -9365,6 +9578,7 @@ async function royaltyConfirmImport() {
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Statement' }
     window._royaltyPendingFile = null
+    window._royaltyPendingMapping = null
   }
 }
 
@@ -9390,11 +9604,18 @@ async function royaltyImportBulk(files) {
 
 function showRoyaltyBulkResultModal(r) {
   royaltyCloseModal()
-  const rows = r.results.map(res => `
+  const rows = r.results.map(res => {
+    let statusHtml
+    if (res.ok) statusHtml = `OK · ${esc(res.format)} · $${Number(res.statementTotal || 0).toFixed(2)}`
+    else if (res.unknownFormat) statusHtml = 'Unrecognized format — import this one individually to map its columns'
+    else if (res.needsPeriod) statusHtml = `Matched "${esc(res.templateLabel || 'a saved format')}" but needs a period — import individually`
+    else statusHtml = esc(res.error || 'failed')
+    return `
     <tr style="border-bottom:1px solid var(--border)">
       <td style="padding:5px 8px;font-size:11px;word-break:break-all">${esc(res.origName)}</td>
-      <td style="padding:5px 8px;font-size:11px;color:${res.ok ? '#2e7d32' : '#c0392b'};white-space:nowrap">${res.ok ? `OK · ${esc(res.format)} · $${Number(res.statementTotal || 0).toFixed(2)}` : esc(res.error || 'failed')}</td>
-    </tr>`).join('')
+      <td style="padding:5px 8px;font-size:11px;color:${res.ok ? '#2e7d32' : '#c0392b'};white-space:nowrap">${statusHtml}</td>
+    </tr>`
+  }).join('')
   const wrap = document.createElement('div')
   wrap.id = 'royalty-preview-modal'
   wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center'

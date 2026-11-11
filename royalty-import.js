@@ -598,6 +598,100 @@ function parseSESAC_LEGACY(filePath) {
   };
 }
 
+// ─── Manual column mapping (added 2026-11-11) ──────────────────────────────
+// sniffFormat() only ever recognizes a FIXED list of known shapes -- a
+// genuinely new PRO export (or one that drifts further than BMI/ASCAP_DOM's
+// simple added-column case) always comes back UNKNOWN, which previously
+// meant the file was refused outright and someone had to wait for a code
+// change here before it could be imported at all. Erik's own ask: "how do
+// we handle unknown formats if we ever get one, I don't want to have to
+// update the app every time." This is the answer -- a human maps the
+// columns once, by NAME (not position, same reasoning as every legacy
+// parser above: position isn't trustworthy across real-world export
+// variance), through the UI, and api.js can save that mapping as a
+// royalty_format_templates row keyed by the exact header-row text so the
+// NEXT file with the identical header is handled automatically from then
+// on, with no further human step and no code change at all.
+//
+// Reads the first few raw rows of a file so the UI can show them and let a
+// human pick which row is the actual header (not always row 0 -- SESAC's
+// own marker-line convention is the proof real exports sometimes put
+// metadata before the header).
+function readRawRowsPreview(filePath, maxRows = 8) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const rows = content.split(/\r?\n/).filter(r => r.trim().length > 0).slice(0, maxRows);
+  return rows.map(r => splitCsvLine(r).map(stripQuotes));
+}
+
+// mapping shape: {
+//   headerRowIndex: number,
+//   columnMap: { title, amount, payeeName?, payeeRole?, usageType?, country?, workId?, showName?, episodeName? } -- values are HEADER NAMES (as shown to the human), title/amount required, rest optional,
+//   source: 'BMI'|'SESAC'|'ASCAP'|'SOCAN'|'OTHER',
+//   periodMode: 'manual' | 'single_column' | 'year_quarter_columns',
+//   periodColumn?, yearColumn?, quarterColumn?, period? (manual mode's typed value, per-import),
+// }
+// Returns the same { format, meta: {source, period, statementTotal}, lines }
+// shape every other parser in this file returns, so the rest of the import
+// pipeline (dedupe, matchLineToTitles, _bulkInsert) needs zero special-casing.
+function parseWithManualMapping(filePath, mapping) {
+  const content = fs.readFileSync(filePath, 'utf8');
+  const rows = content.split(/\r?\n/);
+  const headerRowIndex = mapping.headerRowIndex || 0;
+  const idx = buildHeaderIndex(rows[headerRowIndex] || '');
+  const g = (f, name) => {
+    if (!name) return null;
+    const i = idx[String(name).trim().toUpperCase()];
+    return (i != null && i < f.length) ? f[i] : null;
+  };
+
+  const lines = [];
+  let statementTotal = 0;
+  const periodCounts = new Map(); // majority vote, same approach as parseASCAP_DOM's period fix
+
+  for (let i = headerRowIndex + 1; i < rows.length; i++) {
+    if (!rows[i] || !rows[i].trim()) continue;
+    const f = splitCsvLine(rows[i]).map(stripQuotes);
+    const title = g(f, mapping.columnMap.title);
+    if (!title || !title.trim()) continue; // stray subtotal/footer rows, same convention as every other parser here
+
+    if (mapping.periodMode === 'single_column' && mapping.periodColumn) {
+      const p = g(f, mapping.periodColumn);
+      if (p) periodCounts.set(p, (periodCounts.get(p) || 0) + 1);
+    } else if (mapping.periodMode === 'year_quarter_columns' && mapping.yearColumn && mapping.quarterColumn) {
+      const y = g(f, mapping.yearColumn), q = g(f, mapping.quarterColumn);
+      if (y && q) { const key = `${y}\u0000${q}`; periodCounts.set(key, (periodCounts.get(key) || 0) + 1); }
+    }
+
+    const amount = parseMoneyAmount(g(f, mapping.columnMap.amount));
+    lines.push({
+      titleRaw: title,
+      titleNormalized: normTitle(title),
+      payeeName: g(f, mapping.columnMap.payeeName) || null,
+      payeeRole: g(f, mapping.columnMap.payeeRole) || null,
+      amount,
+      usageType: g(f, mapping.columnMap.usageType) || null,
+      country: g(f, mapping.columnMap.country) || null,
+      workId: g(f, mapping.columnMap.workId) || null,
+      showName: g(f, mapping.columnMap.showName) || null,
+      episodeName: g(f, mapping.columnMap.episodeName) || null,
+    });
+    statementTotal += amount;
+  }
+
+  let period = mapping.period || null; // manual mode: whatever was typed for this specific import
+  if (mapping.periodMode !== 'manual' && periodCounts.size) {
+    let bestKey = null, bestCount = -1;
+    for (const [key, cnt] of periodCounts) { if (cnt > bestCount) { bestCount = cnt; bestKey = key; } }
+    period = mapping.periodMode === 'year_quarter_columns' ? bestKey.replace('\u0000', 'Q') : bestKey;
+  }
+
+  return {
+    format: 'CUSTOM',
+    meta: { source: mapping.source || 'OTHER', period, statementTotal },
+    lines,
+  };
+}
+
 function parseRoyaltyStatementFile(filePath) {
   const format = sniffFormat(filePath);
   if (format === 'UNKNOWN') return { format, meta: {}, lines: [] };
@@ -851,4 +945,6 @@ module.exports = {
   suggestEpisodeJoin,
   normTitle,
   titleToCamelKey,
+  readRawRowsPreview,
+  parseWithManualMapping,
 };

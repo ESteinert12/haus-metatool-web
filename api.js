@@ -49,7 +49,7 @@ const { Pool }   = require('pg')
 const multer     = require('multer')
 const IntakeIntegration = require('./intake-integration.js')
 const { parseCueSheetFile, matchCueToTitles, normTitle, normTitleStrict, titleToCamelKey } = require('./cue-sheet-import.js')
-const { parseRoyaltyStatementFile, parseEpisodeReferenceFile, matchLineToTitles } = require('./royalty-import.js')
+const { parseRoyaltyStatementFile, parseEpisodeReferenceFile, matchLineToTitles, readRawRowsPreview, parseWithManualMapping } = require('./royalty-import.js')
 
 const compression = require('compression')
 
@@ -1036,6 +1036,30 @@ async function runServerMigrations(pool) {
     await pool.query(`ALTER TABLE royalty_statements ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`)
     await pool.query(`ALTER TABLE royalty_statements ADD COLUMN IF NOT EXISTS deleted_by TEXT`)
     await pool.query(`ALTER TABLE royalty_statements ADD COLUMN IF NOT EXISTS b2_key TEXT`)
+    // 2026-11-11: remembers a human-built column mapping for a statement
+    // format sniffFormat() doesn't recognize, keyed by the exact header-row
+    // text (header_signature, a sha256 of the uppercased/trimmed header
+    // fields -- exact match only, never fuzzy, same "no guessing" posture as
+    // the rest of this importer). Once one file of a new/drifted format has
+    // been mapped through the UI, every later file with the IDENTICAL header
+    // is parsed automatically from this row -- no further human step, and no
+    // app/code update, which was the whole point (Erik's own ask: "I don't
+    // want to have to update the app every time"). See
+    // resolveRoyaltyStatementParse()/royaltyHeaderSignature() below and
+    // royalty-import.js's parseWithManualMapping()/readRawRowsPreview().
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS royalty_format_templates (
+        id                SERIAL PRIMARY KEY,
+        header_signature  TEXT NOT NULL UNIQUE,
+        source            TEXT NOT NULL,          -- 'BMI' | 'SESAC' | 'ASCAP' | 'SOCAN' | 'OTHER', as chosen when mapped
+        label             TEXT,                    -- optional human-friendly name
+        header_row_index  INTEGER NOT NULL DEFAULT 0,
+        column_map        JSONB NOT NULL,           -- { title, amount, payeeName?, ... } -- values are HEADER NAMES
+        period_config     JSONB NOT NULL DEFAULT '{"mode":"manual"}',
+        created_by        TEXT,
+        created_at        TIMESTAMPTZ DEFAULT now()
+      )
+    `)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS royalty_statement_lines (
         id                SERIAL PRIMARY KEY,
@@ -8150,15 +8174,80 @@ app.get('/api/cue-sheets/title-search', async (req, res) => {
 const ROYALTY_LINE_COLS = ['statement_id', 'title_raw', 'title_normalized', 'payee_name', 'payee_role', 'amount',
   'usage_type', 'country', 'work_id', 'show_name', 'episode_name', 'bonus_amount', 'match_status', 'matched_sku_root']
 
-async function importOneRoyaltyStatement(filePath, origName, titlesIndex, importedBy) {
-  const parsed = parseRoyaltyStatementFile(filePath)
+function royaltyHeaderSignature(fields) {
+  return crypto.createHash('sha256').update(fields.map(f => String(f).trim().toUpperCase()).join('|')).digest('hex')
+}
 
-  if (parsed.format === 'UNKNOWN') {
-    return { ok: false, origName, error: `Unrecognized royalty statement format for "${origName}" -- not imported. Known formats: BMI, SESAC (domestic/international), ASCAP (domestic/foreign), SOCAN.` }
+function royaltyTemplateToMapping(t, suppliedPeriod) {
+  const pc = t.period_config || {}
+  return {
+    headerRowIndex: t.header_row_index,
+    columnMap: t.column_map,
+    source: t.source,
+    periodMode: pc.mode,
+    periodColumn: pc.periodColumn || null,
+    yearColumn: pc.yearColumn || null,
+    quarterColumn: pc.quarterColumn || null,
+    period: suppliedPeriod || null,
+  }
+}
+
+// Resolves a file to a parsed { format, meta, lines } result, trying in
+// order: (1) an explicit mapping the human is actively building for THIS
+// file right now, (2) a saved royalty_format_templates match by header
+// signature, re-checked for the first several raw rows of the file since
+// the real header isn't always row 0 (SESAC's own marker-line convention is
+// the proof), (3) the normal sniffFormat()-driven parsers. Returns one of:
+//   { parsed }                                           -- resolved, ready to import
+//   { unknownFormat: true, rowsPreview }                  -- genuinely new, needs a human mapping
+//   { needsPeriod: true, matchedTemplateId, templateLabel } -- matched a template whose period
+//                                                             can't be derived from a column and
+//                                                             wasn't supplied for this import
+async function resolveRoyaltyStatementParse(filePath, { manualMapping, matchedTemplateId, suppliedPeriod } = {}) {
+  if (manualMapping) {
+    return { parsed: parseWithManualMapping(filePath, manualMapping) }
+  }
+  if (matchedTemplateId) {
+    const t = (await _pgRetry(`SELECT * FROM royalty_format_templates WHERE id = $1`, [matchedTemplateId], 'royalty-template by id')).rows[0]
+    if (!t) return { unknownFormat: true, rowsPreview: readRawRowsPreview(filePath, 8) }
+    const mapping = royaltyTemplateToMapping(t, suppliedPeriod)
+    return { parsed: parseWithManualMapping(filePath, mapping), matchedTemplateId: t.id, templateLabel: t.label }
   }
 
+  const sniffed = parseRoyaltyStatementFile(filePath)
+  if (sniffed.format !== 'UNKNOWN') return { parsed: sniffed }
+
+  const rowsPreview = readRawRowsPreview(filePath, 8)
+  for (let i = 0; i < rowsPreview.length; i++) {
+    const signature = royaltyHeaderSignature(rowsPreview[i])
+    const found = (await _pgRetry(`SELECT * FROM royalty_format_templates WHERE header_signature = $1 LIMIT 1`, [signature], 'royalty-template lookup')).rows[0]
+    if (!found) continue
+    if ((found.period_config || {}).mode === 'manual' && !suppliedPeriod) {
+      return { needsPeriod: true, matchedTemplateId: found.id, templateLabel: found.label }
+    }
+    // Use the row index where the signature actually matched in THIS file,
+    // not the template's stored index -- tolerates a file with a different
+    // number of leading blank/metadata lines than the one the template was
+    // first built from, as long as the header row text itself is identical.
+    const mapping = royaltyTemplateToMapping(found, suppliedPeriod)
+    mapping.headerRowIndex = i
+    return { parsed: parseWithManualMapping(filePath, mapping), matchedTemplateId: found.id, templateLabel: found.label }
+  }
+  return { unknownFormat: true, rowsPreview }
+}
+
+async function importOneRoyaltyStatement(filePath, origName, titlesIndex, importedBy, mappingOptions = {}) {
+  const resolved = await resolveRoyaltyStatementParse(filePath, mappingOptions)
+  if (resolved.unknownFormat) {
+    return { ok: false, origName, unknownFormat: true, rowsPreview: resolved.rowsPreview }
+  }
+  if (resolved.needsPeriod) {
+    return { ok: false, origName, needsPeriod: true, matchedTemplateId: resolved.matchedTemplateId, templateLabel: resolved.templateLabel }
+  }
+  const parsed = resolved.parsed
+
   try {
-    return await _pgRetryTransaction(async (client) => {
+    const result = await _pgRetryTransaction(async (client) => {
       // Dedupe on (source, format, period), NOT filename. ASCAP's own export
       // tool names files with an opaque batch ID that carries no period at all
       // (confirmed on real files: "36077668.csv" tells you nothing about which
@@ -8233,6 +8322,39 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
         statementTotal: parsed.meta.statementTotal,
       }
     }, 'royalty-import')
+
+    // Save a reusable template AFTER a successful import of a manually-
+    // mapped, brand-new (not already-templated) format, so the NEXT file
+    // with this exact header is handled with zero human steps from then on.
+    // Deliberately outside the transaction above -- this is a wholly
+    // separate, independent write with no atomicity requirement against the
+    // statement/lines insert, same "best-effort, never block on it" posture
+    // as archiveRoyaltyStatementFileToB2.
+    if (result.ok && mappingOptions.manualMapping && mappingOptions.saveAsTemplate) {
+      try {
+        const m = mappingOptions.manualMapping
+        const headerRowIndex = m.headerRowIndex || 0
+        const rowsPreview = readRawRowsPreview(filePath, headerRowIndex + 1)
+        const headerFields = rowsPreview[headerRowIndex]
+        if (headerFields) {
+          const signature = royaltyHeaderSignature(headerFields)
+          const periodConfig = { mode: m.periodMode, periodColumn: m.periodColumn || null, yearColumn: m.yearColumn || null, quarterColumn: m.quarterColumn || null }
+          const saved = await _pgRetry(
+            `INSERT INTO royalty_format_templates (header_signature, source, label, header_row_index, column_map, period_config, created_by)
+             VALUES ($1,$2,$3,$4,$5,$6,$7)
+             ON CONFLICT (header_signature) DO NOTHING
+             RETURNING id`,
+            [signature, m.source, mappingOptions.templateLabel || null, headerRowIndex, JSON.stringify(m.columnMap), JSON.stringify(periodConfig), importedBy || null],
+            'royalty-template save'
+          )
+          if (saved.rows.length) result.savedTemplateId = saved.rows[0].id
+        }
+      } catch (e) {
+        console.warn('[royalty-template] failed to save (non-fatal, import already committed):', e.message)
+      }
+    }
+
+    return result
   } catch (e) {
     if (e.royaltyDuplicate) {
       return { ok: false, origName, ...e.royaltyDuplicate }
@@ -8251,12 +8373,15 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
 // wording importOneRoyaltyStatement's own err.royaltyDuplicate uses) --
 // the UI disables its confirm button on this, since committing anyway
 // would just bounce off the same check and accomplish nothing.
-async function previewRoyaltyStatement(filePath, origName, titlesIndex) {
-  const parsed = parseRoyaltyStatementFile(filePath)
-
-  if (parsed.format === 'UNKNOWN') {
-    return { ok: false, origName, error: `Unrecognized royalty statement format for "${origName}" -- not imported. Known formats: BMI, SESAC (domestic/international), ASCAP (domestic/foreign), SOCAN.` }
+async function previewRoyaltyStatement(filePath, origName, titlesIndex, mappingOptions = {}) {
+  const resolved = await resolveRoyaltyStatementParse(filePath, mappingOptions)
+  if (resolved.unknownFormat) {
+    return { ok: false, origName, unknownFormat: true, rowsPreview: resolved.rowsPreview }
   }
+  if (resolved.needsPeriod) {
+    return { ok: false, origName, needsPeriod: true, matchedTemplateId: resolved.matchedTemplateId, templateLabel: resolved.templateLabel }
+  }
+  const parsed = resolved.parsed
 
   let duplicateBlock = null
   const dupByPeriod = parsed.meta.period
@@ -8298,6 +8423,8 @@ async function previewRoyaltyStatement(filePath, origName, titlesIndex) {
     unmatched: unmatchedCount,
     statementTotal: parsed.meta.statementTotal,
     duplicateBlock,
+    matchedTemplateId: resolved.matchedTemplateId || null,
+    templateLabel: resolved.templateLabel || null,
   }
 }
 
@@ -8371,7 +8498,12 @@ app.post('/api/royalties/preview', upload.single('file'), async (req, res) => {
     const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-preview titles index')
     const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
     const origName = req.file.originalname || req.file.path
-    const result = await previewRoyaltyStatement(req.file.path, origName, titlesIndex)
+    const mappingOptions = {
+      manualMapping: req.body.manualMapping ? JSON.parse(req.body.manualMapping) : null,
+      matchedTemplateId: req.body.matchedTemplateId || null,
+      suppliedPeriod: req.body.period || null,
+    }
+    const result = await previewRoyaltyStatement(req.file.path, origName, titlesIndex, mappingOptions)
     res.json(result)
   } catch (e) {
     console.error('[royalties/preview]', e.message)
@@ -8388,7 +8520,14 @@ app.post('/api/royalties/import', upload.single('file'), async (req, res) => {
     const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-import titles index')
     const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
     const origName = req.file.originalname || req.file.path
-    const result = await importOneRoyaltyStatement(req.file.path, origName, titlesIndex, req.session?.user?.username)
+    const mappingOptions = {
+      manualMapping: req.body.manualMapping ? JSON.parse(req.body.manualMapping) : null,
+      matchedTemplateId: req.body.matchedTemplateId || null,
+      suppliedPeriod: req.body.period || null,
+      saveAsTemplate: req.body.saveAsTemplate === 'true',
+      templateLabel: req.body.templateLabel || null,
+    }
+    const result = await importOneRoyaltyStatement(req.file.path, origName, titlesIndex, req.session?.user?.username, mappingOptions)
     if (result.ok) {
       const b2Key = await archiveRoyaltyStatementFileToB2(req.file.path, origName, result.source, result.statementId)
       result.archivedToB2 = !!b2Key
