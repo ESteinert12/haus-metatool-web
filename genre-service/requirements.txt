@@ -1,0 +1,7 @@
+tensorflow
+tf-keras
+scikit-learn
+librosa
+soundfile
+joblib
+numpy

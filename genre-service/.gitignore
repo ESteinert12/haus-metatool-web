@@ -1,0 +1,5 @@
+# Data files -- pulled from Dropbox/B2, not committed (see README.md)
+genre_classifier.joblib
+genre_scaler.joblib
+catalog_embeddings_1024.npy
+catalog_embeddings_skus.csv
