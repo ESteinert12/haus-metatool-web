@@ -1161,7 +1161,7 @@ webview{flex:1;border:none}
       <span id="episode-reference-status" style="font-size:11px;color:#4b5a5e"></span>
       <input type="file" id="episode-reference-file-input" accept=".csv" style="display:none" onchange="episodeReferenceUpload(this.files[0])">
       <button class="btn" onclick="document.getElementById('episode-reference-file-input').click()" title="Episode title/code/air-date reference list, used only to suggest an episode match for a human to confirm -- never auto-linked"><i class="ti ti-calendar"></i> Import Episode List</button>
-      <input type="file" id="royalty-file-input" accept=".csv" style="display:none" onchange="royaltyUpload(this.files[0])">
+      <input type="file" id="royalty-file-input" accept=".csv" multiple style="display:none" onchange="royaltyFilesSelected(this.files)">
       <button class="btn btn-primary" onclick="document.getElementById('royalty-file-input').click()"><i class="ti ti-upload"></i> Import Statement</button>
     </div>
     <div style="display:flex;flex:1;overflow:hidden;min-height:0">
@@ -9288,20 +9288,70 @@ function renderRoyaltyList() {
   }).join('')
 }
 
-async function deleteRoyaltyStatement(id) {
-  if (!confirm('Delete this royalty statement and all its lines? This cannot be undone.')) return
-  const r = await fetch(`/api/royalties/${id}`, { method: 'DELETE' }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
-  if (!r.ok) { alert(r.error || 'Delete failed'); return }
-  if (currentRoyaltyStatementId === id) {
-    currentRoyaltyStatementId = null
-    const detail = document.getElementById('royalty-detail')
-    if (detail) detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Select a statement.</div>`
-  }
-  await loadRoyaltiesSection()
-  toast('Royalty statement deleted.', 'info')
+function royaltyFilesSelected(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+  if (files.length === 1) royaltyPreviewSingle(files[0])
+  else royaltyImportBulk(files)
 }
 
-async function royaltyUpload(file) {
+// Single file: parse + dedupe-check only (no DB write -- see
+// /api/royalties/preview), show the user what would be imported, and only
+// write for real once they confirm. Replaces the old straight-to-import
+// behavior, which wrote to the real statement/line tables the instant a
+// file was picked with no review step at all.
+async function royaltyPreviewSingle(file) {
+  const btn = document.querySelector('#section-royalties .btn-primary')
+  if (btn) { btn.disabled = true; btn.textContent = 'Reading…' }
+  try {
+    const fd = new FormData()
+    fd.append('file', file)
+    const r = await fetch('/api/royalties/preview', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+    if (!r.ok) { alert(r.error || 'Could not read file'); return }
+    showRoyaltyPreviewModal(r, file)
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Statement' }
+    document.getElementById('royalty-file-input').value = ''
+  }
+}
+
+function royaltyCloseModal() {
+  document.getElementById('royalty-preview-modal')?.remove()
+}
+
+function showRoyaltyPreviewModal(preview, file) {
+  royaltyCloseModal()
+  window._royaltyPendingFile = file
+  const blockedMsg = preview.duplicateBlock ? `
+    <div style="background:#FDECEA;border:1px solid #c0392b;border-radius:6px;padding:10px 12px;margin-top:12px;font-size:12px;color:#8a2a1f">
+      <b>This import will be blocked:</b> ${esc(preview.duplicateBlock)}
+    </div>` : ''
+  const wrap = document.createElement('div')
+  wrap.id = 'royalty-preview-modal'
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center'
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:8px;padding:22px 26px;width:420px;max-width:92vw;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+      <div style="font-size:15px;font-weight:700;margin-bottom:4px;color:#1a2226">Confirm import</div>
+      <div style="font-size:12px;color:#4b5a5e;margin-bottom:14px;word-break:break-all">${esc(preview.origName)}</div>
+      <div style="font-size:13px;line-height:1.8;color:#1a2226">
+        <div>Format: <b>${esc(preview.format)}</b></div>
+        <div>Period: <b>${esc(preview.period || 'unknown')}</b></div>
+        <div>Lines: <b>${preview.totalLines}</b></div>
+        <div>Statement total: <b>$${Number(preview.statementTotal || 0).toFixed(2)}</b></div>
+        <div>Matched / ambiguous / unmatched: <b>${preview.matched} / ${preview.ambiguous} / ${preview.unmatched}</b></div>
+      </div>
+      ${blockedMsg}
+      <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
+        <button class="btn" onclick="royaltyCloseModal()">Cancel</button>
+        <button class="btn btn-primary" ${preview.duplicateBlock ? 'disabled title="Delete the existing statement first"' : ''} onclick="royaltyConfirmImport()">Confirm import</button>
+      </div>
+    </div>`
+  document.body.appendChild(wrap)
+}
+
+async function royaltyConfirmImport() {
+  const file = window._royaltyPendingFile
+  royaltyCloseModal()
   if (!file) return
   const fd = new FormData()
   fd.append('file', file)
@@ -9314,8 +9364,61 @@ async function royaltyUpload(file) {
     openRoyaltyDetail(r.statementId)
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Statement' }
+    window._royaltyPendingFile = null
+  }
+}
+
+// Multiple files: skip the one-at-a-time preview (impractical for a batch of
+// historical statements) and go straight to /api/royalties/import-bulk,
+// which already existed server-side but had no UI path to reach it before
+// this. Shows a per-file ok/fail summary afterward instead of one alert.
+async function royaltyImportBulk(files) {
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f)
+  const btn = document.querySelector('#section-royalties .btn-primary')
+  if (btn) { btn.disabled = true; btn.textContent = `Importing ${files.length}…` }
+  try {
+    const r = await fetch('/api/royalties/import-bulk', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+    if (!r.ok) { alert(r.error || 'Bulk import failed'); return }
+    showRoyaltyBulkResultModal(r)
+    await loadRoyaltiesSection()
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Statement' }
     document.getElementById('royalty-file-input').value = ''
   }
+}
+
+function showRoyaltyBulkResultModal(r) {
+  royaltyCloseModal()
+  const rows = r.results.map(res => `
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:5px 8px;font-size:11px;word-break:break-all">${esc(res.origName)}</td>
+      <td style="padding:5px 8px;font-size:11px;color:${res.ok ? '#2e7d32' : '#c0392b'};white-space:nowrap">${res.ok ? `OK · ${esc(res.format)} · $${Number(res.statementTotal || 0).toFixed(2)}` : esc(res.error || 'failed')}</td>
+    </tr>`).join('')
+  const wrap = document.createElement('div')
+  wrap.id = 'royalty-preview-modal'
+  wrap.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.4);z-index:9999;display:flex;align-items:center;justify-content:center'
+  wrap.innerHTML = `
+    <div style="background:#fff;border-radius:8px;padding:22px 26px;width:580px;max-width:92vw;max-height:80vh;overflow-y:auto;box-shadow:0 8px 32px rgba(0,0,0,0.3)">
+      <div style="font-size:15px;font-weight:700;margin-bottom:10px;color:#1a2226">Bulk import: ${r.imported} imported, ${r.failed} failed</div>
+      <table style="width:100%;border-collapse:collapse">${rows}</table>
+      <div style="display:flex;justify-content:flex-end;margin-top:14px">
+        <button class="btn btn-primary" onclick="royaltyCloseModal()">Close</button>
+      </div>
+    </div>`
+  document.body.appendChild(wrap)
+}
+
+// Soft delete (see api.js's /api/royalties/:id DELETE comment) -- confirmed
+// once here client-side, then the server marks deleted_at rather than
+// actually removing the row.
+async function deleteRoyaltyStatement(id) {
+  if (!confirm('Delete this royalty statement?\n\nIt will disappear from this list and its lines will no longer be reviewable here. The underlying database row is kept (soft delete), but there is no "undo" button in this UI -- restoring it would need direct database access.')) return
+  const r = await fetch(`/api/royalties/${id}`, { method: 'DELETE' }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Delete failed'); return }
+  currentRoyaltyStatementId = null
+  document.getElementById('royalty-detail').innerHTML = `<div style="color:var(--text3);font-size:13px">Import a royalty statement, or pick one from the list, to review matches.</div>`
+  await loadRoyaltiesSection()
 }
 
 async function openRoyaltyDetail(id) {
@@ -9368,8 +9471,15 @@ function renderRoyaltyLines(lines) {
   }).join('')
 
   const total = lines.reduce((s, l) => s + parseFloat(l.amount), 0)
+  const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
   detail.innerHTML = `
-    <div style="font-size:12px;color:var(--text3);margin-bottom:10px">${lines.length} lines · $${total.toFixed(2)} total</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div style="font-size:12px;color:var(--text3)">${lines.length} lines · $${total.toFixed(2)} total</div>
+      <div style="display:flex;gap:8px">
+        ${stmt?.b2_key ? `<a href="/api/royalties/${currentRoyaltyStatementId}/original" target="_blank" class="btn" style="font-size:11px;padding:4px 8px;text-decoration:none">Download original</a>` : ''}
+        <button class="btn" style="font-size:11px;padding:4px 8px;color:#c0392b" onclick="deleteRoyaltyStatement(${currentRoyaltyStatementId})">Delete statement</button>
+      </div>
+    </div>
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">

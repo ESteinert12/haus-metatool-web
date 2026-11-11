@@ -1029,6 +1029,13 @@ async function runServerMigrations(pool) {
         imported_at     TIMESTAMPTZ DEFAULT now()
       )
     `)
+    // 2026-11-11: soft-delete + B2 archive columns, added via ALTER rather than
+    // in the CREATE above since this table already exists in production --
+    // same ADD COLUMN IF NOT EXISTS pattern used everywhere else in this file
+    // for a live-schema change (e.g. haus_users.role, clients.portal_enabled).
+    await pool.query(`ALTER TABLE royalty_statements ADD COLUMN IF NOT EXISTS deleted_at TIMESTAMPTZ`)
+    await pool.query(`ALTER TABLE royalty_statements ADD COLUMN IF NOT EXISTS deleted_by TEXT`)
+    await pool.query(`ALTER TABLE royalty_statements ADD COLUMN IF NOT EXISTS b2_key TEXT`)
     await pool.query(`
       CREATE TABLE IF NOT EXISTS royalty_statement_lines (
         id                SERIAL PRIMARY KEY,
@@ -8163,7 +8170,7 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
       // parsed out, and catches formats where period parsing might fail/be null).
       const dupByPeriod = parsed.meta.period
         ? await client.query(
-            `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 LIMIT 1`,
+            `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 AND deleted_at IS NULL LIMIT 1`,
             [parsed.meta.source, parsed.format, parsed.meta.period]
           )
         : { rows: [] }
@@ -8176,7 +8183,7 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
         throw err
       }
       const dup = await client.query(
-        `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 LIMIT 1`,
+        `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 AND deleted_at IS NULL LIMIT 1`,
         [origName]
       )
       if (dup.rows.length) {
@@ -8218,6 +8225,7 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
         origName,
         statementId,
         format: parsed.format,
+        source: parsed.meta.source,
         totalLines: parsed.lines.length,
         matched: matchedCount,
         ambiguous: ambiguousCount,
@@ -8233,6 +8241,146 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
   }
 }
 
+// Read-only: parses the file and runs the SAME dedupe checks
+// importOneRoyaltyStatement will run for real, but never writes anything.
+// Lets the UI show format/period/total/match counts and surface a
+// would-be-blocked duplicate BEFORE committing -- added 2026-11-11 after
+// Erik asked for UI failsafes following the ASCAP_DOM/SESAC amount-parsing
+// bugs found in the historical-format dry run. `duplicateBlock`, when set,
+// is the exact reason the real import route would refuse this file (same
+// wording importOneRoyaltyStatement's own err.royaltyDuplicate uses) --
+// the UI disables its confirm button on this, since committing anyway
+// would just bounce off the same check and accomplish nothing.
+async function previewRoyaltyStatement(filePath, origName, titlesIndex) {
+  const parsed = parseRoyaltyStatementFile(filePath)
+
+  if (parsed.format === 'UNKNOWN') {
+    return { ok: false, origName, error: `Unrecognized royalty statement format for "${origName}" -- not imported. Known formats: BMI, SESAC (domestic/international), ASCAP (domestic/foreign), SOCAN.` }
+  }
+
+  let duplicateBlock = null
+  const dupByPeriod = parsed.meta.period
+    ? await _pgRetry(
+        `SELECT id, source_filename, imported_at FROM royalty_statements WHERE source = $1 AND format = $2 AND period = $3 AND deleted_at IS NULL LIMIT 1`,
+        [parsed.meta.source, parsed.format, parsed.meta.period],
+        'royalty-preview dedupe-by-period'
+      )
+    : { rows: [] }
+  if (dupByPeriod.rows.length) {
+    duplicateBlock = `A ${parsed.meta.source} ${parsed.format} statement for period ${parsed.meta.period} is already imported as "${dupByPeriod.rows[0].source_filename}" (statement #${dupByPeriod.rows[0].id}, imported ${dupByPeriod.rows[0].imported_at}). Delete that statement first if this is meant to replace it.`
+  } else {
+    const dup = await _pgRetry(
+      `SELECT id, imported_at FROM royalty_statements WHERE source_filename = $1 AND deleted_at IS NULL LIMIT 1`,
+      [origName],
+      'royalty-preview dedupe-by-filename'
+    )
+    if (dup.rows.length) {
+      duplicateBlock = `"${origName}" was already imported (statement #${dup.rows[0].id}, imported ${dup.rows[0].imported_at}). Delete it first to re-import.`
+    }
+  }
+
+  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+  for (const line of parsed.lines) {
+    const m = matchLineToTitles(line, titlesIndex)
+    if (m.status === 'matched') matchedCount++
+    else if (m.status === 'ambiguous') ambiguousCount++
+    else unmatchedCount++
+  }
+
+  return {
+    ok: true,
+    origName,
+    format: parsed.format,
+    period: parsed.meta.period,
+    totalLines: parsed.lines.length,
+    matched: matchedCount,
+    ambiguous: ambiguousCount,
+    unmatched: unmatchedCount,
+    statementTotal: parsed.meta.statementTotal,
+    duplicateBlock,
+  }
+}
+
+// Best-effort archive of the raw statement file to B2, called AFTER a
+// successful import (the money data is already safely committed to Postgres
+// by the time this runs). Failure here is logged and swallowed, never
+// thrown or surfaced as an import failure -- losing the archival copy is a
+// lesser problem than losing the parsed line data, and B2 may simply not be
+// authorized this session (manual /api/b2/authorize step, not always-on --
+// see b2Auth's own declaration comment). Key is namespaced by the
+// statement's own DB id, not just source_filename, because ASCAP's own
+// export tool reuses opaque batch-id filenames across completely different
+// quarters (confirmed in the historical-format investigation) -- an id
+// prefix makes every key unique regardless.
+let royaltyB2BucketIdCache = null
+async function archiveRoyaltyStatementFileToB2(filePath, origName, source, statementId) {
+  if (!b2Auth) return null
+  try {
+    let bucketId = royaltyB2BucketIdCache
+    if (!bucketId) {
+      const apiH = b2Auth.apiUrl.replace(/^https?:\/\//, '').replace(/\/$/, '')
+      const br = await _b2Request({
+        method: 'GET', hostname: apiH,
+        urlPath: `/b2api/v3/b2_list_buckets?accountId=${b2Auth.accountId}`,
+        headers: { 'Authorization': b2Auth.authorizationToken },
+      })
+      bucketId = (br.body.buckets || []).find(b => b.bucketName === 'haus-music')?.bucketId
+      if (bucketId) royaltyB2BucketIdCache = bucketId
+    }
+    if (!bucketId) { console.warn('[royalty-archive] bucket haus-music not found'); return null }
+
+    const buf = fs.readFileSync(filePath)
+    const up = await _b2GetUploadUrl(bucketId)
+    const sha1 = crypto.createHash('sha1').update(buf).digest('hex')
+    const safeName = String(origName).replace(/[^\w.\- ]/g, '_')
+    const b2Key = `royalty-statements/${source}/${statementId}_${safeName}`
+    const result = await _b2Retry({
+      method: 'POST',
+      hostname: up.uploadUrl.replace(/^https?:\/\/([^/]+).*/, '$1'),
+      urlPath: up.uploadUrl.replace(/^https?:\/\/[^/]+/, ''),
+      isBuffer: true,
+      body: buf,
+      headers: {
+        'Authorization': up.authorizationToken,
+        'X-Bz-File-Name': encodeURIComponent(b2Key).replace(/%2F/g, '/'),
+        'Content-Type': 'text/csv',
+        'X-Bz-Content-Sha1': sha1,
+      },
+    }, `royalty-archive ${safeName}`)
+    const parsed = JSON.parse(result.body.toString())
+    if (result.status !== 200) {
+      console.warn('[royalty-archive] upload failed:', parsed?.message || `HTTP ${result.status}`)
+      return null
+    }
+    if (parsed.contentLength !== buf.length) {
+      console.warn('[royalty-archive] size mismatch after upload -- not trusting it')
+      return null
+    }
+    await _pgRetry(`UPDATE royalty_statements SET b2_key = $1 WHERE id = $2`, [b2Key, statementId], 'royalty-archive store b2_key')
+    return b2Key
+  } catch (e) {
+    console.warn('[royalty-archive] failed (non-fatal, import already committed):', e.message)
+    return null
+  }
+}
+
+app.post('/api/royalties/preview', upload.single('file'), async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  if (!req.file) return res.json({ ok: false, error: 'No file provided' })
+  try {
+    const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-preview titles index')
+    const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
+    const origName = req.file.originalname || req.file.path
+    const result = await previewRoyaltyStatement(req.file.path, origName, titlesIndex)
+    res.json(result)
+  } catch (e) {
+    console.error('[royalties/preview]', e.message)
+    res.json({ ok: false, error: e.message })
+  } finally {
+    try { fs.unlinkSync(req.file.path) } catch {}
+  }
+})
+
 app.post('/api/royalties/import', upload.single('file'), async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   if (!req.file) return res.json({ ok: false, error: 'No file provided' })
@@ -8241,6 +8389,10 @@ app.post('/api/royalties/import', upload.single('file'), async (req, res) => {
     const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
     const origName = req.file.originalname || req.file.path
     const result = await importOneRoyaltyStatement(req.file.path, origName, titlesIndex, req.session?.user?.username)
+    if (result.ok) {
+      const b2Key = await archiveRoyaltyStatementFileToB2(req.file.path, origName, result.source, result.statementId)
+      result.archivedToB2 = !!b2Key
+    }
     fs.unlinkSync(req.file.path)
     res.json(result)
   } catch (e) {
@@ -8262,7 +8414,12 @@ app.post('/api/royalties/import-bulk', upload.array('files', 200), async (req, r
   for (const file of req.files) {
     const origName = file.originalname || file.path
     try {
-      results.push(await importOneRoyaltyStatement(file.path, origName, titlesIndex, importedBy))
+      const result = await importOneRoyaltyStatement(file.path, origName, titlesIndex, importedBy)
+      if (result.ok) {
+        const b2Key = await archiveRoyaltyStatementFileToB2(file.path, origName, result.source, result.statementId)
+        result.archivedToB2 = !!b2Key
+      }
+      results.push(result)
     } catch (e) {
       console.error('[royalties/import-bulk]', origName, e.message)
       results.push({ ok: false, origName, error: e.message })
@@ -8292,6 +8449,7 @@ app.get('/api/royalties', async (req, res) => {
         COALESCE(SUM(l.amount), 0) AS lines_total
       FROM royalty_statements rs
       LEFT JOIN royalty_statement_lines l ON l.statement_id = rs.id
+      WHERE rs.deleted_at IS NULL
       GROUP BY rs.id
       ORDER BY rs.imported_at DESC
     `, [], 'royalties list')
@@ -8299,22 +8457,52 @@ app.get('/api/royalties', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
-// Admin-only -- already covered by isRoyaltyRoute's /royalties* prefix match
-// above, no auth-guard change needed for this one. Cascades to
-// royalty_statement_lines via the FK ON DELETE CASCADE, so one statement is
-// enough.
+// Soft delete -- see the schema comment on deleted_at above for why this
+// isn't a hard DELETE. Excluded from both the list query above and the
+// dedupe checks in importOneRoyaltyStatement/previewRoyaltyStatement, so a
+// genuine re-import of the same period is unblocked without losing the row.
+// (Superseded a plain hard-DELETE version of this same route that was built
+// independently on main on 2026-11-11 while this branch sat unreviewed --
+// this soft-delete version is the one kept, 2026-11-17 merge.)
 app.delete('/api/royalties/:id', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
-  const id = parseInt(req.params.id, 10)
-  if (!id) return res.json({ ok: false, error: 'Invalid statement id' })
   try {
-    const r = await _pgRetry(`DELETE FROM royalty_statements WHERE id = $1`, [id], 'royalties delete')
-    if (!r.rowCount) return res.json({ ok: false, error: 'Statement not found' })
-    console.log(`[royalties] ${req.session.user.username} deleted statement ${id}`)
-    res.json({ ok: true })
+    const r = await _pgRetry(
+      `UPDATE royalty_statements SET deleted_at = now(), deleted_by = $2 WHERE id = $1 AND deleted_at IS NULL RETURNING id`,
+      [req.params.id, req.session?.user?.username || null],
+      'royalty-statement soft-delete'
+    )
+    if (!r.rows.length) return res.json({ ok: false, error: `Statement #${req.params.id} not found (or already deleted)` })
+    res.json({ ok: true, id: r.rows[0].id })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Download the archived original file for a statement, if one was archived
+// (see archiveRoyaltyStatementFileToB2 -- best-effort, so not every
+// statement will have a b2_key, especially ones imported before this
+// feature existed or imported while B2 wasn't authorized).
+app.get('/api/royalties/:id/original', async (req, res) => {
+  if (!pgPool) return res.status(503).json({ error: 'DB not connected' })
+  if (!b2Auth) return res.status(503).json({ error: 'B2 not connected -- click "Connect B2" first' })
+  try {
+    const r = await _pgRetry(
+      `SELECT b2_key, source_filename FROM royalty_statements WHERE id = $1`,
+      [req.params.id],
+      'royalty-statement original lookup'
+    )
+    if (!r.rows.length || !r.rows[0].b2_key) return res.status(404).json({ error: 'No archived original on file for this statement' })
+    const { b2_key, source_filename } = r.rows[0]
+    const downloadHost = b2Auth.downloadUrl.replace(/^https?:\/\//, '')
+    const encodedKey = b2_key.split('/').map(s => encodeURIComponent(s)).join('/')
+    const urlPath = `/file/haus-music/${encodedKey}`
+    const dl = await _b2Get(urlPath, downloadHost, null)
+    if (dl.status !== 200) return res.status(502).json({ error: `B2 download failed, HTTP ${dl.status}` })
+    res.setHeader('Content-Type', 'text/csv')
+    res.setHeader('Content-Disposition', `attachment; filename="${String(source_filename).replace(/"/g, '')}"`)
+    res.send(dl.body)
   } catch (e) {
-    console.error('[royalties/delete]', e.message)
-    res.json({ ok: false, error: e.message })
+    console.error('[royalties/:id/original]', e.message)
+    res.status(500).json({ error: e.message })
   }
 })
 
