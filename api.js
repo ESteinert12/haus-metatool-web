@@ -7851,16 +7851,23 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
       const cueSheetId = sheetRow.rows[0].id
 
       const hausCues = parsed.cues.filter(c => c.isHaus)
-      // matchCueToTitles only ever returns 'matched' | 'ambiguous' | 'unmatched'
-      // (fuzzy/'suggested' matching was removed 2026-10 per Kyle -- see that
-      // function's own comment) -- counts here cover exactly those three.
-      let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+      // matchCueToTitles returns 'matched' | 'ambiguous' | 'unmatched', plus
+      // 'suggested' (added 2026-11-11 -- a bounded, high-confidence-only
+      // fuzzy tier for decoded HAUS_ filenames, see that function's own
+      // comment; NOT a re-introduction of the fuzzy matching removed 2026-10
+      // per Kyle). A 'suggested' cue still stores its candidate's sku_root
+      // so the Confirm button is enabled in the UI, but match_status stays
+      // 'suggested' (shown distinctly, amber) rather than 'matched' (green)
+      // until a human actually clicks Confirm -- never silently treated as
+      // matched here or anywhere downstream.
+      let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0, suggestedCount = 0
       const matchResults = hausCues.map(cue => {
         const m = matchCueToTitles(cue, titlesIndex)
         if (m.status === 'matched') matchedCount++
         else if (m.status === 'ambiguous') ambiguousCount++
+        else if (m.status === 'suggested') suggestedCount++
         else unmatchedCount++
-        const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
+        const matchedSku = (m.status === 'matched' || m.status === 'suggested') && m.candidates.length === 1 ? m.candidates[0].sku_root : null
         return { cue, status: m.status, confidence: m.confidence || null, matchedSku }
       })
 
@@ -7893,6 +7900,7 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
         hausCues: hausCues.length,
         matched: matchedCount,
         ambiguous: ambiguousCount,
+        suggested: suggestedCount,
         unmatched: unmatchedCount,
       }
     }, 'cue-sheets import')
@@ -7986,7 +7994,8 @@ app.get('/api/cue-sheets', async (req, res) => {
         COUNT(c.id) AS cue_count,
         COUNT(c.id) FILTER (WHERE c.match_status = 'confirmed') AS confirmed_count,
         COUNT(c.id) FILTER (WHERE c.match_status = 'unmatched') AS unmatched_count,
-        COUNT(c.id) FILTER (WHERE c.match_status = 'ambiguous') AS ambiguous_count
+        COUNT(c.id) FILTER (WHERE c.match_status = 'ambiguous') AS ambiguous_count,
+        COUNT(c.id) FILTER (WHERE c.match_status = 'suggested') AS suggested_count
       FROM cue_sheets cs
       LEFT JOIN episodes e ON e.id = cs.episode_id
       LEFT JOIN cue_sheet_cues c ON c.cue_sheet_id = cs.id
