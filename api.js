@@ -1886,6 +1886,14 @@ app.post('/api/pg/connect', async (req, res) => {
     await _pgRetry(`ALTER TABLE playlists ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`, [], 'pg-connect playlists client_id').catch(() => {})
     await _pgRetry(`ALTER TABLE lots ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`, [], 'pg-connect lots client_id').catch(() => {})
     await _pgRetry(`ALTER TABLE projects ADD COLUMN IF NOT EXISTS client_id INTEGER REFERENCES clients(id) ON DELETE SET NULL`, [], 'pg-connect projects client_id').catch(() => {})
+    // lots.lot_id had NO index at all (only fm_pk, unrelated) until found and
+    // fixed live 2026-11-17. loadCatalogPG()'s per-title "most recent lot"
+    // LATERAL join to lots was forced into a full sequential scan of lots for
+    // every one of 33,011 titles -- ~4s of the Collection page's load time.
+    // Adding this dropped that query from ~4087ms to ~370ms. Codified here so
+    // a rebuilt/migrated DB gets it automatically; already created live on
+    // the running Neon DB, this statement is now a no-op there.
+    await _pgRetry(`CREATE INDEX IF NOT EXISTS idx_lots_lot_id ON lots(lot_id)`, [], 'pg-connect lots lot_id index').catch(() => {})
     // Persist the connection string for auto-connect on restart
     const cfgPath = path.join(os.homedir(), '.haus-workspace-cfg.json')
     let cfg = {}

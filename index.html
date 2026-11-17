@@ -636,7 +636,7 @@ webview{flex:1;border:none}
     <div id="lr-browse" style="flex:1;display:flex;flex-direction:column;overflow:hidden;min-height:0">
     <div class="search-bar">
       <i class="ti ti-search"></i>
-      <input type="text" placeholder="Search title, composer, SKU…" id="catalog-search" oninput="filterTracks(this.value)">
+      <input type="text" placeholder="Search title, composer, SKU…" id="catalog-search" oninput="filterTracks(this.value)" onkeydown="handleCatalogSearchKeydown(event)">
       <button class="btn" onclick="exportCatalogCSV()"><i class="ti ti-download"></i> Export CSV</button>
       <button class="btn" onclick="showImportDescriptionsModal()" title="Bulk-import descriptions from a CSV file"><i class="ti ti-file-import"></i> Import Descriptions</button>
       <button class="btn" onclick="openSoundMiner()"><i class="ti ti-music"></i> SoundMiner</button>
@@ -3986,7 +3986,19 @@ function onSectionEnter(id) {
   if (id === 'inbox')    initWebview('inbox-inner', cfg.gmail || 'https://mail.google.com', 'email')
   if (id === 'slack')    initWebview('slack-inner', cfg.slack || 'https://app.slack.com', 'slack')
   if (id === 'schedule') { renderSchedule(); loadDayliteSchedule() }
-  if (id === 'catalog')   loadCatalog()
+  if (id === 'catalog')   {
+    // The pg catalog query fetches every active title (tens of thousands of
+    // rows, several joins) -- a few real seconds every time, per Erik's
+    // 2026-11-17 report. Nav back into Collection within the same session
+    // just re-renders from the allTracks already in memory instead of
+    // re-querying; loadCatalog() is still called directly (unchanged) by the
+    // refresh button and by every write path that needs fresh data
+    // (commitLot, deleteTrack, etc.), so this only skips the redundant
+    // re-fetch on a plain nav click, never a real mutation.
+    if (allTracks.length) filterTracks(document.getElementById('catalog-search')?.value || '')
+    else loadCatalog()
+    document.getElementById('catalog-search')?.focus()
+  }
   if (id === 'intake')    { if (intakeStep === 0 && intakeDrops.length === 0) initIntake(); else renderIntake(intakeStep) }
   if (id === 'finish')    loadFinishQueue()
   if (id === 'qa')        loadQA()
@@ -7462,6 +7474,10 @@ function renderTrackList(tracks, skipLabelUpdate = false) {
         ${t.description ? '<div class="track-desc">' + t.description.replace(/&/g,'&amp;').replace(/</g,'&lt;') + '</div>' : ''}
       </div>
       <span class="track-key">${t.key}</span>
+      <button onclick="event.stopPropagation();togglePlayTrack('${sku}',this)" title="Play"
+        style="background:none;border:none;cursor:pointer;padding:2px 4px;color:var(--text3);font-size:16px;line-height:1;flex-shrink:0;display:flex;align-items:center">
+        <i class="ti ti-player-play"></i>
+      </button>
       <button onclick="toggleTrackFlag('${sku}',event)" title="${flagged?'Remove flag':'Flag for audio fix'}"
         style="background:none;border:none;cursor:pointer;padding:2px 4px;color:${flagged?'#e05c5c':'var(--text3)'};font-size:14px;line-height:1;flex-shrink:0">
         <i class="ti ${flagged?'ti-circle-filled':'ti-circle'}"></i>
@@ -8022,6 +8038,18 @@ async function confirmMoveLot(skuRoot, fromLotId, toLotId, toLotName) {
 
 const CATALOG_DISPLAY_LIMIT = 500
 let filterDebounce = null
+// Enter in the catalog search box opens the current top result directly --
+// no need to also click the row. currentDisplayTracks is kept in sync with
+// the live filtered list by renderTrackList(), same list filterTracks()
+// itself renders from.
+function handleCatalogSearchKeydown(e) {
+  if (e.key !== 'Enter') return
+  const t = currentDisplayTracks && currentDisplayTracks[0]
+  if (!t) return
+  const sku = t.sku || t.titleId || ''
+  if (sku) openMetadataEditor(sku)
+}
+
 function filterTracks(q) {
   clearTimeout(filterDebounce)
   filterDebounce = setTimeout(async () => {
