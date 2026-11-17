@@ -2572,8 +2572,8 @@ async function openLotPortal(lotId) {
       </div>
       <button title="Edit metadata" style="border:none;background:none;cursor:pointer;color:var(--text2);font-size:15px;padding:4px;flex-shrink:0"
         onclick="openMetadataEditor('${esc(t.sku_root)}')"><i class="ti ti-pencil"></i></button>
-      <button title="Remove from lot / delete draft" style="border:none;background:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px;flex-shrink:0"
-        onclick="deleteTrack('${esc(t.sku_root)}', ${lotId})"><i class="ti ti-trash"></i></button>
+      ${currentUser?.role === 'admin' ? `<button title="Remove from lot / delete draft" style="border:none;background:none;cursor:pointer;color:var(--text3);font-size:15px;padding:4px;flex-shrink:0"
+        onclick="deleteTrack('${esc(t.sku_root)}', ${lotId})"><i class="ti ti-trash"></i></button>` : ''}
     </div>
   `).join(''))
 }
@@ -8936,12 +8936,28 @@ function renderCueSheetList() {
         style="padding:12px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);${active ? 'background:#E7F0EA' : ''}">
         <div style="font-size:12px;font-weight:600;color:#1a2226">${esc(label)}</div>
         <div style="font-size:10px;color:#4b5a5e;margin-top:2px">${esc(cs.source_filename)} · fmt ${cs.format}</div>
-        <div style="font-size:10px;color:#4b5a5e;margin-top:4px">
-          ${cs.cue_count} cues · ${cs.confirmed_count} confirmed
-          ${warn > 0 ? `<span style="color:#c0392b"> · ${warn} need review</span>` : ''}
+        <div style="font-size:10px;color:#4b5a5e;margin-top:4px;display:flex;align-items:center;gap:8px">
+          <span>${cs.cue_count} cues · ${cs.confirmed_count} confirmed
+          ${warn > 0 ? `<span style="color:#c0392b"> · ${warn} need review</span>` : ''}</span>
+          ${currentUser?.role === 'admin' ? `<button title="Delete cue sheet" onclick="event.stopPropagation();deleteCueSheet(${cs.id})"
+            style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 4px;flex-shrink:0"
+            onmouseenter="this.style.color='#e53'" onmouseleave="this.style.color='var(--text3)'"><i class="ti ti-trash"></i></button>` : ''}
         </div>
       </div>`
   }).join('')
+}
+
+async function deleteCueSheet(id) {
+  if (!confirm('Delete this cue sheet and all its matched cues? This cannot be undone.')) return
+  const r = await fetch(`/api/cue-sheets/${id}`, { method: 'DELETE' }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Delete failed'); return }
+  if (currentCueSheetId === id) {
+    currentCueSheetId = null
+    const detail = document.getElementById('cuesheet-detail')
+    if (detail) detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Select a cue sheet.</div>`
+  }
+  await loadCueSheetsSection()
+  toast('Cue sheet deleted.', 'info')
 }
 
 async function cueSheetUpload(file) {
@@ -9176,12 +9192,28 @@ function renderRoyaltyList() {
           ${reconciled ? `<span style="font-size:9px;font-weight:700;color:#2e7d32;background:#E7F0EA;border-radius:3px;padding:1px 5px;margin-left:6px;vertical-align:middle">RECONCILED</span>` : ''}
         </div>
         <div style="font-size:10px;color:#4b5a5e;margin-top:2px">${esc(rs.source_filename)} · fmt ${rs.format}</div>
-        <div style="font-size:10px;color:#4b5a5e;margin-top:4px">
-          ${rs.line_count} lines · $${parseFloat(rs.lines_total).toFixed(2)} · ${rs.confirmed_count} confirmed
-          ${warn > 0 ? `<span style="color:#c0392b"> · ${warn} need review</span>` : ''}
+        <div style="font-size:10px;color:#4b5a5e;margin-top:4px;display:flex;align-items:center;gap:8px">
+          <span>${rs.line_count} lines · $${parseFloat(rs.lines_total).toFixed(2)} · ${rs.confirmed_count} confirmed
+          ${warn > 0 ? `<span style="color:#c0392b"> · ${warn} need review</span>` : ''}</span>
+          ${currentUser?.role === 'admin' ? `<button title="Delete statement" onclick="event.stopPropagation();deleteRoyaltyStatement(${rs.id})"
+            style="margin-left:auto;background:none;border:none;cursor:pointer;color:var(--text3);font-size:13px;padding:2px 4px;flex-shrink:0"
+            onmouseenter="this.style.color='#e53'" onmouseleave="this.style.color='var(--text3)'"><i class="ti ti-trash"></i></button>` : ''}
         </div>
       </div>`
   }).join('')
+}
+
+async function deleteRoyaltyStatement(id) {
+  if (!confirm('Delete this royalty statement and all its lines? This cannot be undone.')) return
+  const r = await fetch(`/api/royalties/${id}`, { method: 'DELETE' }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Delete failed'); return }
+  if (currentRoyaltyStatementId === id) {
+    currentRoyaltyStatementId = null
+    const detail = document.getElementById('royalty-detail')
+    if (detail) detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Select a statement.</div>`
+  }
+  await loadRoyaltiesSection()
+  toast('Royalty statement deleted.', 'info')
 }
 
 async function royaltyUpload(file) {

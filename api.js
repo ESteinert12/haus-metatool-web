@@ -281,7 +281,13 @@ app.use('/api', (req, res, next) => {
   // guards, not a new pattern.
   const isRoyaltyRoute = req.path === '/royalties' || req.path.startsWith('/royalties/') ||
                          req.path === '/episode-reference' || req.path.startsWith('/episode-reference/')
-  if ((ADMIN_ROUTES.includes(sig) || isRoyaltyRoute) && req.session.user.role !== 'admin') {
+  // Cue sheet deletion: admin-only, same reasoning as the royalty tracker above
+  // (destructive, can't be expressed in ADMIN_ROUTES' exact-string match because
+  // of the :id param) -- GET /cue-sheets* stays open to everyone, only the
+  // DELETE verb is gated. Erik's call, 2026-11-11.
+  const isCueSheetDeleteRoute = req.method === 'DELETE' &&
+                         (req.path === '/cue-sheets' || req.path.startsWith('/cue-sheets/'))
+  if ((ADMIN_ROUTES.includes(sig) || isRoyaltyRoute || isCueSheetDeleteRoute) && req.session.user.role !== 'admin') {
     console.warn(`[authz] ${req.session.user.username} denied ${sig} (role=${req.session.user.role})`)
     return res.status(403).json({ ok: false, error: 'Admin only' })
   }
@@ -8006,6 +8012,24 @@ app.get('/api/cue-sheets', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
+// Admin-only (gated above by isCueSheetDeleteRoute, not ADMIN_ROUTES -- see
+// that comment). Cascades to cue_sheet_cues -> cue_sheet_cue_parties via the
+// FK ON DELETE CASCADE chain, so one statement is enough.
+app.delete('/api/cue-sheets/:id', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  const id = parseInt(req.params.id, 10)
+  if (!id) return res.json({ ok: false, error: 'Invalid cue sheet id' })
+  try {
+    const r = await _pgRetry(`DELETE FROM cue_sheets WHERE id = $1`, [id], 'cue-sheets delete')
+    if (!r.rowCount) return res.json({ ok: false, error: 'Cue sheet not found' })
+    console.log(`[cue-sheets] ${req.session.user.username} deleted cue sheet ${id}`)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[cue-sheets/delete]', e.message)
+    res.json({ ok: false, error: e.message })
+  }
+})
+
 // Per-cue detail: the matched title's real team_writers splits, side by side
 // with what the cue sheet itself reported, so a mismatch is visible at a glance.
 app.get('/api/cue-sheets/:id/cues', async (req, res) => {
@@ -8266,6 +8290,25 @@ app.get('/api/royalties', async (req, res) => {
     `, [], 'royalties list')
     res.json({ ok: true, statements: r.rows })
   } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Admin-only -- already covered by isRoyaltyRoute's /royalties* prefix match
+// above, no auth-guard change needed for this one. Cascades to
+// royalty_statement_lines via the FK ON DELETE CASCADE, so one statement is
+// enough.
+app.delete('/api/royalties/:id', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  const id = parseInt(req.params.id, 10)
+  if (!id) return res.json({ ok: false, error: 'Invalid statement id' })
+  try {
+    const r = await _pgRetry(`DELETE FROM royalty_statements WHERE id = $1`, [id], 'royalties delete')
+    if (!r.rowCount) return res.json({ ok: false, error: 'Statement not found' })
+    console.log(`[royalties] ${req.session.user.username} deleted statement ${id}`)
+    res.json({ ok: true })
+  } catch (e) {
+    console.error('[royalties/delete]', e.message)
+    res.json({ ok: false, error: e.message })
+  }
 })
 
 app.get('/api/royalties/:id/lines', async (req, res) => {
