@@ -9320,6 +9320,7 @@ async function confirmCueMatch(cueId, skuRoot) {
 // ── Royalties tab (added 2026-10, separate track from EBR/cue sheets) ──────
 let royaltyStatementsCache = []
 let currentRoyaltyStatementId = null
+let currentRoyaltyLines = []   // lines for currentRoyaltyStatementId, kept in sync by confirmRoyaltyMatch
 
 async function loadRoyaltiesSection() {
   const r = await fetch('/api/royalties').then(r => r.json()).catch(() => ({ ok: false }))
@@ -9769,6 +9770,7 @@ async function openRoyaltyDetail(id) {
   detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Loading…</div>`
   const r = await fetch(`/api/royalties/${id}/lines`).then(r => r.json()).catch(() => ({ ok: false }))
   if (!r.ok) { detail.innerHTML = `<div style="color:#c0392b;font-size:12px">${r.error || 'Failed to load lines'}</div>`; return }
+  currentRoyaltyLines = r.lines
   renderRoyaltyLines(r.lines)
 }
 
@@ -9858,16 +9860,90 @@ async function confirmRoyaltyMatch(lineId, skuRoot, applyToAllInStatement) {
     body: JSON.stringify({ sku_root: skuRoot, applyToAllInStatement: !!applyToAllInStatement })
   }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
   if (!r.ok) { alert(r.error || 'Confirm failed -- the line was not changed, try again.'); return }
-  await loadRoyaltiesSection()
-  openRoyaltyDetail(currentRoyaltyStatementId)
-  if (applyToAllInStatement && r.appliedToCount) {
-    // Lightweight confirmation -- openRoyaltyDetail already re-renders the
-    // table with updated statuses, this just surfaces the count.
-    const detail = document.getElementById('royalty-detail')
-    const banner = document.createElement('div')
-    banner.style.cssText = 'background:#E7F0EA;border:1px solid #2e7d32;border-radius:6px;padding:8px 10px;font-size:12px;color:#2e7d32;margin-bottom:10px'
-    banner.textContent = `Applied this match to ${r.appliedToCount} other line${r.appliedToCount === 1 ? '' : 's'} with the same title.`
-    detail.prepend(banner)
+
+  // 2026-11-17: this used to be `await loadRoyaltiesSection(); openRoyaltyDetail(...)`
+  // -- same full-teardown pattern as confirmCueMatch had (this function was
+  // literally copied from that one, per the 2026-11-04 comment above), fixed
+  // there first. See that fix's comment for the full rationale.
+  const line = currentRoyaltyLines.find(l => l.id === lineId)
+  const newStatus = skuRoot ? 'confirmed' : 'rejected'
+  const sameMatch = line && line.matched_sku_root === skuRoot
+
+  const bucketKey = s => s === 'confirmed' ? 'confirmed_count' : s === 'unmatched' ? 'unmatched_count' : s === 'ambiguous' ? 'ambiguous_count' : null
+  const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
+  const bumpCount = (oldStatus, status) => {
+    if (!stmt) return
+    const oldKey = bucketKey(oldStatus), newKey = bucketKey(status)
+    if (oldKey) stmt[oldKey] = String(Math.max(0, parseInt(stmt[oldKey] || 0) - 1))
+    if (newKey) stmt[newKey] = String(parseInt(stmt[newKey] || 0) + 1)
+  }
+
+  if (sameMatch) {
+    // The plain "Confirm" button always re-confirms the match already shown
+    // -- matched_title is unchanged, so this (and, with "Confirm + N more",
+    // every sibling line it applies to -- they're all being set to this
+    // SAME skuRoot, so line.matched_title is correct for them too) can be
+    // updated straight from memory with zero refetch.
+    bumpCount(line.match_status, newStatus)
+    line.match_status = newStatus
+    let appliedToCount = 0
+    if (applyToAllInStatement && line.title_normalized) {
+      for (const sib of currentRoyaltyLines) {
+        if (sib.id !== lineId && sib.title_normalized === line.title_normalized &&
+            (sib.match_status === 'unmatched' || sib.match_status === 'ambiguous')) {
+          bumpCount(sib.match_status, newStatus)
+          sib.matched_sku_root = skuRoot
+          sib.matched_title = line.matched_title
+          sib.match_status = newStatus
+          appliedToCount++
+        }
+      }
+      // sameTitleUnresolvedCount (drives the "Confirm + N more" button) is
+      // now stale for every remaining line sharing this title -- recompute
+      // it the same way the server does, from the cache we just patched.
+      const stillUnresolved = currentRoyaltyLines.filter(l =>
+        l.title_normalized === line.title_normalized && (l.match_status === 'unmatched' || l.match_status === 'ambiguous'))
+      for (const l of currentRoyaltyLines) {
+        if (l.title_normalized === line.title_normalized) {
+          l.sameTitleUnresolvedCount = Math.max(0, stillUnresolved.length - (l.match_status === 'unmatched' || l.match_status === 'ambiguous' ? 1 : 0))
+        }
+      }
+    }
+    renderRoyaltyList()
+    renderRoyaltyLines(currentRoyaltyLines)
+    if (appliedToCount) {
+      const detail = document.getElementById('royalty-detail')
+      const banner = document.createElement('div')
+      banner.style.cssText = 'background:#E7F0EA;border:1px solid #2e7d32;border-radius:6px;padding:8px 10px;font-size:12px;color:#2e7d32;margin-bottom:10px'
+      banner.textContent = `Applied this match to ${appliedToCount} other line${appliedToCount === 1 ? '' : 's'} with the same title.`
+      detail.prepend(banner)
+    }
+    return
+  }
+
+  // Overriding to a DIFFERENT title changes matched_title (and, with "apply
+  // to all", every sibling line's matched_title too) -- that only exists
+  // server-side, so this path still needs a real refetch. It no longer
+  // blanks the pane to "Loading..." first, and restores scroll position.
+  // (Sidebar counts for this one rare combination -- override AND apply to
+  // all -- settle on the next full list load rather than being computed
+  // exactly here; only this one line's own bucket is adjusted below.)
+  if (line) bumpCount(line.match_status, newStatus)
+  renderRoyaltyList()
+  const detailEl = document.getElementById('royalty-detail')
+  const scrollTop = detailEl?.scrollTop || 0
+  const dr = await fetch(`/api/royalties/${currentRoyaltyStatementId}/lines`).then(r => r.json()).catch(() => ({ ok: false }))
+  if (dr.ok) {
+    currentRoyaltyLines = dr.lines
+    renderRoyaltyLines(dr.lines)
+    if (detailEl) detailEl.scrollTop = scrollTop
+    if (applyToAllInStatement && r.appliedToCount) {
+      const detail = document.getElementById('royalty-detail')
+      const banner = document.createElement('div')
+      banner.style.cssText = 'background:#E7F0EA;border:1px solid #2e7d32;border-radius:6px;padding:8px 10px;font-size:12px;color:#2e7d32;margin-bottom:10px'
+      banner.textContent = `Applied this match to ${r.appliedToCount} other line${r.appliedToCount === 1 ? '' : 's'} with the same title.`
+      detail.prepend(banner)
+    }
   }
 }
 
