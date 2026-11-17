@@ -461,6 +461,7 @@ webview{flex:1;border:none}
       <div style="flex:1">
         <div style="font-size:13px;font-weight:700;color:#1a2226" id="lot-portal-name">Lot</div>
         <div style="font-size:11px;color:#3a4f56" id="lot-portal-meta"></div>
+        <div style="font-size:11px;color:#3a4f56;margin-top:2px" id="lot-portal-rollup"></div>
       </div>
       <button style="border:none;background:none;cursor:pointer;font-size:18px;color:#3a4f56;padding:0 4px" onclick="closeLotPortal()" title="Close">×</button>
     </div>
@@ -2535,7 +2536,7 @@ async function openLotPortal(lotId) {
   const panel = document.getElementById('lot-portal-panel')
   if (panel) { panel.style.display = 'flex'; panel.style.flexDirection = 'column' }
 
-  const [metaRows, trackRows] = await Promise.all([
+  const rollupQueries = [
     pgQ(`SELECT lot_name, client, track_limit FROM lots WHERE lot_id=$1`, [lotId]),
     pgQ(`
       SELECT t.sku_root, t.title, t.key, t.composer_id, c.full_name, t.primary_genre_id, t.secondary_genre_id, pg.primary_genre_name, sg.secondary_genre_name
@@ -2546,8 +2547,25 @@ async function openLotPortal(lotId) {
       LEFT JOIN secondary_genres sg ON sg.secondary_genre_id = t.secondary_genre_id
       WHERE lt.lot_id = $1
       ORDER BY lt.added_at DESC
-    `, [lotId])
-  ])
+    `, [lotId]),
+    pgQ(`
+      SELECT COUNT(*) AS usage_count
+      FROM cue_sheet_cues csc
+      WHERE csc.match_status = 'confirmed'
+        AND csc.matched_sku_root IN (SELECT sku_root FROM lot_titles WHERE lot_id = $1)
+    `, [lotId]),
+  ]
+  // Confirmed $ earned is admin-only -- same posture as the per-title
+  // royalty panel -- so don't even issue the query for a non-admin session.
+  if (currentUser?.role === 'admin') {
+    rollupQueries.push(pgQ(`
+      SELECT COALESCE(SUM(rsl.amount), 0) AS total
+      FROM royalty_statement_lines rsl
+      WHERE rsl.match_status = 'confirmed'
+        AND rsl.matched_sku_root IN (SELECT sku_root FROM lot_titles WHERE lot_id = $1)
+    `, [lotId]))
+  }
+  const [metaRows, trackRows, usageRows, earningsRows] = await Promise.all(rollupQueries)
 
   const lot = metaRows?.[0]
   const tracks = trackRows || []
@@ -2556,6 +2574,13 @@ async function openLotPortal(lotId) {
   const listEl = document.getElementById('lot-portal-list')
   if (nameEl) nameEl.textContent = lot?.lot_name || 'Lot'
   if (metaEl) metaEl.textContent = `${tracks.length} draft track${tracks.length !== 1 ? 's' : ''}${lot?.client ? ' · ' + lot.client : ''}${lot?.track_limit ? ' · limit ' + lot.track_limit : ''}`
+  const rollupEl = document.getElementById('lot-portal-rollup')
+  if (rollupEl) {
+    const usageCount = Number(usageRows?.[0]?.usage_count || 0)
+    const usagePart = `aired ${usageCount} time${usageCount !== 1 ? 's' : ''} (confirmed)`
+    const earningsPart = earningsRows ? ` · earned $${Number(earningsRows[0]?.total || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (confirmed)` : ''
+    rollupEl.textContent = `${usagePart}${earningsPart}`
+  }
   if (!listEl) return
 
   if (!tracks.length) {
