@@ -1038,12 +1038,20 @@ async function runServerMigrations(pool) {
       CREATE TABLE IF NOT EXISTS cue_writer_flags (
         id            SERIAL PRIMARY KEY,
         cue_id        INTEGER NOT NULL REFERENCES cue_sheet_cues(id) ON DELETE CASCADE,
-        mismatch_name TEXT NOT NULL,   -- the reported/on-file name that was flagged, as-is (not normalized -- shown verbatim in the review list)
+        mismatch_name TEXT,   -- the reported/on-file name that was flagged, as-is (not normalized -- shown verbatim in the review list). NULL means a whole-cue flag (see below), not tied to one writer name.
         note          TEXT,
         flagged_by    TEXT,
         flagged_at    TIMESTAMPTZ DEFAULT now()
       )
     `)
+    // mismatch_name was NOT NULL when this table first shipped earlier
+    // tonight (2026-11-17); loosened the same day, before any real flag row
+    // existed, to also support a whole-cue flag with no specific writer name
+    // attached (Erik: "there are some songs that are registered wrong in the
+    // collection but we have to keep the split because it aired" -- a
+    // registration-is-known-wrong-but-can't-touch-it note that isn't about
+    // any one writer). ALTER is a no-op once applied; harmless to repeat.
+    await pool.query(`ALTER TABLE cue_writer_flags ALTER COLUMN mismatch_name DROP NOT NULL`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_writer_flags_cue ON cue_writer_flags(cue_id)`)
     console.log('✅ cue sheet verification tables ready')
   } catch (e) { console.warn('[schema] cue sheet tables:', e.message) }
@@ -8297,12 +8305,17 @@ app.post('/api/writer-aliases', async (req, res) => {
 
 // "Flag" button (added 2026-11-17) -- for a splits mismatch that's a real
 // problem, not a naming variant an alias would fix. One row per (cue, name).
+// `name` is now optional (2026-11-17, same day): omitting it records a
+// whole-cue flag instead -- "something about this song is wrong" with
+// nothing tied to one writer, e.g. a known-bad registration that can't be
+// corrected because it already aired with that split. Same table, same
+// review list, just a NULL mismatch_name.
 app.post('/api/cue-sheets/cues/:id/flag-writer', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
-    const name = String(req.body?.name || '').trim()
-    if (!name) return res.json({ ok: false, error: 'name is required' })
+    const name = String(req.body?.name || '').trim() || null
     const note = req.body?.note ? String(req.body.note).trim() || null : null
+    if (!name && !note) return res.json({ ok: false, error: 'A note is required when flagging the whole song (no specific writer name)' })
     await _pgRetry(
       `INSERT INTO cue_writer_flags (cue_id, mismatch_name, note, flagged_by) VALUES ($1, $2, $3, $4)`,
       [req.params.id, name, note, req.session?.user?.username || null], 'cue-sheets flag writer'
