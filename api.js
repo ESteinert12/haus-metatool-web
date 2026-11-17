@@ -1010,6 +1010,41 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cues_sheet ON cue_sheet_cues(cue_sheet_id)`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cues_sku ON cue_sheet_cues(matched_sku_root)`)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cue_parties_cue ON cue_sheet_cue_parties(cue_id)`)
+    // Writer-name aliases (added 2026-11-17, Erik: "Steve Mayone = Stephen
+    // Mayone") -- display-only. splitsMismatch() in index.html compares a
+    // cue sheet's reported writer names against team_writers by exact
+    // normalized string match, so a nickname/spelling variant shows as a
+    // false "not on file" warning. This table lets that comparison resolve
+    // known variants first. Deliberately NOT wired into any actual
+    // title/SKU matching or payment logic -- both cue sheets and royalty
+    // statements match by TITLE, never by writer name, so this has zero
+    // effect on anything financial. Managed via scripts/add-writer-alias.js,
+    // same "quick admin script, no UI" posture as create-user.js.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS writer_aliases (
+        id             SERIAL PRIMARY KEY,
+        alias          TEXT NOT NULL UNIQUE,  -- normalized (trim + collapsed whitespace + lowercase) variant name
+        canonical_name TEXT NOT NULL,         -- normalized real name, as it appears (after the same normalization) in team_writers.writer_name
+        created_at     TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    // "Flag" button (added 2026-11-17, Erik: "we also need a flag button if
+    // something is truly not right") -- for a writer-splits mismatch that
+    // ISN'T a naming variant (an alias wouldn't be appropriate), so it can be
+    // marked for follow-up instead of just sitting there unreviewed forever.
+    // One row per (cue, name) flagged. Resolved by deleting the row (see
+    // DELETE /api/cue-sheets/flags/:id) once someone's dealt with it.
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS cue_writer_flags (
+        id            SERIAL PRIMARY KEY,
+        cue_id        INTEGER NOT NULL REFERENCES cue_sheet_cues(id) ON DELETE CASCADE,
+        mismatch_name TEXT NOT NULL,   -- the reported/on-file name that was flagged, as-is (not normalized -- shown verbatim in the review list)
+        note          TEXT,
+        flagged_by    TEXT,
+        flagged_at    TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_writer_flags_cue ON cue_writer_flags(cue_id)`)
     console.log('✅ cue sheet verification tables ready')
   } catch (e) { console.warn('[schema] cue sheet tables:', e.message) }
 
@@ -8186,15 +8221,22 @@ app.get('/api/cue-sheets/:id/cues', async (req, res) => {
       ? await _pgRetry(`SELECT id, team_id, writer_name, pro, split_pct, ipi FROM team_writers WHERE team_id = ANY($1::text[]) ORDER BY team_id, id`, [teamIds], 'cue-sheets team writers')
       : { rows: [] }
 
+    const flagsRes = cueIds.length
+      ? await _pgRetry(`SELECT id, cue_id, mismatch_name FROM cue_writer_flags WHERE cue_id = ANY($1::int[])`, [cueIds], 'cue-sheets writer flags')
+      : { rows: [] }
+
     const partiesByCue = {}
     for (const p of partiesRes.rows) (partiesByCue[p.cue_id] ||= []).push(p)
     const writersByTeam = {}
     for (const w of writersRes.rows) (writersByTeam[w.team_id] ||= []).push(w)
+    const flagsByCue = {}
+    for (const f of flagsRes.rows) (flagsByCue[f.cue_id] ||= []).push({ id: f.id, name: f.mismatch_name })
 
     const cues = cuesRes.rows.map(c => ({
       ...c,
       parties: partiesByCue[c.id] || [],
       catalogWriters: c.matched_team_id ? (writersByTeam[c.matched_team_id] || []) : [],
+      flags: flagsByCue[c.id] || [],   // [{id, name}] -- open writer-mismatch flags on this cue
     }))
     res.json({ ok: true, cues, episode, siblingSheets })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -8218,6 +8260,96 @@ app.post('/api/cue-sheets/cues/:id/confirm', async (req, res) => {
 })
 
 // Search titles for the manual-override picker (same style as other search-to-link UI in this app)
+// Small, rarely-changing lookup table -- fetched once by the client and
+// cached (loadWriterAliasMap() in index.html), same pattern as the RMO-moods
+// map. Open to any logged-in user: it only affects a display-only mismatch
+// warning on a tab (Cue Sheets) that isn't admin-gated.
+app.get('/api/writer-aliases', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const r = await _pgRetry(`SELECT alias, canonical_name FROM writer_aliases ORDER BY alias`, [], 'writer-aliases list')
+    res.json({ ok: true, aliases: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Fast path for the Cue Sheets "Save alias" quick-fix button (added
+// 2026-11-17) -- same upsert add-writer-alias.js does, just reachable from
+// the UI instead of a terminal. Still display-only: see writer_aliases
+// table comment in the schema-init block above. Not admin-gated, matching
+// the GET route and the rest of the (non-admin) Cue Sheets tab.
+app.post('/api/writer-aliases', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const norm = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase()
+    const alias = norm(req.body?.alias)
+    const canonical = norm(req.body?.canonical)
+    if (!alias || !canonical) return res.json({ ok: false, error: 'alias and canonical are both required' })
+    if (alias === canonical) return res.json({ ok: false, error: 'alias and canonical name are the same after normalizing' })
+    const r = await _pgRetry(
+      `INSERT INTO writer_aliases (alias, canonical_name) VALUES ($1, $2)
+       ON CONFLICT (alias) DO UPDATE SET canonical_name = EXCLUDED.canonical_name
+       RETURNING alias, canonical_name`,
+      [alias, canonical], 'writer-aliases upsert'
+    )
+    res.json({ ok: true, alias: r.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// "Flag" button (added 2026-11-17) -- for a splits mismatch that's a real
+// problem, not a naming variant an alias would fix. One row per (cue, name).
+app.post('/api/cue-sheets/cues/:id/flag-writer', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const name = String(req.body?.name || '').trim()
+    if (!name) return res.json({ ok: false, error: 'name is required' })
+    const note = req.body?.note ? String(req.body.note).trim() || null : null
+    await _pgRetry(
+      `INSERT INTO cue_writer_flags (cue_id, mismatch_name, note, flagged_by) VALUES ($1, $2, $3, $4)`,
+      [req.params.id, name, note, req.session?.user?.username || null], 'cue-sheets flag writer'
+    )
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Clears a flag once someone's dealt with it (used by both the per-cue
+// "unflag" control and the Flagged-mismatches review list).
+// IMPORTANT: deliberately NOT under /api/cue-sheets/... -- the admin-gate
+// middleware above treats every DELETE whose path starts with /cue-sheets/
+// as cue-sheet deletion and requires admin (Erik's call, 2026-11-11, for
+// actually deleting a cue sheet). Resolving a writer-mismatch flag is a
+// routine non-admin action, so this lives under its own /writer-flags path
+// instead of accidentally inheriting that gate.
+app.delete('/api/writer-flags/:id', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    await _pgRetry(`DELETE FROM cue_writer_flags WHERE id = $1`, [req.params.id], 'cue-sheets flag delete')
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Review list (added 2026-11-17, Erik: "flag it ... surface it in a review
+// list") -- every open (unresolved) writer-mismatch flag across all cue
+// sheets, newest first, with enough context (sheet filename, cue title) to
+// jump back to the right place via openCueSheetDetail(). Kept at
+// /api/writer-flags (not /api/cue-sheets/flags) for the same reason as the
+// DELETE route above -- GET isn't affected by the DELETE-only gate, but
+// keeping both under one path is less surprising than splitting them.
+app.get('/api/writer-flags', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const r = await _pgRetry(
+      `SELECT f.id, f.cue_id, f.mismatch_name, f.note, f.flagged_by, f.flagged_at,
+              c.cue_sheet_id, c.title_raw, cs.source_filename
+       FROM cue_writer_flags f
+       JOIN cue_sheet_cues c ON c.id = f.cue_id
+       JOIN cue_sheets cs ON cs.id = c.cue_sheet_id
+       ORDER BY f.flagged_at DESC`,
+      [], 'cue-sheets flags list'
+    )
+    res.json({ ok: true, flags: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
 app.get('/api/cue-sheets/title-search', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {

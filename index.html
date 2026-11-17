@@ -1143,6 +1143,10 @@ webview{flex:1;border:none}
       <span style="font-size:11px;color:#4b5a5e">Import cue sheets from production companies/PROs, match against the catalog, verify splits.</span>
       <div style="flex:1"></div>
       <input type="file" id="cuesheet-file-input" accept=".csv,.xlsx,.xlsm" multiple style="display:none" onchange="cueSheetFilesSelected(this.files)">
+      <button class="btn" onclick="renderWriterFlagsPanel()" title="Writer-splits mismatches flagged as a real problem, not a naming variant">
+        <i class="ti ti-flag"></i> Flagged
+        <span id="writer-flags-badge" style="display:none;background:#c0392b;color:#fff;border-radius:10px;padding:0 6px;font-size:10px;margin-left:4px"></span>
+      </button>
       <button class="btn btn-primary" onclick="document.getElementById('cuesheet-file-input').click()"><i class="ti ti-upload"></i> Import Cue Sheet</button>
     </div>
     <div style="display:flex;flex:1;overflow:hidden;min-height:0">
@@ -9004,6 +9008,32 @@ let currentCueSheetCues = []        // cues for currentCueSheetId, kept in sync 
 let currentCueSheetEpisode = null
 let currentCueSheetSiblings = []
 
+// Writer-name aliases (e.g. "steve mayone" -> "stephen mayone"), added
+// 2026-11-17 so splitsMismatch()'s on-file/reported comparison doesn't flag
+// a known nickname/spelling variant as "not on file." Display-only: never
+// consulted by title/SKU matching or any royalty logic. Managed via
+// scripts/add-writer-alias.js (no in-app UI, by design). Loaded once and
+// cached, same lazy-small-lookup-map pattern as rmoMoodsMap.
+let writerAliasMap = {}   // normalized alias -> normalized canonical name
+
+async function loadWriterAliasMap() {
+  const r = await fetch('/api/writer-aliases').then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) return
+  writerAliasMap = {}
+  ;(r.aliases || []).forEach(a => { writerAliasMap[a.alias] = a.canonical_name })
+}
+
+function normalizeWriterName(name) {
+  return String(name || '').trim().replace(/\s+/g, ' ').toLowerCase()
+}
+
+// Resolves a writer name to its canonical form if it's a known alias,
+// otherwise returns the normalized name unchanged.
+function resolveWriterAlias(name) {
+  const n = normalizeWriterName(name)
+  return writerAliasMap[n] || n
+}
+
 async function loadCueSheetsSection() {
   const r = await fetch('/api/cue-sheets').then(r => r.json()).catch(() => ({ ok: false }))
   if (!r.ok) {
@@ -9012,6 +9042,118 @@ async function loadCueSheetsSection() {
   }
   cueSheetsCache = r.cueSheets
   renderCueSheetList()
+  if (!Object.keys(writerAliasMap).length) loadWriterAliasMap()
+  loadWriterFlagsBadge()
+}
+
+// ── Writer-mismatch flags ("truly not right", not a naming variant) ───────
+// Added 2026-11-17 alongside the alias quick-fix below, per Erik: "we also
+// need a flag button if something is truly not right." One row per (cue,
+// name); resolved (deleted) from either the per-cue "Unflag" control or the
+// review list below.
+let writerFlagsCache = []
+
+async function loadWriterFlagsBadge() {
+  const r = await fetch('/api/writer-flags').then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) return
+  writerFlagsCache = r.flags
+  updateWriterFlagsBadge()
+}
+
+function updateWriterFlagsBadge() {
+  const badge = document.getElementById('writer-flags-badge')
+  if (!badge) return
+  if (writerFlagsCache.length) { badge.textContent = writerFlagsCache.length; badge.style.display = '' }
+  else badge.style.display = 'none'
+}
+
+// Shows every open flag across all cue sheets in the detail pane (replacing
+// whatever cue sheet was open there -- same pane, not a modal, consistent
+// with how this tab already reuses #cuesheet-detail for different views).
+function renderWriterFlagsPanel() {
+  currentCueSheetId = null
+  const detail = document.getElementById('cuesheet-detail')
+  if (!detail) return
+  if (!writerFlagsCache.length) {
+    detail.innerHTML = `<div style="color:var(--text3);font-size:13px">No flagged writer mismatches.</div>`
+    return
+  }
+  const rows = writerFlagsCache.map(f => `
+    <tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:8px;font-size:12px">${esc(f.mismatch_name)}</td>
+      <td style="padding:8px;font-size:12px">
+        ${esc(f.title_raw || '')}
+        <div style="font-size:10px;color:var(--text3)">${esc(f.source_filename || '')}</div>
+      </td>
+      <td style="padding:8px;font-size:11px;color:var(--text3)">${esc(f.note || '') || '<span style="color:var(--text3)">—</span>'}</td>
+      <td style="padding:8px;font-size:11px;color:var(--text3)">
+        ${esc(f.flagged_by || '')}<br>${f.flagged_at ? new Date(f.flagged_at).toLocaleDateString() : ''}
+      </td>
+      <td style="padding:8px;white-space:nowrap">
+        <button class="btn" style="font-size:11px;padding:4px 8px" onclick="openCueSheetDetail(${f.cue_sheet_id})">Open sheet</button>
+        <button class="btn" style="font-size:11px;padding:4px 8px" onclick="resolveWriterFlag(${f.id})">Resolve</button>
+      </td>
+    </tr>`).join('')
+  detail.innerHTML = `
+    <div style="font-size:14px;font-weight:600;margin-bottom:10px">Flagged writer mismatches (${writerFlagsCache.length})</div>
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
+          <th style="padding:8px">Name</th><th style="padding:8px">Cue</th><th style="padding:8px">Note</th>
+          <th style="padding:8px">Flagged by</th><th style="padding:8px"></th>
+        </tr>
+      </thead>
+      <tbody>${rows}</tbody>
+    </table>`
+}
+
+async function resolveWriterFlag(flagId) {
+  const r = await fetch(`/api/writer-flags/${flagId}`, { method: 'DELETE' }).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { toast(r.error || 'Could not resolve flag', 'error'); return }
+  writerFlagsCache = writerFlagsCache.filter(f => f.id !== flagId)
+  updateWriterFlagsBadge()
+  toast('Resolved')
+  renderWriterFlagsPanel()
+  // Also clear it from the in-memory cue if that sheet happens to be cached,
+  // so re-opening it doesn't show a stale "flagged" badge until next fetch.
+  for (const cue of currentCueSheetCues) {
+    if (cue.flags?.length) cue.flags = cue.flags.filter(fl => fl.id !== flagId)
+  }
+}
+
+// Quick-fix buttons rendered per mismatched name in renderCueSheetCues() below.
+async function saveWriterAliasQuick(btn) {
+  const row = btn.closest('[data-mismatch-name]')
+  const name = row.dataset.mismatchName
+  const select = row.querySelector('.alias-target-select')
+  const target = select.value
+  if (!target) { toast('Pick which on-file writer this matches first', 'error'); return }
+  const r = await fetch('/api/writer-aliases', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ alias: name, canonical: target })
+  }).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { toast(r.error || 'Could not save alias', 'error'); return }
+  writerAliasMap[normalizeWriterName(name)] = normalizeWriterName(target)
+  toast(`Aliased "${name}" → "${target}"`, 'success')
+  renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+}
+
+async function flagWriterMismatch(btn) {
+  const row = btn.closest('[data-mismatch-name]')
+  const cueId = Number(row.dataset.cueId)
+  const name = row.dataset.mismatchName
+  const note = prompt(`Flag "${name}" as a real problem (not just a naming variant)?\n\nOptional note:`, '')
+  if (note === null) return
+  const r = await fetch(`/api/cue-sheets/cues/${cueId}/flag-writer`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, note })
+  }).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { toast(r.error || 'Could not flag', 'error'); return }
+  const cue = currentCueSheetCues.find(c => c.id === cueId)
+  if (cue) (cue.flags ||= []).push({ id: null, name })  // real id arrives on next full reload; fine for display
+  toast('Flagged for review', 'success')
+  loadWriterFlagsBadge()
+  renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
 }
 
 function renderCueSheetList() {
@@ -9160,16 +9302,61 @@ function splitsMismatch(cue) {
   // codes (e.g. 'A' for author/lyricist) that should still be compared, not
   // silently dropped. 'E' is the one role every parser in cue-sheet-import.js
   // consistently uses for publishers, so exclude that specifically.
+  // Resolve known nickname/spelling variants (e.g. "steve mayone" ->
+  // "stephen mayone") before comparing, so an alias on file doesn't show as
+  // a false mismatch in either direction. See writerAliasMap/resolveWriterAlias
+  // above -- display-only, added 2026-11-17.
   const reported = (cue.parties || [])
     .filter(p => (p.role || '').trim().toUpperCase() !== 'E')
-    .map(p => (p.name || '').trim().toLowerCase()).filter(Boolean)
-  const onFile = (cue.catalogWriters || []).map(w => (w.writer_name || '').trim().toLowerCase())
+    .map(p => resolveWriterAlias(p.name)).filter(Boolean)
+  const onFile = (cue.catalogWriters || []).map(w => resolveWriterAlias(w.writer_name))
   const reportedSet = new Set(reported)
   const onFileSet = new Set(onFile)
   const missingFromCatalog = reported.filter(n => !onFileSet.has(n))
   const missingFromCueSheet = onFile.filter(n => !reportedSet.has(n))
   if (!missingFromCatalog.length && !missingFromCueSheet.length) return null
   return { missingFromCatalog, missingFromCueSheet }
+}
+
+// Per-mismatched-name quick-fix controls (added 2026-11-17, Erik: "we need a
+// faster way to build aliases ... we also need a flag button if something is
+// truly not right"). For a name reported on the cue sheet but not matched on
+// file, offers a dropdown of this cue's actual on-file writers to alias it
+// to (one click = same effect as scripts/add-writer-alias.js), plus a Flag
+// button for when it's a genuine problem, not a naming variant. A name
+// that's on file but missing from the cue sheet can only be flagged -- there's
+// nothing on the cue sheet side to alias it to.
+function renderMismatchCell(cue, mismatch) {
+  if (!mismatch) return cue.matched_sku_root ? '<div style="color:#2e7d32;margin-top:3px">splits match</div>' : ''
+
+  const flagIdByName = {}
+  ;(cue.flags || []).forEach(f => { flagIdByName[f.name] = f.id })
+  const catalogOptions = (cue.catalogWriters || [])
+    .map(w => `<option value="${esc(w.writer_name)}">${esc(w.writer_name)}</option>`).join('')
+
+  const renderName = (name, withAliasPicker) => {
+    if (Object.prototype.hasOwnProperty.call(flagIdByName, name)) {
+      const flagId = flagIdByName[name]
+      return `<div style="margin-top:3px;color:var(--text3)">
+        <i class="ti ti-flag" style="color:#c0392b"></i> ${esc(name)} <span style="font-size:10px">(flagged)</span>
+        ${flagId != null ? `<button class="btn" style="font-size:10px;padding:1px 5px;margin-left:3px" onclick="resolveWriterFlag(${flagId})">Unflag</button>` : ''}
+      </div>`
+    }
+    return `<div data-mismatch-name="${esc(name)}" data-cue-id="${cue.id}" style="margin-top:3px;display:flex;gap:3px;align-items:center;flex-wrap:wrap">
+      <span style="color:#c0392b">${esc(name)}</span>
+      ${withAliasPicker ? `
+        <select class="alias-target-select" style="font-size:10px;max-width:110px">
+          <option value="">match to…</option>${catalogOptions}
+        </select>
+        <button class="btn" style="font-size:10px;padding:1px 5px" onclick="saveWriterAliasQuick(this)">Save alias</button>` : ''}
+      <button class="btn" style="font-size:10px;padding:1px 5px;color:#c0392b" onclick="flagWriterMismatch(this)">Flag</button>
+    </div>`
+  }
+
+  return `
+    ${mismatch.missingFromCatalog.length ? `<div style="font-size:10px;color:var(--text3);margin-top:4px">On cue sheet, not on file:</div>${mismatch.missingFromCatalog.map(n => renderName(n, true)).join('')}` : ''}
+    ${mismatch.missingFromCueSheet.length ? `<div style="font-size:10px;color:var(--text3);margin-top:4px">On file, not on cue sheet:</div>${mismatch.missingFromCueSheet.map(n => renderName(n, false)).join('')}` : ''}
+  `
 }
 
 function renderCueSheetCues(cues, episode, siblingSheets) {
@@ -9209,12 +9396,9 @@ function renderCueSheetCues(cues, episode, siblingSheets) {
           <div id="cue-search-results-${cue.id}"></div>
         </td>
         <td style="padding:8px;font-size:11px;max-width:220px">${reportedParties}</td>
-        <td style="padding:8px;font-size:11px;max-width:220px">
+        <td style="padding:8px;font-size:11px;max-width:260px">
           ${onFileParties}
-          ${mismatch ? `<div style="color:#c0392b;margin-top:3px">
-            ${mismatch.missingFromCatalog.length ? 'On cue sheet, not on file: ' + mismatch.missingFromCatalog.join(', ') + '<br>' : ''}
-            ${mismatch.missingFromCueSheet.length ? 'On file, not on cue sheet: ' + mismatch.missingFromCueSheet.join(', ') : ''}
-          </div>` : (cue.matched_sku_root ? '<div style="color:#2e7d32;margin-top:3px">splits match</div>' : '')}
+          ${renderMismatchCell(cue, mismatch)}
         </td>
         <td style="padding:8px;font-size:11px;font-weight:600;color:${statusColor}">${cue.match_status}</td>
         <td style="padding:8px">
