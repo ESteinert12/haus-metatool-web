@@ -5338,6 +5338,35 @@ async function refreshTeamsPanel(composerId) {
   const byTeam = {}
   writers.forEach(w => { (byTeam[w.team_id] = byTeam[w.team_id] || []).push(w) })
 
+  // Usage/$ rollup per team (added 2026-11-17) -- "who are our most valuable
+  // writers" per claude/handoff-2026-11-11-delete-admin-gating-and-usage-summary-plan.md
+  // item 2. Same two data sources already wired per-title and per-lot, here
+  // grouped by titles.team_id instead.
+  const usageByTeam = {}
+  const earningsByTeam = {}
+  if (teams.length) {
+    const teamIds = teams.map(t => t.team_id)
+    const usageR = await pgQ(`
+      SELECT t.team_id, COUNT(*) AS usage_count
+      FROM cue_sheet_cues csc
+      JOIN titles t ON t.sku_root = csc.matched_sku_root
+      WHERE csc.match_status = 'confirmed' AND t.team_id = ANY($1::varchar[])
+      GROUP BY t.team_id
+    `, [teamIds])
+    if (Array.isArray(usageR)) usageR.forEach(r => { usageByTeam[r.team_id] = Number(r.usage_count) })
+
+    if (currentUser?.role === 'admin') {
+      const earnR = await pgQ(`
+        SELECT t.team_id, COALESCE(SUM(rsl.amount), 0) AS total
+        FROM royalty_statement_lines rsl
+        JOIN titles t ON t.sku_root = rsl.matched_sku_root
+        WHERE rsl.match_status = 'confirmed' AND t.team_id = ANY($1::varchar[])
+        GROUP BY t.team_id
+      `, [teamIds])
+      if (Array.isArray(earnR)) earnR.forEach(r => { earningsByTeam[r.team_id] = Number(r.total) })
+    }
+  }
+
   const escId = esc(composerId)
 
   let html = `
@@ -5397,6 +5426,14 @@ async function refreshTeamsPanel(composerId) {
             ${t.deal_name ? `<span style="font-size:10px;color:var(--text-muted);padding:1px 6px;border-radius:3px;background:var(--bg3);border:1px solid var(--border)">${esc(t.deal_name)}</span>` : ''}
             ${dateStr ? `<span style="font-size:11px;color:var(--text-muted);margin-left:auto">${dateStr}</span>` : ''}
           </div>
+          ${(() => {
+            const usageCount = usageByTeam[t.team_id] || 0
+            const earnings = earningsByTeam[t.team_id]
+            if (!usageCount && earnings === undefined) return ''
+            const usagePart = `aired ${usageCount} time${usageCount !== 1 ? 's' : ''} (confirmed)`
+            const earningsPart = earnings !== undefined ? ` · earned $${earnings.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (confirmed)` : ''
+            return `<div style="padding:4px 14px 0;font-size:11px;color:var(--text-muted)">${usagePart}${earningsPart}</div>`
+          })()}
           <div style="padding:10px 14px">
             ${tw.length ? tw.map(w => `
               <div style="padding:6px 0;border-bottom:1px solid var(--border)">
