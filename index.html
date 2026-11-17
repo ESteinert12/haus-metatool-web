@@ -9000,6 +9000,9 @@ async function ebrLogExport(fileName, seq, skus) {
 // ── Cue Sheets tab (added 2026-10, separate track from EBR) ────────────────
 let cueSheetsCache = []
 let currentCueSheetId = null
+let currentCueSheetCues = []        // cues for currentCueSheetId, kept in sync by confirmCueMatch
+let currentCueSheetEpisode = null
+let currentCueSheetSiblings = []
 
 async function loadCueSheetsSection() {
   const r = await fetch('/api/cue-sheets').then(r => r.json()).catch(() => ({ ok: false }))
@@ -9131,6 +9134,9 @@ async function openCueSheetDetail(id) {
   detail.innerHTML = `<div style="color:var(--text3);font-size:12px">Loading…</div>`
   const r = await fetch(`/api/cue-sheets/${id}/cues`).then(r => r.json()).catch(() => ({ ok: false }))
   if (!r.ok) { detail.innerHTML = `<div style="color:#c0392b;font-size:12px">${r.error || 'Failed to load cues'}</div>`; return }
+  currentCueSheetCues = r.cues
+  currentCueSheetEpisode = r.episode
+  currentCueSheetSiblings = r.siblingSheets
   renderCueSheetCues(r.cues, r.episode, r.siblingSheets)
 }
 
@@ -9255,8 +9261,60 @@ async function confirmCueMatch(cueId, skuRoot) {
     method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sku_root: skuRoot })
   }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
   if (!r.ok) { alert(r.error || 'Confirm failed -- the cue was not changed, try again.'); return }
-  await loadCueSheetsSection()
-  openCueSheetDetail(currentCueSheetId)
+
+  // 2026-11-17: the two lines above this comment used to be
+  // `await loadCueSheetsSection(); openCueSheetDetail(currentCueSheetId)` --
+  // a full re-fetch of EVERY cue sheet's counts plus a full re-fetch of this
+  // sheet's cues, with the detail pane blanked to "Loading..." in between.
+  // Functionally nothing like a real page reload, but it tore down and
+  // rebuilt both panes on every single Confirm click, which reads exactly
+  // like one: scroll position lost, any in-progress override-search typing
+  // in another row wiped, a visible flash every time. Erik flagged this as
+  // "why does it refresh the page" 2026-11-17.
+  const cue = currentCueSheetCues.find(c => c.id === cueId)
+  const newStatus = skuRoot ? 'confirmed' : 'rejected'
+  const sameMatch = cue && cue.matched_sku_root === skuRoot
+
+  // Keep the sidebar's per-sheet counts correct without re-fetching the
+  // whole cue-sheet list -- we already know exactly what just changed.
+  const sheet = cueSheetsCache.find(cs => cs.id === currentCueSheetId)
+  if (sheet && cue) {
+    const bucketKey = s => s === 'confirmed' ? 'confirmed_count' : s === 'unmatched' ? 'unmatched_count' : s === 'ambiguous' ? 'ambiguous_count' : null
+    const oldKey = bucketKey(cue.match_status)
+    const newKey = bucketKey(newStatus)
+    if (oldKey) sheet[oldKey] = String(Math.max(0, parseInt(sheet[oldKey] || 0) - 1))
+    if (newKey) sheet[newKey] = String(parseInt(sheet[newKey] || 0) + 1)
+  }
+
+  if (sameMatch) {
+    // The plain "Confirm" button always re-confirms the match already shown
+    // -- matched_title, parties, catalogWriters, splits are all unchanged,
+    // so there's nothing to refetch. Update the cached cue in place and
+    // re-render both panes straight from memory: zero network calls beyond
+    // the POST above, no flash, no lost scroll position.
+    if (cue) cue.match_status = newStatus
+    renderCueSheetList()
+    renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+    return
+  }
+
+  // Picking a DIFFERENT title via the override search (sameMatch === false)
+  // changes matched_title and the on-file writer splits (catalogWriters),
+  // which only exist server-side -- that path still needs a real refetch
+  // for correctness. It no longer blanks the pane to "Loading..." first, and
+  // preserves scroll position, so only the row that actually changed is
+  // visibly different.
+  renderCueSheetList()
+  const detailEl = document.getElementById('cuesheet-detail')
+  const scrollTop = detailEl?.scrollTop || 0
+  const dr = await fetch(`/api/cue-sheets/${currentCueSheetId}/cues`).then(r => r.json()).catch(() => ({ ok: false }))
+  if (dr.ok) {
+    currentCueSheetCues = dr.cues
+    currentCueSheetEpisode = dr.episode
+    currentCueSheetSiblings = dr.siblingSheets
+    renderCueSheetCues(dr.cues, dr.episode, dr.siblingSheets)
+    if (detailEl) detailEl.scrollTop = scrollTop
+  }
 }
 
 // ── Royalties tab (added 2026-10, separate track from EBR/cue sheets) ──────
