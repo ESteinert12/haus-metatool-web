@@ -427,7 +427,7 @@ webview{flex:1;border:none}
   <div class="nav-item" data-section="clients"><i class="ti ti-building-community"></i> CLIENTS</div>
   <div class="nav-item" data-section="contacts"><i class="ti ti-users"></i> Contacts</div>
   <div class="nav-item" data-section="deals"><i class="ti ti-writing"></i> Deals</div>
-  <div class="nav-item" data-section="finances"><i class="ti ti-report-money"></i> Finances</div>
+  <div class="nav-item" data-admin-only data-section="finances"><i class="ti ti-report-money"></i> Finances</div>
 
   <div class="sidebar-bottom">
     <div style="padding:8px 14px 4px;display:flex;align-items:center;gap:7px;cursor:pointer" onclick="navigate('settings')" title="Go to Settings">
@@ -1229,18 +1229,18 @@ webview{flex:1;border:none}
   <!-- FINANCES -->
   <div class="section" id="section-finances">
     <div class="grid-4" style="margin-bottom:16px">
-      <div class="stat-card"><div class="stat-val" id="fin-ytd">$0</div><div class="stat-lbl">Revenue YTD</div></div>
-      <div class="stat-card"><div class="stat-val" id="fin-month">$0</div><div class="stat-lbl">This month</div></div>
-      <div class="stat-card"><div class="stat-val" id="fin-pending">$0</div><div class="stat-lbl">Pending</div></div>
-      <div class="stat-card"><div class="stat-val" id="fin-deals">0</div><div class="stat-lbl">Active deals</div></div>
+      <div class="stat-card"><div class="stat-val" id="fin-total">$0</div><div class="stat-lbl">Confirmed, all-time</div></div>
+      <div class="stat-card"><div class="stat-val" id="fin-latest-period">$0</div><div class="stat-lbl" id="fin-latest-period-lbl">Latest period</div></div>
+      <div class="stat-card"><div class="stat-val" id="fin-pending">$0</div><div class="stat-lbl" id="fin-pending-lbl">Pending review</div></div>
+      <div class="stat-card"><div class="stat-val" id="fin-usage">0</div><div class="stat-lbl">Confirmed cue usages</div></div>
     </div>
     <div class="grid-2">
       <div class="card">
-        <div class="card-title">Monthly revenue</div>
+        <div class="card-title">Confirmed revenue by period</div>
         <div class="finance-chart" id="fin-chart"></div>
       </div>
       <div class="card">
-        <div class="card-title">Recent invoices</div>
+        <div class="card-title">Recent statements</div>
         <div id="fin-invoices"></div>
       </div>
     </div>
@@ -15874,37 +15874,51 @@ function renderDeals() {
     </div>`).join('')
 }
 
-// ─── Finances ──────────────────────────────────────────────
-const FIN_DATA = {
-  months: ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'],
-  revenue: [18400, 22100, 19800, 24500, 21300, 27800, 23400, 26100, 22900, 28700, 24300, 31200],
-  invoices: [
-    { name:'Netflix Q2', amount:'$12,000', status:'Paid', date:'Jun 1' },
-    { name:'Apple Music license', amount:'$22,500', status:'Paid', date:'May 28' },
-    { name:'Hulu — review', amount:'$7,200', status:'Pending', date:'Jun 10' },
-    { name:'Disney (estimate)', amount:'$4,500', status:'Draft', date:'Jun 8' },
-  ]
-}
+// ─── Finances (real data, added 2026-11-17 -- see api.js's
+// GET /api/finances/summary for the full reasoning on why there's no
+// "Active deals" card and why revenue groups by statement period rather
+// than calendar month) ──────────────────────────────────────────────────
+async function renderFinances() {
+  document.getElementById('fin-chart').innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">Loading…</div>'
+  document.getElementById('fin-invoices').innerHTML = '<div style="color:var(--text3);font-size:12px">Loading…</div>'
+  const r = await fetch('/api/finances/summary').then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) {
+    document.getElementById('fin-chart').innerHTML = `<div style="color:var(--text3);font-size:12px;padding:8px">${esc(r.error || 'Could not load finances')}</div>`
+    document.getElementById('fin-invoices').innerHTML = ''
+    return
+  }
 
-function renderFinances() {
-  const now = new Date().getMonth()
-  const ytd = FIN_DATA.revenue.slice(0, now + 1).reduce((a, b) => a + b, 0)
-  document.getElementById('fin-ytd').textContent    = '$' + ytd.toLocaleString()
-  document.getElementById('fin-month').textContent  = '$' + FIN_DATA.revenue[now].toLocaleString()
-  document.getElementById('fin-pending').textContent = '$7,200'
-  document.getElementById('fin-deals').textContent  = '5'
-  const maxVal = Math.max(...FIN_DATA.revenue)
-  document.getElementById('fin-chart').innerHTML = FIN_DATA.revenue.map((v, i) => {
-    const h = Math.round((v / maxVal) * 100)
-    return `<div class="bar${i === now ? ' current' : ''}" style="height:${h}%" title="${FIN_DATA.months[i]}: $${v.toLocaleString()}">
-      <span class="bar-label">${FIN_DATA.months[i]}</span></div>`
-  }).join('')
-  document.getElementById('fin-invoices').innerHTML = FIN_DATA.invoices.map(inv => `
-    <div class="row">
-      <div class="row-main"><div class="row-title">${inv.name}</div><div class="row-sub">${inv.date}</div></div>
-      <span style="font-size:13px;font-weight:600;margin-right:8px">${inv.amount}</span>
-      <span class="pill ${inv.status === 'Paid' ? 'green' : inv.status === 'Pending' ? 'amber' : 'gray'}">${inv.status}</span>
-    </div>`).join('')
+  document.getElementById('fin-total').textContent = '$' + r.totalConfirmed.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  document.getElementById('fin-pending-lbl').textContent = `Pending review (${r.pendingReview.lineCount} lines)`
+  document.getElementById('fin-pending').textContent = '$' + r.pendingReview.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  document.getElementById('fin-usage').textContent = r.confirmedCueUsageCount.toLocaleString()
+
+  const periods = r.byPeriod
+  const latest = periods[periods.length - 1]
+  document.getElementById('fin-latest-period-lbl').textContent = latest ? `Latest period (${esc(latest.period)})` : 'Latest period'
+  document.getElementById('fin-latest-period').textContent = latest ? '$' + latest.total.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 }) : '$0'
+
+  if (!periods.length) {
+    document.getElementById('fin-chart').innerHTML = '<div style="color:var(--text3);font-size:12px;padding:8px">No confirmed royalty statements yet.</div>'
+  } else {
+    const maxVal = Math.max(...periods.map(p => p.total), 1)
+    document.getElementById('fin-chart').innerHTML = periods.map((p, i) => {
+      const h = Math.round((p.total / maxVal) * 100)
+      return `<div class="bar${i === periods.length - 1 ? ' current' : ''}" style="height:${h}%" title="${esc(p.period)}: $${p.total.toLocaleString()}">
+        <span class="bar-label">${esc(p.period)}</span></div>`
+    }).join('')
+  }
+
+  if (!r.recentStatements.length) {
+    document.getElementById('fin-invoices').innerHTML = '<div style="color:var(--text3);font-size:12px">No royalty statements imported yet.</div>'
+  } else {
+    document.getElementById('fin-invoices').innerHTML = r.recentStatements.map(s => `
+      <div class="row">
+        <div class="row-main"><div class="row-title">${esc(s.source)} — ${esc(s.period || 'unknown period')}</div><div class="row-sub">${esc(s.source_filename)}</div></div>
+        <span style="font-size:13px;font-weight:600;margin-right:8px">$${Number(s.statement_total || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+        <span class="pill gray">${new Date(s.imported_at).toLocaleDateString()}</span>
+      </div>`).join('')
+  }
 }
 
 // ─── External app launchers ────────────────────────────────

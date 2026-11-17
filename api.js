@@ -239,7 +239,8 @@ const ADMIN_ROUTES = [
   'GET /b2/recover-broken',
   'GET /b2/recovery-from-dropbox',
   'GET /b2/batch-upload-shipping',
-  'GET /b2/stub-audit-refresh'
+  'GET /b2/stub-audit-refresh',
+  'GET /finances/summary'
 ]
 
 // Client Portal logins (producers/clients) are a separate identity from
@@ -8700,6 +8701,77 @@ app.get('/api/royalties/:id/original', async (req, res) => {
     console.error('[royalties/:id/original]', e.message)
     res.status(500).json({ error: e.message })
   }
+})
+
+// Real replacement for index.html's FIN_DATA mock (FIN_DATA itself removed
+// below). Deliberately does NOT invent an "active deals" figure -- there is
+// no deals table in this schema at all, so that stat card is dropped rather
+// than left fabricated or backed by a shortcut query. See
+// claude/handoff-2026-11-11-delete-admin-gating-and-usage-summary-plan.md
+// item 4 for why a real deals rollup needs its own join-path investigation
+// first, out of scope here.
+//
+// period is a free-text field (e.g. '2024Q3') set per-statement by whichever
+// PRO/parser produced it -- confirmed via the royalty_statements schema
+// comment and royalty-import.js, there is no period_start/period_end DATE
+// column anywhere in this schema (the original spec doc's rough sketch was
+// never literally built that way). So "byPeriod" groups by that raw string,
+// sorted by each period's own most recent imported_at rather than assuming
+// every value parses as a calendar date -- PRO statements are typically
+// quarterly anyway, not monthly, so this is also a more honest shape for a
+// revenue trend than forcing it into a Jan-Dec bar chart.
+app.get('/api/finances/summary', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const totalRes = await _pgRetry(
+      `SELECT COALESCE(SUM(amount), 0) AS total FROM royalty_statement_lines WHERE match_status = 'confirmed'`,
+      [], 'finances total confirmed'
+    )
+    const bySourceRes = await _pgRetry(
+      `SELECT rs.source, COALESCE(SUM(l.amount), 0) AS total
+       FROM royalty_statement_lines l
+       JOIN royalty_statements rs ON rs.id = l.statement_id
+       WHERE l.match_status = 'confirmed'
+       GROUP BY rs.source
+       ORDER BY total DESC`,
+      [], 'finances by source'
+    )
+    const byPeriodRes = await _pgRetry(
+      `SELECT rs.period, COALESCE(SUM(l.amount), 0) AS total, MAX(rs.imported_at) AS last_imported_at
+       FROM royalty_statement_lines l
+       JOIN royalty_statements rs ON rs.id = l.statement_id
+       WHERE l.match_status = 'confirmed' AND rs.period IS NOT NULL
+       GROUP BY rs.period
+       ORDER BY last_imported_at ASC`,
+      [], 'finances by period'
+    )
+    const pendingRes = await _pgRetry(
+      `SELECT COUNT(*) AS line_count, COALESCE(SUM(amount), 0) AS total
+       FROM royalty_statement_lines
+       WHERE match_status IN ('unmatched', 'ambiguous')`,
+      [], 'finances pending review'
+    )
+    const usageRes = await _pgRetry(
+      `SELECT COUNT(*) AS confirmed_cue_count FROM cue_sheet_cues WHERE match_status = 'confirmed'`,
+      [], 'finances cue sheet usage count'
+    )
+    const recentStatementsRes = await _pgRetry(
+      `SELECT id, source, format, period, source_filename, statement_total, imported_by, imported_at
+       FROM royalty_statements
+       ORDER BY imported_at DESC
+       LIMIT 10`,
+      [], 'finances recent statements'
+    )
+    res.json({
+      ok: true,
+      totalConfirmed: Number(totalRes.rows[0].total),
+      bySource: bySourceRes.rows.map(r => ({ source: r.source, total: Number(r.total) })),
+      byPeriod: byPeriodRes.rows.map(r => ({ period: r.period, total: Number(r.total) })),
+      pendingReview: { lineCount: Number(pendingRes.rows[0].line_count), total: Number(pendingRes.rows[0].total) },
+      confirmedCueUsageCount: Number(usageRes.rows[0].confirmed_cue_count),
+      recentStatements: recentStatementsRes.rows,
+    })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
 app.get('/api/royalties/:id/lines', async (req, res) => {
