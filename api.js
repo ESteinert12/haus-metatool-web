@@ -8059,9 +8059,27 @@ app.post('/api/cue-sheets/import-bulk', upload.array('files', 200), async (req, 
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   if (!req.files || !req.files.length) return res.json({ ok: false, error: 'No files provided' })
 
-  const dealPubRows = await _pgRetry(`SELECT DISTINCT publisher_name FROM deal_publishers`, [], 'cue-sheets import-bulk deal publishers')
+  // 2026-11-17, real production incident: these two setup queries used to
+  // run unwrapped. A Neon wake-up/connection-drop here (ECONNRESET, same
+  // known failure mode _pgRetry exists for -- see standing_rules.md) used
+  // to exhaust _pgRetry's retries and throw past this route's only
+  // try/catch (the per-file one below), which never ran yet at this point
+  // -- an unhandled rejection that left the browser's "Importing N files..."
+  // button hung forever with no response ever sent, not even a clean error.
+  // Caught live via Erik's own server log. Every file would have been
+  // uploaded (multer already wrote them to disk) and silently never cleaned
+  // up or imported -- so on this path the uploaded files are also unlinked
+  // before returning the error, same as the per-file cleanup below.
+  let dealPubRows, titlesRes
+  try {
+    dealPubRows = await _pgRetry(`SELECT DISTINCT publisher_name FROM deal_publishers`, [], 'cue-sheets import-bulk deal publishers')
+    titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'cue-sheets import-bulk titles')
+  } catch (e) {
+    console.error('[cue-sheets/import-bulk] setup query failed', e.message)
+    for (const file of req.files) { try { fs.unlinkSync(file.path) } catch {} }
+    return res.json({ ok: false, error: `Could not load publisher/title data: ${e.message}` })
+  }
   const hausPublisherNames = new Set(dealPubRows.rows.map(r => (r.publisher_name || '').trim().toLowerCase()))
-  const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'cue-sheets import-bulk titles')
   const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), normTitleStrict: normTitleStrict(t.title), camelKey: titleToCamelKey(t.title) }))
   const replace = req.body?.replace === 'true' || req.body?.replace === '1'
   const importedBy = req.session?.user?.username
@@ -8603,7 +8621,17 @@ app.post('/api/royalties/import-bulk', upload.array('files', 200), async (req, r
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   if (!req.files || !req.files.length) return res.json({ ok: false, error: 'No files provided' })
 
-  const titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-import-bulk titles index')
+  // 2026-11-17: same unwrapped-setup-query gap found and fixed in
+  // cue-sheets/import-bulk just above -- see that route's comment for the
+  // real incident that caught it. Same fix here, same reason.
+  let titlesRes
+  try {
+    titlesRes = await _pgRetry(`SELECT sku_root, title, team_id FROM titles`, [], 'royalty-import-bulk titles index')
+  } catch (e) {
+    console.error('[royalties/import-bulk] setup query failed', e.message)
+    for (const file of req.files) { try { fs.unlinkSync(file.path) } catch {} }
+    return res.json({ ok: false, error: `Could not load title data: ${e.message}` })
+  }
   const titlesIndex = titlesRes.rows.map(t => ({ ...t, normTitle: normTitle(t.title), camelKey: titleToCamelKey(t.title) }))
   const importedBy = req.session?.user?.username
 
