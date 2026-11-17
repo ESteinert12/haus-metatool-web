@@ -1141,7 +1141,7 @@ webview{flex:1;border:none}
       <span style="font-size:15px;font-weight:600;color:#1a2226">Cue Sheets</span>
       <span style="font-size:11px;color:#4b5a5e">Import cue sheets from production companies/PROs, match against the catalog, verify splits.</span>
       <div style="flex:1"></div>
-      <input type="file" id="cuesheet-file-input" accept=".csv,.xlsx,.xlsm" style="display:none" onchange="cueSheetUpload(this.files[0])">
+      <input type="file" id="cuesheet-file-input" accept=".csv,.xlsx,.xlsm" multiple style="display:none" onchange="cueSheetFilesSelected(this.files)">
       <button class="btn btn-primary" onclick="document.getElementById('cuesheet-file-input').click()"><i class="ti ti-upload"></i> Import Cue Sheet</button>
     </div>
     <div style="display:flex;flex:1;overflow:hidden;min-height:0">
@@ -9003,6 +9003,63 @@ async function cueSheetUpload(file) {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Cue Sheet' }
     document.getElementById('cuesheet-file-input').value = ''
   }
+}
+
+// 2026-11-17, Erik: batch-import cue sheets instead of one file at a time.
+// The server-side /api/cue-sheets/import-bulk route already existed (up to
+// 200 files/call, per-file results, doesn't abort the batch on one bad
+// file) but nothing in this UI called it -- the file input was single-file
+// only. This dispatcher keeps the existing single-file flow (which opens
+// the new cue sheet's detail pane automatically) untouched for the common
+// case, and only routes through the new bulk path + result modal when more
+// than one file is picked.
+function cueSheetFilesSelected(fileList) {
+  const files = Array.from(fileList || [])
+  if (!files.length) return
+  if (files.length === 1) { cueSheetUpload(files[0]); return }
+  cueSheetImportBulk(files)
+}
+
+async function cueSheetImportBulk(files) {
+  const fd = new FormData()
+  for (const f of files) fd.append('files', f)
+  const btn = document.querySelector('#section-cuesheets .btn-primary')
+  if (btn) { btn.disabled = true; btn.innerHTML = `<i class="ti ti-upload"></i> Importing ${files.length} files…` }
+  try {
+    const r = await fetch('/api/cue-sheets/import-bulk', { method: 'POST', body: fd }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+    if (!r.ok) { alert(r.error || 'Bulk import failed'); return }
+    await loadCueSheetsSection()
+    showCueSheetBulkResultModal(r)
+  } finally {
+    if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Cue Sheet' }
+    document.getElementById('cuesheet-file-input').value = ''
+  }
+}
+
+function showCueSheetBulkResultModal(r) {
+  const modal = document.createElement('div')
+  modal.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,.5);z-index:9999;display:flex;align-items:center;justify-content:center'
+  modal.innerHTML = `
+    <div style="background:var(--bg);border-radius:var(--radius);padding:20px;width:480px;max-height:80vh;display:flex;flex-direction:column;gap:12px;box-shadow:0 8px 32px rgba(0,0,0,.4)">
+      <div style="font-size:14px;font-weight:700">Bulk import: ${r.imported} of ${r.total} imported${r.failed ? `, ${r.failed} failed` : ''}</div>
+      <div style="overflow-y:auto;max-height:400px;display:flex;flex-direction:column;gap:4px">
+        ${r.results.map(res => `
+          <div style="padding:8px 10px;border-radius:6px;font-size:12px;background:${res.ok ? 'var(--bg2)' : 'rgba(192,57,43,.08)'}">
+            <div style="font-weight:600;${res.ok ? '' : 'color:#c0392b'}">${res.ok ? '✓' : '✗'} ${esc(res.origName || '')}</div>
+            ${res.ok
+              ? `<div style="color:var(--text3);margin-top:2px">${esc(res.format || '')} · ${res.hausCues} HAUS cues · ${res.matched} matched${res.suggested ? `, ${res.suggested} suggested` : ''}${res.ambiguous ? `, ${res.ambiguous} ambiguous` : ''}${res.unmatched ? `, ${res.unmatched} unmatched` : ''}</div>`
+              : `<div style="color:#c0392b;margin-top:2px">${esc(res.error || '')}</div>`}
+          </div>
+        `).join('')}
+      </div>
+      <div style="display:flex;justify-content:flex-end">
+        <button class="btn btn-primary" onclick="this.closest('[style*=fixed]').remove()">Done</button>
+      </div>
+    </div>`
+  modal.addEventListener('click', e => { if (e.target === modal) modal.remove() })
+  const onEsc = e => { if (e.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', onEsc) } }
+  document.addEventListener('keydown', onEsc)
+  document.body.appendChild(modal)
 }
 
 async function openCueSheetDetail(id) {
