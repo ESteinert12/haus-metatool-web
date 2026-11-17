@@ -9007,6 +9007,7 @@ let currentCueSheetId = null
 let currentCueSheetCues = []        // cues for currentCueSheetId, kept in sync by confirmCueMatch
 let currentCueSheetEpisode = null
 let currentCueSheetSiblings = []
+let selectedCueIds = new Set()      // added 2026-11-17, Erik: batch-confirm + per-row checkbox instead of a per-row Confirm button
 
 // Writer-name aliases (e.g. "steve mayone" -> "stephen mayone"), added
 // 2026-11-17 so splitsMismatch()'s on-file/reported comparison doesn't flag
@@ -9080,7 +9081,7 @@ function renderWriterFlagsPanel() {
   }
   const rows = writerFlagsCache.map(f => `
     <tr style="border-bottom:1px solid var(--border)">
-      <td style="padding:8px;font-size:12px">${esc(f.mismatch_name)}</td>
+      <td style="padding:8px;font-size:12px">${f.mismatch_name ? esc(f.mismatch_name) : '<span style="color:var(--text3);font-style:italic">(whole song)</span>'}</td>
       <td style="padding:8px;font-size:12px">
         ${esc(f.title_raw || '')}
         <div style="font-size:10px;color:var(--text3)">${esc(f.source_filename || '')}</div>
@@ -9152,6 +9153,35 @@ async function flagWriterMismatch(btn) {
   const cue = currentCueSheetCues.find(c => c.id === cueId)
   if (cue) (cue.flags ||= []).push({ id: null, name })  // real id arrives on next full reload; fine for display
   toast('Flagged for review', 'success')
+  loadWriterFlagsBadge()
+  renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+}
+
+// Whole-song flag (added 2026-11-17, same day as the per-writer one, per
+// Erik: "there are some songs that are registered wrong in the collection
+// but we have to keep the split because it aired [on TV]" -- a
+// known-wrong-but-can't-fix-it note that isn't about any one writer name,
+// so it's not attached to a mismatch row at all. Always available on every
+// cue regardless of match/mismatch status -- unlike the per-writer Flag
+// button, which only appears when splitsMismatch() actually found a
+// mismatched name to attach it to. Same cue_writer_flags table/review list,
+// just a null name (see api.js's flag-writer route).
+function wholeCueFlag(cue) {
+  return (cue.flags || []).find(f => !f.name) || null
+}
+
+async function flagWholeCue(cueId) {
+  const note = prompt('Flag this whole song as a known problem (e.g. "registered wrong but can\'t fix -- split already aired").\n\nNote (required):', '')
+  if (note === null) return
+  if (!note.trim()) { toast('A note is required when flagging the whole song', 'error'); return }
+  const r = await fetch(`/api/cue-sheets/cues/${cueId}/flag-writer`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ note })
+  }).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r.ok) { toast(r.error || 'Could not flag', 'error'); return }
+  const cue = currentCueSheetCues.find(c => c.id === cueId)
+  if (cue) (cue.flags ||= []).push({ id: null, name: null })  // real id arrives on next full reload; fine for display
+  toast('Song flagged for review', 'success')
   loadWriterFlagsBadge()
   renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
 }
@@ -9279,6 +9309,7 @@ async function openCueSheetDetail(id) {
   currentCueSheetCues = r.cues
   currentCueSheetEpisode = r.episode
   currentCueSheetSiblings = r.siblingSheets
+  selectedCueIds = new Set()
   renderCueSheetCues(r.cues, r.episode, r.siblingSheets)
 }
 
@@ -9384,6 +9415,7 @@ function renderCueSheetCues(cues, episode, siblingSheets) {
 
     return `
       <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px">${cue.matched_sku_root ? `<input type="checkbox" ${selectedCueIds.has(cue.id) ? 'checked' : ''} onchange="toggleCueSelected(${cue.id}, this.checked)">` : ''}</td>
         <td style="padding:8px;font-size:11px;color:var(--text3)">${esc(cue.seq || '')}</td>
         <td style="padding:8px;font-size:12px">
           ${esc(cue.title_raw)}
@@ -9401,16 +9433,26 @@ function renderCueSheetCues(cues, episode, siblingSheets) {
           ${renderMismatchCell(cue, mismatch)}
         </td>
         <td style="padding:8px;font-size:11px;font-weight:600;color:${statusColor}">${cue.match_status}</td>
-        <td style="padding:8px">
-          <button class="btn" style="font-size:11px;padding:4px 8px" onclick="confirmCueMatch(${cue.id}, ${cue.matched_sku_root ? `'${cue.matched_sku_root}'` : 'null'})" ${!cue.matched_sku_root ? 'disabled' : ''}>Confirm</button>
+        <td style="padding:8px;white-space:nowrap">
+          ${(() => { const wf = wholeCueFlag(cue); return wf
+            ? `<button class="btn" style="font-size:11px;padding:4px 8px;margin-left:4px;color:#c0392b" title="${esc(wf.note || '')}" onclick="resolveWriterFlag(${wf.id})"><i class="ti ti-flag"></i> Flagged</button>`
+            : `<button class="btn" style="font-size:11px;padding:4px 8px;margin-left:4px" title="Flag this whole song as a known problem, not tied to one writer" onclick="flagWholeCue(${cue.id})">Flag song</button>` })()}
         </td>
       </tr>`
   }).join('')
 
-  detail.innerHTML = siblingBanner + `
+  const confirmableCount = cues.filter(c => c.matched_sku_root && c.match_status !== 'confirmed').length
+  const toolbar = `
+    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+      <button class="btn" style="font-size:12px;padding:5px 10px" onclick="confirmSelectedCues()" ${selectedCueIds.size === 0 ? 'disabled' : ''}>Confirm selected (${selectedCueIds.size})</button>
+      <span style="font-size:11px;color:var(--text3)">${confirmableCount} matched cue${confirmableCount === 1 ? '' : 's'} awaiting confirmation</span>
+    </div>`
+
+  detail.innerHTML = siblingBanner + toolbar + `
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
+          <th style="padding:8px"><input type="checkbox" onchange="toggleSelectAllCues(this.checked)" title="Select all matched, unconfirmed cues"></th>
           <th style="padding:8px">Seq</th><th style="padding:8px">Cue sheet title</th><th style="padding:8px">Matched catalog title</th>
           <th style="padding:8px">Reported parties</th><th style="padding:8px">On file (team_writers)</th>
           <th style="padding:8px">Status</th><th style="padding:8px"></th>
@@ -9499,6 +9541,64 @@ async function confirmCueMatch(cueId, skuRoot) {
     renderCueSheetCues(dr.cues, dr.episode, dr.siblingSheets)
     if (detailEl) detailEl.scrollTop = scrollTop
   }
+}
+
+function toggleCueSelected(cueId, checked) {
+  if (checked) selectedCueIds.add(cueId)
+  else selectedCueIds.delete(cueId)
+  renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+}
+
+function toggleSelectAllCues(checked) {
+  if (checked) {
+    for (const cue of currentCueSheetCues) {
+      if (cue.matched_sku_root && cue.match_status !== 'confirmed') selectedCueIds.add(cue.id)
+    }
+  } else {
+    selectedCueIds.clear()
+  }
+  renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+}
+
+// 2026-11-17, Erik: batch confirm for the new checkbox column. Deliberately
+// NOT a loop calling confirmCueMatch() per cue -- that function re-renders
+// both panes (renderCueSheetList + renderCueSheetCues) on every single call,
+// which would mean one full re-render per selected cue instead of one for
+// the whole batch. Same bucket-count-adjustment logic as confirmCueMatch's
+// same-match branch, applied once per cue, with a single re-render + one
+// summary toast at the end.
+async function confirmSelectedCues() {
+  const ids = Array.from(selectedCueIds).filter(id => {
+    const cue = currentCueSheetCues.find(c => c.id === id)
+    return cue && cue.matched_sku_root
+  })
+  if (!ids.length) return
+
+  const sheet = cueSheetsCache.find(cs => cs.id === currentCueSheetId)
+  const bucketKey = s => s === 'confirmed' ? 'confirmed_count' : s === 'unmatched' ? 'unmatched_count' : s === 'ambiguous' ? 'ambiguous_count' : null
+
+  let okCount = 0, failCount = 0
+  for (const cueId of ids) {
+    const cue = currentCueSheetCues.find(c => c.id === cueId)
+    if (!cue) continue
+    const r = await fetch(`/api/cue-sheets/cues/${cueId}/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ sku_root: cue.matched_sku_root })
+    }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+    if (!r.ok) { failCount++; continue }
+    if (sheet) {
+      const oldKey = bucketKey(cue.match_status)
+      const newKey = bucketKey('confirmed')
+      if (oldKey) sheet[oldKey] = String(Math.max(0, parseInt(sheet[oldKey] || 0) - 1))
+      if (newKey) sheet[newKey] = String(parseInt(sheet[newKey] || 0) + 1)
+    }
+    cue.match_status = 'confirmed'
+    okCount++
+  }
+
+  selectedCueIds.clear()
+  renderCueSheetList()
+  renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+  toast(failCount ? `Confirmed ${okCount} of ${ids.length} (${failCount} failed)` : `Confirmed ${okCount} cue${okCount === 1 ? '' : 's'}`, failCount ? 'error' : 'success')
 }
 
 // ── Royalties tab (added 2026-10, separate track from EBR/cue sheets) ──────
