@@ -9151,7 +9151,7 @@ async function flagWriterMismatch(btn) {
   }).then(r => r.json()).catch(() => ({ ok: false }))
   if (!r.ok) { toast(r.error || 'Could not flag', 'error'); return }
   const cue = currentCueSheetCues.find(c => c.id === cueId)
-  if (cue) (cue.flags ||= []).push({ id: null, name })  // real id arrives on next full reload; fine for display
+  if (cue) (cue.flags ||= []).push({ id: r.id, name })
   toast('Flagged for review', 'success')
   loadWriterFlagsBadge()
   renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
@@ -9180,7 +9180,7 @@ async function flagWholeCue(cueId) {
   }).then(r => r.json()).catch(() => ({ ok: false }))
   if (!r.ok) { toast(r.error || 'Could not flag', 'error'); return }
   const cue = currentCueSheetCues.find(c => c.id === cueId)
-  if (cue) (cue.flags ||= []).push({ id: null, name: null })  // real id arrives on next full reload; fine for display
+  if (cue) (cue.flags ||= []).push({ id: r.id, name: null })
   toast('Song flagged for review', 'success')
   loadWriterFlagsBadge()
   renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)

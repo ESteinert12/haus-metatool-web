@@ -8316,11 +8316,11 @@ app.post('/api/cue-sheets/cues/:id/flag-writer', async (req, res) => {
     const name = String(req.body?.name || '').trim() || null
     const note = req.body?.note ? String(req.body.note).trim() || null : null
     if (!name && !note) return res.json({ ok: false, error: 'A note is required when flagging the whole song (no specific writer name)' })
-    await _pgRetry(
-      `INSERT INTO cue_writer_flags (cue_id, mismatch_name, note, flagged_by) VALUES ($1, $2, $3, $4)`,
+    const ins = await _pgRetry(
+      `INSERT INTO cue_writer_flags (cue_id, mismatch_name, note, flagged_by) VALUES ($1, $2, $3, $4) RETURNING id`,
       [req.params.id, name, note, req.session?.user?.username || null], 'cue-sheets flag writer'
     )
-    res.json({ ok: true })
+    res.json({ ok: true, id: ins.rows[0].id })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
