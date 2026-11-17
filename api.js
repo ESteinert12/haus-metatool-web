@@ -36,6 +36,8 @@ process.on('unhandledRejection', e => {
 
 require('dotenv').config()
 
+const { normalizeShowAlias, resolveShowId } = require('./shows.js')
+
 const express    = require('express')
 const session    = require('express-session')
 const crypto     = require('crypto')
@@ -1009,6 +1011,54 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_cue_sheet_cue_parties_cue ON cue_sheet_cue_parties(cue_id)`)
     console.log('✅ cue sheet verification tables ready')
   } catch (e) { console.warn('[schema] cue sheet tables:', e.message) }
+
+  // --- Shows (normalized show registry, added 2026-11-17) -----------------
+  // episodes.program is free text with no normalization anywhere (see
+  // shows.js for the full reasoning) -- this table gives a show a stable
+  // identity independent of exactly how any one cue sheet happened to spell
+  // its program name, and somewhere to hang show-level metadata
+  // (network/producer/status) that doesn't belong on every episode row.
+  // Its own try/catch, deliberately separate from the block above.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS shows (
+        id          SERIAL PRIMARY KEY,
+        name        TEXT NOT NULL,          -- canonical display name -- defaults to
+                                             -- whatever program text first created this
+                                             -- show; renaming it does NOT change
+                                             -- matching, see show_aliases
+        network     TEXT,
+        producer    TEXT,
+        status      TEXT,                   -- free text ('active'/'ended'/etc) -- no
+                                             -- enum, deliberately: this is brand new and
+                                             -- the real-world values aren't known yet
+        notes       TEXT,
+        created_at  TIMESTAMPTZ DEFAULT now()
+      )
+    `)
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS show_aliases (
+        id       SERIAL PRIMARY KEY,
+        show_id  INTEGER NOT NULL REFERENCES shows(id) ON DELETE CASCADE,
+        -- the NORMALIZED (trim + collapse whitespace + uppercase) raw
+        -- program string this alias matches -- see shows.js's
+        -- normalizeShowAlias(). UNIQUE so two shows can never silently
+        -- claim the same normalized text.
+        alias    TEXT NOT NULL UNIQUE
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_show_aliases_show ON show_aliases(show_id)`)
+    console.log('✅ shows tables ready')
+  } catch (e) { console.warn('[schema] shows tables:', e.message) }
+
+  try {
+    // Nullable, additive, ON DELETE SET NULL -- losing a show must never
+    // cascade into deleting episodes/cue_sheets/royalty-matched data.
+    // episodes.program is left completely alone (still the as-reported raw
+    // text); show_id is a parallel, resolved link, not a replacement.
+    await pool.query(`ALTER TABLE episodes ADD COLUMN IF NOT EXISTS show_id INTEGER REFERENCES shows(id) ON DELETE SET NULL`)
+    console.log('✅ episodes.show_id ready')
+  } catch (e) { console.warn('[schema] episodes.show_id:', e.message) }
 
   // ─── Royalty tracker/importer (added 2026-10) ───────────────────────────
   // Ingests actual PAYMENT data -- PRO royalty statements (BMI/SESAC/ASCAP/
@@ -7850,17 +7900,24 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
       // disconnected duplicate.
       const program = (parsed.meta.program || '').trim() || null
       const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '')
+      const showId = await resolveShowId(client, program)
       const existingEpisode = await client.query(
-        `SELECT id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
+        `SELECT id, show_id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
         [program, episodeNum]
       )
       let episodeId
       if (existingEpisode.rows.length) {
         episodeId = existingEpisode.rows[0].id
+        // Opportunistic backfill: an existing episode from before show_id
+        // existed gets linked up the next time it's touched by an import,
+        // for free. Additive only -- never touches program/episode_title/etc.
+        if (showId && !existingEpisode.rows[0].show_id) {
+          await client.query(`UPDATE episodes SET show_id = $1 WHERE id = $2`, [showId, episodeId])
+        }
       } else {
         const newEpisode = await client.query(
-          `INSERT INTO episodes (program, episode_title, episode_num, air_date) VALUES ($1,$2,$3,$4) RETURNING id`,
-          [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null]
+          `INSERT INTO episodes (program, episode_title, episode_num, air_date, show_id) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+          [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null, showId]
         )
         episodeId = newEpisode.rows[0].id
       }
