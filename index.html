@@ -10857,14 +10857,18 @@ async function ebrAutoRunForLot(lotId, lotName) {
       ebrToast(`EBR: lot ${lotName} closed but auto-export failed — ${((result && result.error) || 'unknown error')}. Run it manually from the EBR section.`, true)
       return
     }
-    if (!result.exported) {
+    if (!result.exported && !result.sesacExported) {
       const skipCount = (result.skipped || []).length
       ebrToast(`EBR: lot ${lotName} closed but nothing could be auto-exported (${skipCount} skipped${result.reason ? ' — ' + result.reason : ''}). Check it manually in the EBR section.`, true)
       return
     }
     const skipped = result.skipped || []
     const skipMsg = skipped.length ? ` — skipped ${skipped.length}: ${skipped.map(s => s.sku + ' (' + s.reason + ')').join(', ')}` : ''
-    ebrToast(`EBR: lot ${lotName} closed — exported ${result.exported} work${result.exported !== 1 ? 's' : ''} to EBR Exports/${result.fileName}${skipMsg}`, skipped.length > 0)
+    const parts = []
+    if (result.exported) parts.push(`exported ${result.exported} work${result.exported !== 1 ? 's' : ''} to EBR Exports/${result.fileName}`)
+    if (result.sesacExported) parts.push(`exported ${result.sesacExported} pure-SESAC work${result.sesacExported !== 1 ? 's' : ''} to EBR Exports/${result.sesacFileName} (separate SESAC Bulk Song Recordings submission — not part of the MusicMark batch)`)
+    const sesacWarnMsg = (result.sesacWarnings || []).length ? ` — SESAC share warnings: ${result.sesacWarnings.join('; ')}` : ''
+    ebrToast(`EBR: lot ${lotName} closed — ${parts.join('; ')}${skipMsg}${sesacWarnMsg}`, skipped.length > 0 || !!sesacWarnMsg)
   } catch (e) {
     console.error('[ebrAutoRunForLot]', e)
     ebrToast(`EBR: lot ${lotName} closed but auto-export hit an error (see console) — run it manually from the EBR section.`, true)
