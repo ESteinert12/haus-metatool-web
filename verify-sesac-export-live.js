@@ -13,8 +13,12 @@
 //      the exact same eligibility rules runLotAutoExport() uses in
 //      ebr-lot-export.js (same exclusions: already-acknowledged by
 //      MusicMark, JUP titles, X-composer teams, no writers on file, bad
-//      splits) -- NOT lot-scoped, since this is about finding real examples
-//      to eyeball, not simulating one specific lot's auto-close.
+//      splits -- PLUS, since 2026-11-18, the same pro_catalog_matches
+//      already-registered-with-SESAC exclusion via sesac-export.js's
+//      excludeAlreadyRegistered(), so this preview's counts match what a
+//      real export would actually produce) -- NOT lot-scoped, since this is
+//      about finding real examples to eyeball, not simulating one specific
+//      lot's auto-close.
 //   3. Builds the SESAC rows for up to MAX_TITLES of those real titles using
 //      the real ebrBuildRow() + sesac-export.js code (the exact same
 //      functions runLotAutoExport() calls), and prints:
@@ -112,25 +116,38 @@ async function findPureSesacTitles() {
     if (badSplit) return;
     if (allSesac) pureSesac.push({ title: t, writers: w });
   });
-  return pureSesac;
+
+  // Same already-registered-with-SESAC exclusion runLotAutoExport() applies
+  // (see sesac-export.js's excludeAlreadyRegistered() header comment) -- so
+  // this script's counts mean the same thing as a real export's would.
+  const { eligible, skipped: registeredSkipped } = await sesacExport.excludeAlreadyRegistered(
+    pool, pureSesac.map(p => p.title.sku_root)
+  );
+  const eligibleSet = new Set(eligible);
+  const eligiblePureSesac = pureSesac.filter(p => eligibleSet.has(p.title.sku_root));
+  return { all: pureSesac, eligible: eligiblePureSesac, excluded: registeredSkipped };
 }
 
 async function main() {
   console.log('=== SESAC export dry run (read-only survey) ===');
   console.log(`DB: ${process.env.DATABASE_URL ? process.env.DATABASE_URL.replace(/:[^:@]+@/, ':****@') : '(DATABASE_URL not set!)'}`);
 
-  const pureSesac = await findPureSesacTitles();
-  console.log(`\nPure-SESAC titles found catalog-wide (every writer SESAC, eligible otherwise): ${pureSesac.length}`);
+  const { all: pureSesacAll, eligible: pureSesac, excluded } = await findPureSesacTitles();
+  console.log(`\nPure-SESAC titles found catalog-wide (every writer SESAC, eligible otherwise): ${pureSesacAll.length}`);
+  if (excluded.length) {
+    console.log(`Of those, ${excluded.length} are already on file with SESAC per the pro_catalog_matches snapshot (or ambiguous) -- excluded from export, see sesac-export.js's excludeAlreadyRegistered().`);
+  }
+  console.log(`Eligible for a real SESAC export today: ${pureSesac.length}`);
 
   if (!pureSesac.length) {
-    console.log('Nothing to preview -- no title in the catalog today is 100% SESAC-written and otherwise eligible.');
+    console.log('Nothing to preview -- either no title in the catalog today is 100% SESAC-written and otherwise eligible, or every such title is already on file with SESAC per the snapshot.');
     console.log('(Mixed-PRO titles with SOME SESAC writers are NOT in this list on purpose -- those already go through normal EBR, see the 2026-10-28 decision in ebr-lot-export.js\'s header comment.)');
     await pool.end();
     return;
   }
 
   const sample = pureSesac.slice(0, MAX_TITLES);
-  console.log(`\nShowing first ${sample.length} of ${pureSesac.length}:\n`);
+  console.log(`\nShowing first ${sample.length} of ${pureSesac.length} eligible:\n`);
   const wideRows = [];
   for (const { title, writers } of sample) {
     console.log(`- ${title.sku_root}  "${title.title}"  writers: ${writers.map(w => `${w.first} ${w.last} (IPI ${w.ipi || 'none on file'}, ${w.split_pct}%)`).join('; ')}`);

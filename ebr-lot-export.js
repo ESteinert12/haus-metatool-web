@@ -187,12 +187,28 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
     else                                          exportable.push(t);
   });
 
-  if (!exportable.length && !sesacCandidates.length) {
+  // Before treating a pure-SESAC title as a new registration, check it against
+  // the pro_catalog_matches snapshot of SESAC's own real catalog -- added
+  // 2026-11-18 after a live check found 91% of catalog-wide pure-SESAC
+  // candidates were already matched there. See sesac-export.js's
+  // excludeAlreadyRegistered() header comment for the full story and its
+  // fail-closed behavior if the check itself can't run.
+  let sesacEligible = sesacCandidates;
+  if (sesacCandidates.length) {
+    const { eligible, skipped: sesacSkipped } = await sesacExport.excludeAlreadyRegistered(
+      pgPool, sesacCandidates.map(t => t.sku_root)
+    );
+    const eligibleSet = new Set(eligible);
+    sesacEligible = sesacCandidates.filter(t => eligibleSet.has(t.sku_root));
+    skipped.push(...sesacSkipped);
+  }
+
+  if (!exportable.length && !sesacEligible.length) {
     return { ok: true, exported: 0, sesacExported: 0, skipped, reason: 'nothing eligible after filters' };
   }
 
   const dataRows = exportable.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
-  const sesacWideRows = sesacCandidates.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
+  const sesacWideRows = sesacEligible.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
 
   fs.mkdirSync(outDir, { recursive: true });
 
@@ -225,7 +241,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
       );
     }
 
-    if (sesacCandidates.length) {
+    if (sesacEligible.length) {
       // sesac-export.js does the actual column transform (one row per
       // writer, IPI-matched publisher routing, 50%-share validation) --
       // ported from transform_sesac.py, see that module's header comment.
@@ -244,7 +260,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
 
       await client.query(
         `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
-        [sesacSeq, sesacFileName, sesacCandidates.length, sesacCandidates.map(t => t.sku_root).join(',')]
+        [sesacSeq, sesacFileName, sesacEligible.length, sesacEligible.map(t => t.sku_root).join(',')]
       );
     }
 
@@ -266,7 +282,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
     ok: true,
     exported: exportable.length,
     fileName,
-    sesacExported: sesacCandidates.length,
+    sesacExported: sesacEligible.length,
     sesacFileName,
     sesacWarnings,
     skipped,

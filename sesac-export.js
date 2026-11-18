@@ -304,4 +304,50 @@ function writeSesacFile(rows, outPath) {
   XLSX.writeFile(wb, outPath)
 }
 
-module.exports = { buildSesacExport, writeSesacFile, SESAC_COLS, ebrRowToObject }
+// Excludes titles already on file with SESAC per the pro_catalog_matches
+// snapshot (built by import-sesac-catalog.js + match-sesac-registrations.js
+// against a manually-downloaded SESAC catalog export -- NOT a live feed; the
+// snapshot in the real DB is dated 2026-09-29, checked live 2026-11-18). A
+// live run against the real catalog-wide pure-SESAC candidate set found 1665
+// of 1824 (91%) already 'matched' in that snapshot -- submitting those as
+// new SESAC registrations would have meant resubmitting the large majority
+// of every export as duplicates of titles already on file. "Not matched
+// here" means "not matched as of the last snapshot," not "definitely
+// unregistered" -- still a real improvement over no check at all, which is
+// what this file shipped with before 2026-11-18.
+//
+// Fails CLOSED: if the check itself can't run (table missing, query error),
+// every candidate is skipped rather than let through unchecked -- same
+// "DB should never overstate what's safe" direction already established
+// elsewhere in this codebase (see claude/multi-user-concurrency.md's B2
+// confirmation logic for the same reasoning applied to a different risk).
+async function excludeAlreadyRegistered(pgPool, skuRoots) {
+  if (!skuRoots.length) return { eligible: [], skipped: [] }
+  try {
+    const { rows } = await pgPool.query(
+      `SELECT sku_root, match_status FROM pro_catalog_matches WHERE pro_name = 'SESAC' AND sku_root = ANY($1::text[])`,
+      [skuRoots]
+    )
+    const bySku = {}
+    rows.forEach(r => { bySku[r.sku_root] = r.match_status })
+    const eligible = [], skipped = []
+    skuRoots.forEach(sr => {
+      const status = bySku[sr]
+      if (status === 'matched') {
+        skipped.push({ sku: sr, reason: "already matched to SESAC's own catalog per the pro_catalog_matches snapshot (2026-09-29) -- not re-submitting as new" })
+      } else if (status === 'ambiguous') {
+        skipped.push({ sku: sr, reason: 'ambiguous match in the SESAC catalog snapshot -- needs human review before export' })
+      } else {
+        eligible.push(sr)
+      }
+    })
+    return { eligible, skipped }
+  } catch (e) {
+    return {
+      eligible: [],
+      skipped: skuRoots.map(sr => ({ sku: sr, reason: `could not check pro_catalog_matches (${e.message}) -- export blocked pending that check, not let through unverified` }))
+    }
+  }
+}
+
+module.exports = { buildSesacExport, writeSesacFile, SESAC_COLS, ebrRowToObject, excludeAlreadyRegistered }
