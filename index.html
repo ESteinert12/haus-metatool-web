@@ -418,6 +418,7 @@ webview{flex:1;border:none}
   <div class="nav-item" data-section="ebr"><i class="ti ti-file-spreadsheet"></i> EBR</div>
   <div class="nav-item" data-section="cuesheets"><i class="ti ti-music-check"></i> Cue Sheets</div>
   <div class="nav-item" data-admin-only data-section="royalties"><i class="ti ti-cash"></i> Royalties</div>
+  <div class="nav-item" data-section="shows"><i class="ti ti-device-tv"></i> Shows</div>
   <div class="nav-item" data-section="files"><i class="ti ti-folder"></i> Files</div>
 
   <div class="nav-section">Production</div>
@@ -1173,6 +1174,28 @@ webview{flex:1;border:none}
       <div style="width:300px;flex-shrink:0;border-right:0.5px solid var(--border);overflow-y:auto;background:#C0C9CD" id="royalty-list"></div>
       <div style="flex:1;overflow-y:auto;padding:20px 24px" id="royalty-detail">
         <div style="color:var(--text3);font-size:13px">Import a royalty statement, or pick one from the list, to review matches.</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SHOWS & EPISODES (added 2026-11-18, Erik: "a display of tv shows and
+       episodes that is functional like the lot ui where you can go to a
+       show and it shows you all the episodes and cue counts, $ made,
+       missing songs from the royalty statements") -->
+  <div class="section" id="section-shows" style="height:100%;overflow:hidden;padding:0">
+    <div style="display:flex;align-items:center;gap:10px;padding:14px 18px;border-bottom:0.5px solid var(--border);flex-shrink:0;background:#C0C9CD">
+      <span style="font-size:15px;font-weight:600;color:#1a2226">Shows & Episodes</span>
+      <span style="font-size:11px;color:#4b5a5e">Per-show episode breakdown: confirmed cues, $ earned, songs missing from royalty statements.</span>
+    </div>
+    <div style="display:flex;flex:1;overflow:hidden;min-height:0">
+      <div style="width:280px;flex-shrink:0;border-right:0.5px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:#C0C9CD">
+        <div style="padding:10px 12px;border-bottom:0.5px solid rgba(0,0,0,0.1);flex-shrink:0">
+          <input id="shows-search" class="form-input" placeholder="Search shows…" oninput="filterShowsList()" style="width:100%;font-size:12px;background:#fff;border-color:rgba(0,0,0,0.15)">
+        </div>
+        <div id="shows-sidebar-list" style="flex:1;overflow-y:auto"></div>
+      </div>
+      <div id="shows-detail" style="flex:1;overflow-y:auto;padding:20px 24px">
+        <div style="color:var(--text3);font-size:13px">Select a show to view its episodes.</div>
       </div>
     </div>
   </div>
@@ -3986,7 +4009,7 @@ const SECTION_TITLES = {
   catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', qa:'Needs Eyeballs', lotmig:'Lot Migration',
   projects:'Projects', files:'Files',
   assignments:'Assignments',
-  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', royalties:'Royalties', settings:'Settings'
+  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', royalties:'Royalties', shows:'Shows & Episodes', settings:'Settings'
 }
 let currentSection = 'today'
 
@@ -4015,6 +4038,7 @@ function onSectionEnter(id) {
   if (id === 'inbox')    initWebview('inbox-inner', cfg.gmail || 'https://mail.google.com', 'email')
   if (id === 'slack')    initWebview('slack-inner', cfg.slack || 'https://app.slack.com', 'slack')
   if (id === 'schedule') { renderSchedule(); loadDayliteSchedule() }
+  if (id === 'shows')    loadShowsSection()
   if (id === 'catalog')   {
     // The pg catalog query fetches every active title (tens of thousands of
     // rows, several joins) -- a few real seconds every time, per Erik's
@@ -9637,6 +9661,248 @@ async function loadRoyaltiesSection() {
   royaltyStatementsCache = r.statements
   renderRoyaltyList()
   refreshEpisodeReferenceStatus()
+}
+
+// ── Shows & Episodes (added 2026-11-18, Erik: "a display of tv shows and
+// episodes that is functional like the lot ui where you can go to a show
+// and it shows you all the episodes and cue counts, $ made, missing songs
+// from the royalty statements") ──────────────────────────────────────────
+// Mirrors the Lots tab's sidebar-list + detail-panel pattern exactly
+// (loadLotsSection/renderLotsSidebar/filterLotsList/selectLot), using the
+// same direct pgQ() calls the Lot Portal/IP Teams $ rollups already use
+// rather than a new backend route.
+//
+// IMPORTANT, confirmed by reading the schema, not guessed: there is NO
+// verified link between royalty_statement_lines and episodes/shows --
+// royalty_statement_lines.show_name/episode_name are free text, explicitly
+// commented "display-only ... never used for matching" in api.js's own
+// schema. Royalty statements pay by TITLE, not by episode/air-date. So "$
+// made" and "missing from royalty statements" below are computed at the
+// TITLE level (same convention the Lot Portal/IP Teams $ rollups already
+// shipped use): for each episode, its confirmed cue-sheet songs are
+// listed, and each song's $ is its own all-time confirmed royalty total,
+// not a per-episode split -- there's no reliable way to attribute a dollar
+// to one specific airing when the same song aired in multiple episodes.
+// "Missing from royalty statements" means a song confirmed as used in this
+// episode's cue sheet that has NO confirmed royalty_statement_lines row at
+// all, on any statement -- a real gap, not an estimate.
+//
+// SECOND caveat: episodes.show_id only gets set by resolveShowId() at
+// cue-sheet-import time (new episodes) or opportunistically when an
+// existing episode is re-touched by a later import -- there was never a
+// one-time bulk backfill for rows that already existed before 2026-11-17
+// (see claude/handoff-2026-11-17-shows-table-and-ui-kaizen-backlog.md, step
+// 2, "deliberately not built yet"). So most older episodes likely still
+// have show_id IS NULL right now. Rather than ship a tab that looks nearly
+// empty until that backfill runs, episodes with no show_id are grouped by
+// their raw (unnormalized) `program` text into their own sidebar row per
+// distinct program string, labeled "unassigned", so nothing already
+// imported is invisible in the meantime. scripts/backfill-show-ids.js
+// (added alongside this) does that one-time backfill using the exact same
+// conservative, exact-normalize-only resolveShowId() logic the live import
+// route already uses -- run it from a terminal to fold these into real
+// shows rows.
+let _allShowsRows = []
+
+async function loadShowsSection() {
+  const sidebar = document.getElementById('shows-sidebar-list')
+  if (!sidebar) return
+  sidebar.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:12px;text-align:center">Loading…</div>'
+
+  const [showRows, unassignedRows] = await Promise.all([
+    pgQ(`
+      SELECT s.id, s.name, s.network, COUNT(DISTINCT e.id) AS episode_count
+      FROM shows s
+      LEFT JOIN episodes e ON e.show_id = s.id
+      GROUP BY s.id
+      ORDER BY s.name
+    `),
+    pgQ(`
+      SELECT program, COUNT(*) AS episode_count
+      FROM episodes
+      WHERE show_id IS NULL AND program IS NOT NULL AND program != ''
+      GROUP BY program
+      ORDER BY program
+    `),
+  ])
+
+  _allShowsRows = [
+    ...(showRows || []).map(r => ({ kind: 'show', id: r.id, name: r.name, network: r.network, episode_count: Number(r.episode_count) })),
+    ...(unassignedRows || []).map(r => ({ kind: 'unassigned', program: r.program, name: r.program, episode_count: Number(r.episode_count) })),
+  ]
+  renderShowsSidebar(_allShowsRows)
+}
+
+function renderShowsSidebar(rows) {
+  const sidebar = document.getElementById('shows-sidebar-list')
+  if (!sidebar) return
+  if (!rows.length) {
+    sidebar.innerHTML = '<div style="padding:20px;color:var(--text3);font-size:12px;text-align:center">No shows yet</div>'
+    return
+  }
+  setHTML(sidebar, rows.map((r, i) => `
+    <div class="shows-sidebar-row" onclick="selectShow(${i})" data-show-idx="${i}"
+      style="padding:10px 14px;cursor:pointer;border-bottom:0.5px solid rgba(0,0,0,0.08);transition:background .1s,color .1s">
+      <div style="font-size:13px;font-weight:500;color:var(--text)">
+        ${esc(r.name || '(untitled)')}
+        ${r.kind === 'unassigned' ? '<span style="font-size:10px;color:#b8860b;margin-left:4px" title="Not yet linked to a shows row -- see scripts/backfill-show-ids.js">unassigned</span>' : ''}
+      </div>
+      <div style="font-size:11px;color:var(--text3);margin-top:2px">
+        ${r.episode_count} episode${r.episode_count !== 1 ? 's' : ''}${r.network ? ' · ' + esc(r.network) : ''}
+      </div>
+    </div>
+  `).join(''))
+  sidebar.querySelectorAll('.shows-sidebar-row').forEach(el => {
+    el.addEventListener('mouseenter', () => { if (!el.classList.contains('active-show')) { el.style.background = '#6F927E'; el.style.color = '#fff' } })
+    el.addEventListener('mouseleave', () => { if (el.classList.contains('active-show')) return; el.style.background = ''; el.style.color = '' })
+  })
+}
+
+function filterShowsList() {
+  const q = document.getElementById('shows-search')?.value.toLowerCase() || ''
+  const filtered = q ? _allShowsRows.filter(r => (r.name || '').toLowerCase().includes(q)) : _allShowsRows
+  renderShowsSidebar(filtered)
+}
+
+async function selectShow(idx) {
+  const row = _allShowsRows[idx]
+  if (!row) return
+  document.querySelectorAll('.shows-sidebar-row').forEach(el => { el.classList.remove('active-show'); el.style.background = ''; el.style.color = '' })
+  const activeRow = document.querySelector(`.shows-sidebar-row[data-show-idx="${idx}"]`)
+  if (activeRow) { activeRow.classList.add('active-show'); activeRow.style.background = '#E7F0EA'; activeRow.style.color = '#1a1a1a' }
+
+  const detail = document.getElementById('shows-detail')
+  detail.innerHTML = '<div style="color:var(--text3);font-size:12px">Loading…</div>'
+
+  const episodesRows = row.kind === 'show'
+    ? await pgQ(`
+        SELECT e.id, e.episode_num, e.episode_title, e.air_date,
+          (SELECT MIN(cs.id) FROM cue_sheets cs WHERE cs.episode_id = e.id) AS cue_sheet_id,
+          (SELECT COUNT(*) FROM cue_sheets cs WHERE cs.episode_id = e.id) AS cue_sheet_count
+        FROM episodes e
+        WHERE e.show_id = $1
+        ORDER BY e.air_date NULLS LAST, e.episode_num
+      `, [row.id])
+    : await pgQ(`
+        SELECT e.id, e.episode_num, e.episode_title, e.air_date,
+          (SELECT MIN(cs.id) FROM cue_sheets cs WHERE cs.episode_id = e.id) AS cue_sheet_id,
+          (SELECT COUNT(*) FROM cue_sheets cs WHERE cs.episode_id = e.id) AS cue_sheet_count
+        FROM episodes e
+        WHERE e.show_id IS NULL AND e.program = $1
+        ORDER BY e.air_date NULLS LAST, e.episode_num
+      `, [row.program])
+
+  const episodes = episodesRows || []
+  const episodeIds = episodes.map(e => e.id)
+
+  // Per-episode confirmed cue-sheet songs (distinct matched titles), then
+  // each song's own all-time confirmed royalty total -- see the big comment
+  // above for why this is title-level, not a per-episode split.
+  const epTitleRows = episodeIds.length ? await pgQ(`
+    SELECT DISTINCT cs.episode_id, csc.matched_sku_root, t.title
+    FROM cue_sheets cs
+    JOIN cue_sheet_cues csc ON csc.cue_sheet_id = cs.id
+    JOIN titles t ON t.sku_root = csc.matched_sku_root
+    WHERE cs.episode_id = ANY($1::int[]) AND csc.match_status = 'confirmed' AND csc.matched_sku_root IS NOT NULL
+  `, [episodeIds]) : []
+
+  const allSkus = [...new Set((epTitleRows || []).map(r => r.matched_sku_root))]
+  // Confirmed $ earned is admin-only, same posture as every other $ rollup
+  // in this app (Lot Portal, IP Teams, Finances) -- don't even issue the
+  // query for a non-admin session.
+  const earningsRows = (allSkus.length && currentUser?.role === 'admin') ? await pgQ(`
+    SELECT matched_sku_root, COALESCE(SUM(amount), 0) AS total
+    FROM royalty_statement_lines
+    WHERE match_status = 'confirmed' AND matched_sku_root = ANY($1::text[])
+    GROUP BY matched_sku_root
+  `, [allSkus]) : []
+  const earningsBySku = {}
+  ;(earningsRows || []).forEach(r => { earningsBySku[r.matched_sku_root] = Number(r.total) })
+
+  const titlesByEpisode = {}
+  ;(epTitleRows || []).forEach(r => (titlesByEpisode[r.episode_id] ||= []).push({ sku: r.matched_sku_root, title: r.title }))
+
+  renderShowDetail(row, episodes, titlesByEpisode, earningsBySku)
+}
+
+function renderShowDetail(row, episodes, titlesByEpisode, earningsBySku) {
+  const detail = document.getElementById('shows-detail')
+  if (!detail) return
+  const isAdmin = currentUser?.role === 'admin'
+
+  let totalConfirmedSongs = 0, totalEarned = 0, totalMissing = 0
+  const episodeRows = episodes.map(ep => {
+    const songs = titlesByEpisode[ep.id] || []
+    totalConfirmedSongs += songs.length
+    const missing = songs.filter(s => !earningsBySku[s.sku])
+    totalMissing += missing.length
+    const earned = songs.reduce((sum, s) => sum + (earningsBySku[s.sku] || 0), 0)
+    totalEarned += earned
+
+    const songList = songs.length
+      ? songs.map(s => {
+          const hasEarnings = !!earningsBySku[s.sku]
+          return `<div style="font-size:11px;${hasEarnings ? '' : 'color:#c0392b'}" title="${hasEarnings ? '' : 'No confirmed royalty statement line on file for this title'}">
+            ${esc(s.title)}${!hasEarnings ? ' <i class="ti ti-alert-triangle" style="font-size:10px"></i>' : ''}
+          </div>`
+        }).join('')
+      : '<span style="color:var(--text3);font-size:11px">no confirmed cues yet</span>'
+
+    return `
+      <tr style="border-bottom:1px solid var(--border)">
+        <td style="padding:8px;font-size:12px">${esc(ep.episode_num || '')}</td>
+        <td style="padding:8px;font-size:12px">
+          ${esc(ep.episode_title || '—')}
+          ${ep.air_date ? `<div style="font-size:10px;color:var(--text3)">${esc(ep.air_date)}</div>` : ''}
+        </td>
+        <td style="padding:8px;font-size:11px;max-width:280px">${songList}</td>
+        <td style="padding:8px;font-size:12px;text-align:center">${songs.length}</td>
+        <td style="padding:8px;font-size:12px;text-align:center;${missing.length ? 'color:#c0392b;font-weight:600' : ''}">${missing.length || '—'}</td>
+        ${isAdmin ? `<td style="padding:8px;font-size:12px;text-align:right">$${earned.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</td>` : ''}
+        <td style="padding:8px">
+          ${ep.cue_sheet_id ? `<button class="btn" style="font-size:11px;padding:4px 8px" onclick="navigateToCueSheet(${ep.cue_sheet_id})">View cue sheet${ep.cue_sheet_count > 1 ? ` (+${ep.cue_sheet_count - 1})` : ''}</button>` : '<span style="color:var(--text3);font-size:11px">no cue sheet</span>'}
+        </td>
+      </tr>`
+  }).join('')
+
+  const header = `
+    <div style="margin-bottom:14px">
+      <div style="font-size:16px;font-weight:600;color:var(--text)">${esc(row.name || '(untitled)')}</div>
+      <div style="font-size:12px;color:var(--text3);margin-top:3px">
+        ${episodes.length} episode${episodes.length !== 1 ? 's' : ''} · ${totalConfirmedSongs} confirmed cue${totalConfirmedSongs !== 1 ? 's' : ''}
+        ${totalMissing ? ` · <span style="color:#c0392b;font-weight:600">${totalMissing} missing from royalty statements</span>` : (totalConfirmedSongs ? ' · none missing from royalty statements' : '')}
+        ${isAdmin ? ` · earned $${totalEarned.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} (confirmed, title-level)` : ''}
+      </div>
+      ${row.kind === 'unassigned' ? `<div style="font-size:11px;color:#b8860b;margin-top:4px"><i class="ti ti-info-circle"></i> Not yet linked to a shows row -- run scripts/backfill-show-ids.js to merge spelling variants and enable show-level metadata.</div>` : ''}
+    </div>`
+
+  if (!episodes.length) {
+    detail.innerHTML = header + `<div style="color:var(--text3);font-size:12px">No episodes on file for this show.</div>`
+    return
+  }
+
+  detail.innerHTML = header + `
+    <table style="width:100%;border-collapse:collapse;font-size:12px">
+      <thead>
+        <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
+          <th style="padding:8px">Ep #</th><th style="padding:8px">Title</th><th style="padding:8px">Confirmed songs</th>
+          <th style="padding:8px;text-align:center">Count</th><th style="padding:8px;text-align:center">Missing</th>
+          ${isAdmin ? '<th style="padding:8px;text-align:right">Earned</th>' : ''}
+          <th style="padding:8px"></th>
+        </tr>
+      </thead>
+      <tbody>${episodeRows}</tbody>
+    </table>`
+}
+
+// Jumps to the Cue Sheets tab and opens the specific sheet -- navigate()
+// kicks off loadCueSheetsSection() (sidebar refresh) without waiting on it,
+// but openCueSheetDetail() fetches its own data independently and only
+// depends on cueSheetsCache for the sidebar highlight, so this is safe even
+// if that refresh hasn't finished yet.
+function navigateToCueSheet(cueSheetId) {
+  navigate('cuesheets')
+  openCueSheetDetail(cueSheetId)
 }
 
 // Episode reference list: a human-maintained show/episode title + air-date
