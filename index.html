@@ -428,6 +428,7 @@ webview{flex:1;border:none}
   <div class="nav-item" data-section="contacts"><i class="ti ti-users"></i> Contacts</div>
   <div class="nav-item" data-section="deals"><i class="ti ti-writing"></i> Deals</div>
   <div class="nav-item" data-admin-only data-section="finances"><i class="ti ti-report-money"></i> Finances</div>
+  <div class="nav-item" data-admin-only data-section="reset-requests"><i class="ti ti-key"></i> Password Resets</div>
 
   <div class="sidebar-bottom">
     <div style="padding:8px 14px 4px;display:flex;align-items:center;gap:7px;cursor:pointer" onclick="navigate('settings')" title="Go to Settings">
@@ -1248,6 +1249,18 @@ webview{flex:1;border:none}
         <div class="card-title">Recent statements</div>
         <div id="fin-invoices"></div>
       </div>
+    </div>
+  </div>
+
+  <!-- PASSWORD RESETS (client portal + composer portal "forgot password" requests) -->
+  <div class="section" id="section-reset-requests">
+    <div style="max-width:720px">
+      <p style="font-size:12px;color:var(--text3,#9e9d99);margin-bottom:14px">
+        Someone hit "Forgot password?" on the client portal or composer portal. Approve to get a one-time
+        reset link to copy and send them yourself (nothing is emailed automatically), or deny if it looks wrong.
+        Links expire 1 hour after you approve.
+      </p>
+      <div id="reset-requests-list"></div>
     </div>
   </div>
 
@@ -3986,7 +3999,8 @@ const SECTION_TITLES = {
   catalog:'The Collection', lots:'Lots', intake:'Intake', finish:'Finish Queue', qa:'Needs Eyeballs', lotmig:'Lot Migration',
   projects:'Projects', files:'Files',
   assignments:'Assignments',
-  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', royalties:'Royalties', settings:'Settings'
+  clients:'CLIENTS', contacts:'Contacts', deals:'Deals', finances:'Finances', ebr:'EBR', cuesheets:'Cue Sheets', royalties:'Royalties', settings:'Settings',
+  'reset-requests':'Password Resets'
 }
 let currentSection = 'today'
 
@@ -4044,6 +4058,7 @@ function onSectionEnter(id) {
   if (id === 'clients')   loadClientsSection()
   if (id === 'deals')    loadDeals()
   if (id === 'finances') renderFinances()
+  if (id === 'reset-requests') loadResetRequests()
   if (id === 'settings') {
     loadCfg().catch(() => {})
     const nameEl = document.getElementById('settings-account-name')
@@ -4059,6 +4074,49 @@ function onSectionEnter(id) {
       })
     }
   }
+}
+
+// ─── Password reset requests (client portal / composer portal "forgot
+// password" admin review queue) ────────────────────────────────────────────
+async function loadResetRequests() {
+  const el = document.getElementById('reset-requests-list')
+  const r = await fetch('/api/admin/reset-requests').then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { el.innerHTML = `<p style="color:var(--text3,#9e9d99);font-size:13px">${r.error || 'Could not load requests.'}</p>`; return }
+  if (!r.requests.length) { el.innerHTML = `<p style="color:var(--text3,#9e9d99);font-size:13px">No requests yet.</p>`; return }
+  const scopeLabel = { portal: 'Client portal', writer: 'Composer portal' }
+  const statusColor = { pending: '#b87500', approved: '#1251c2', used: '#156638', denied: '#9e9d99' }
+  el.innerHTML = `<table style="width:100%;border-collapse:collapse;font-size:13px">
+    <thead><tr style="text-align:left;color:var(--text3,#9e9d99);font-size:11px;text-transform:uppercase;letter-spacing:0.04em">
+      <th style="padding:6px 8px">Who</th><th style="padding:6px 8px">Portal</th><th style="padding:6px 8px">Requested</th>
+      <th style="padding:6px 8px">Status</th><th style="padding:6px 8px"></th>
+    </tr></thead>
+    <tbody>${r.requests.map(req => `
+      <tr style="border-top:1px solid var(--border,rgba(0,0,0,0.08))">
+        <td style="padding:8px">${req.identifier}</td>
+        <td style="padding:8px">${scopeLabel[req.scope] || req.scope}</td>
+        <td style="padding:8px">${new Date(req.requested_at).toLocaleString()}</td>
+        <td style="padding:8px;color:${statusColor[req.status] || '#666'};font-weight:600">${req.status}</td>
+        <td style="padding:8px;white-space:nowrap">${req.status === 'pending' ? `
+          <button class="btn" onclick="approveResetRequest(${req.id})" style="font-size:12px;padding:4px 9px">Approve</button>
+          <button class="btn" onclick="denyResetRequest(${req.id})" style="font-size:12px;padding:4px 9px">Deny</button>
+        ` : ''}</td>
+      </tr>`).join('')}
+    </tbody>
+  </table>`
+}
+async function approveResetRequest(id) {
+  const r = await fetch(`/api/admin/reset-requests/${id}/approve`, { method: 'POST' }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Could not approve this request.'); return }
+  // The link is only ever shown here, once -- copy and send it to the person yourself
+  // (text, Slack, however you'd normally reach them). It can't be retrieved again.
+  prompt(`Reset link (valid ${r.expiresInMinutes} minutes) -- copy and send this to them:`, r.link)
+  loadResetRequests()
+}
+async function denyResetRequest(id) {
+  if (!confirm('Deny this reset request?')) return
+  const r = await fetch(`/api/admin/reset-requests/${id}/deny`, { method: 'POST' }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Could not deny this request.'); return }
+  loadResetRequests()
 }
 
 // ─── Webview helper ────────────────────────────────────────

@@ -137,6 +137,14 @@ body{font-family:'Geist',-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-ser
     <label class="form-label">Password</label>
     <input id="login-password" type="password" class="form-input" placeholder="••••••••" style="margin-bottom:18px" autocomplete="current-password">
     <button id="login-btn" class="btn primary" style="width:100%;justify-content:center;padding:10px" onclick="doLogin()">Sign in</button>
+    <div style="text-align:center;margin-top:12px">
+      <a href="#" onclick="event.preventDefault();toggleForgotForm()" style="font-size:11px;color:var(--text3);text-decoration:underline">Forgot password?</a>
+    </div>
+    <div id="forgot-form" style="display:none;margin-top:14px;padding-top:14px;border-top:0.5px solid var(--border)">
+      <div id="forgot-msg" style="display:none;font-size:12px;margin-bottom:10px;padding:8px 10px;border-radius:var(--radius-sm)"></div>
+      <input id="forgot-email" type="email" class="form-input" placeholder="you@company.com" style="margin-bottom:10px">
+      <button class="btn" style="width:100%;justify-content:center" onclick="submitForgot()">Request reset</button>
+    </div>
     <div id="login-status" style="text-align:center;font-size:11px;color:var(--text3);margin-top:14px">Don't have access? Ask HAUS.</div>
   </div>
 </div>
@@ -301,6 +309,21 @@ async function _get(path) {
 function initials(name){ return (name||'?').split(/[\s.]+/).filter(Boolean).map(w=>w[0]).join('').toUpperCase().slice(0,2) }
 function esc(s){ return String(s==null?'':s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
 function fmtDate(s){ if(!s) return '—'; const d=new Date(s); return d.toLocaleDateString('en-US',{month:'short',day:'numeric',year:'numeric'}) }
+
+// ── Forgot password ───────────────────────────────────────
+function toggleForgotForm() {
+  const f = document.getElementById('forgot-form')
+  f.style.display = f.style.display === 'none' ? 'block' : 'none'
+}
+async function submitForgot() {
+  const email = document.getElementById('forgot-email').value.trim()
+  const msgEl = document.getElementById('forgot-msg')
+  if (!email) return
+  const r = await _post('/api/portal/request-reset', { email })
+  msgEl.textContent = r.message || 'If that email has a login, HAUS has been notified.'
+  msgEl.style.background = 'var(--blue-bg)'; msgEl.style.color = 'var(--blue-text)'
+  msgEl.style.display = 'block'
+}
 
 // ── Login ──────────────────────────────────────────────────
 async function doLogin() {
