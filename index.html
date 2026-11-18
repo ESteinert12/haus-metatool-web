@@ -9260,10 +9260,64 @@ async function cueSheetUpload(file) {
     if (!r.ok) { alert(r.error || 'Import failed'); return }
     await loadCueSheetsSection()
     openCueSheetDetail(r.cueSheetId)
+    if (r.needsShowCode) showAssignShowToast(r.needsShowCode)
   } finally {
     if (btn) { btn.disabled = false; btn.innerHTML = '<i class="ti ti-upload"></i> Import Cue Sheet' }
     document.getElementById('cuesheet-file-input').value = ''
   }
+}
+
+// "Ask at import time" (added 2026-11-18, Erik's call alongside the leading
+// -code auto-detection in api.js) -- when an import comes back with
+// needsShowCode (no program field, and either no leading code was found or
+// the code isn't in show_codes yet), prompt for the real show name right
+// there rather than leaving the episode permanently unassigned. Saving it
+// both remembers the code (show_codes, so the next file with the same code
+// resolves automatically) and applies it to this specific episode
+// immediately (POST /api/episodes/:id/resolve-show), without needing a
+// re-import. Single-file path uses a toast; the bulk modal (below) renders
+// the same prompt inline per result instead, since there can be several.
+function showAssignShowToast(needsShowCode) {
+  const { code, episodeId } = needsShowCode
+  const el = toast(
+    `No show on file${code ? ` for code "${code}"` : ''} -- `,
+    'info', 20000
+  )
+  const msgEl = el.querySelector('.toast-msg')
+  if (!msgEl) return
+  const wrap = document.createElement('span')
+  wrap.innerHTML = `<input placeholder="Show name…" style="font-size:12px;padding:2px 5px;margin-left:4px;width:140px" id="toast-show-name-${episodeId}">
+    <button class="btn" style="font-size:11px;padding:2px 7px;margin-left:4px">Save</button>`
+  msgEl.after(wrap)
+  wrap.querySelector('button').onclick = () => {
+    const name = document.getElementById(`toast-show-name-${episodeId}`)?.value
+    assignShowToEpisode(episodeId, code, name, wrap.querySelector('button'))
+  }
+}
+
+// Shared by both the single-file toast above and the bulk-import modal
+// below. Saves the show_codes mapping (only when a code was actually
+// detected -- a blank-program file with no parseable leading code at all
+// has nothing reusable to remember) then applies it to this one episode.
+async function assignShowToEpisode(episodeId, code, showName, btnEl) {
+  showName = (showName || '').trim()
+  if (!showName) { toast('Enter a show name first', 'error'); return }
+  if (code) {
+    const r1 = await fetch('/api/show-codes', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code, show_name: showName })
+    }).then(r => r.json()).catch(() => ({ ok: false }))
+    if (!r1.ok) { toast(r1.error || 'Could not save show code mapping', 'error'); return }
+  }
+  const r2 = await fetch(`/api/episodes/${episodeId}/resolve-show`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ show_name: showName })
+  }).then(r => r.json()).catch(() => ({ ok: false }))
+  if (!r2.ok) { toast(r2.error || 'Could not assign show', 'error'); return }
+  toast(`Assigned "${showName}"${code ? ` -- code "${code}" will auto-resolve next time` : ''}`, 'success')
+  const row = btnEl?.closest('[data-needs-show-row]')
+  if (row) row.outerHTML = `<div style="margin-top:4px;font-size:11px;color:#2e7d32"><i class="ti ti-check"></i> Assigned "${esc(showName)}"</div>`
+  else btnEl?.closest('.toast')?.remove()
 }
 
 // 2026-11-17, Erik: batch-import cue sheets instead of one file at a time.
@@ -9308,7 +9362,13 @@ function showCueSheetBulkResultModal(r) {
           <div style="padding:8px 10px;border-radius:6px;font-size:12px;background:${res.ok ? 'var(--bg2)' : 'rgba(192,57,43,.08)'}">
             <div style="font-weight:600;${res.ok ? '' : 'color:#c0392b'}">${res.ok ? '✓' : '✗'} ${esc(res.origName || '')}</div>
             ${res.ok
-              ? `<div style="color:var(--text3);margin-top:2px">${esc(res.format || '')} · ${res.hausCues} HAUS cues · ${res.matched} matched${res.suggested ? `, ${res.suggested} suggested` : ''}${res.ambiguous ? `, ${res.ambiguous} ambiguous` : ''}${res.unmatched ? `, ${res.unmatched} unmatched` : ''}</div>`
+              ? `<div style="color:var(--text3);margin-top:2px">${esc(res.format || '')} · ${res.hausCues} HAUS cues · ${res.matched} matched${res.suggested ? `, ${res.suggested} suggested` : ''}${res.ambiguous ? `, ${res.ambiguous} ambiguous` : ''}${res.unmatched ? `, ${res.unmatched} unmatched` : ''}</div>
+                 ${res.needsShowCode ? `
+                   <div data-needs-show-row style="margin-top:4px;padding:5px 7px;background:#FFF8E1;border-radius:4px;font-size:11px">
+                     <i class="ti ti-alert-triangle" style="color:#b8860b"></i> No show on file${res.needsShowCode.code ? ` for code "${esc(res.needsShowCode.code)}"` : ''}.
+                     <input placeholder="Show name…" style="font-size:11px;padding:2px 5px;margin-left:4px;width:130px" id="bulk-show-name-${res.needsShowCode.episodeId}">
+                     <button class="btn" style="font-size:10px;padding:1px 6px;margin-left:3px" onclick="assignShowToEpisode(${res.needsShowCode.episodeId}, ${res.needsShowCode.code ? `'${esc(res.needsShowCode.code)}'` : 'null'}, document.getElementById('bulk-show-name-${res.needsShowCode.episodeId}').value, this)">Save</button>
+                   </div>` : ''}`
               : `<div style="color:#c0392b;margin-top:2px">${esc(res.error || '')}</div>`}
           </div>
         `).join('')}

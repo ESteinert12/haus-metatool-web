@@ -61,4 +61,26 @@ async function resolveShowId(client, program) {
   return raced.rows[0]?.show_id ?? showId
 }
 
-module.exports = { normalizeShowAlias, resolveShowId }
+// Added 2026-11-18: some cue-sheet formats have NO separate program/show
+// field at all -- confirmed by reading real data, not guessed. Every one of
+// the 13 real episode rows on file had program = NULL, with the show
+// identity instead crammed into episode_num, e.g.
+// "AP8 8199 TOUGH NUT TO CRACK FINAL" (American Pickers season 8, episode
+// 8199, title "Tough Nut To Crack") -- that format's header literally only
+// has a combined "Episode#/Title" field, nothing else. Erik's call: parse a
+// leading code like "AP8" out of that text, and look it up in the
+// show_codes table (api.js) -- a small human-maintained map from code to
+// real show name, filled in via the Cue Sheets import UI the first time an
+// unrecognized code shows up. Deliberately a SEPARATE, narrower mechanism
+// from resolveShowId()/show_aliases above: this is matching a short CODE,
+// not a normalized program STRING, and the two should never be confused.
+function extractLeadingShowCode(text) {
+  const raw = String(text || '').trim()
+  if (!raw) return null
+  // letters (+ optional 1-2 trailing digits, e.g. a season number) then
+  // whitespace then a run of digits (the episode number) -- e.g. "AP8 8199".
+  const m = raw.match(/^([A-Za-z]{2,6}\d{0,2})\s+\d{2,6}\b/)
+  return m ? m[1].toUpperCase() : null
+}
+
+module.exports = { normalizeShowAlias, resolveShowId, extractLeadingShowCode }

@@ -36,7 +36,7 @@ process.on('unhandledRejection', e => {
 
 require('dotenv').config()
 
-const { normalizeShowAlias, resolveShowId } = require('./shows.js')
+const { normalizeShowAlias, resolveShowId, extractLeadingShowCode } = require('./shows.js')
 
 const express    = require('express')
 const session    = require('express-session')
@@ -1092,6 +1092,20 @@ async function runServerMigrations(pool) {
       )
     `)
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_show_aliases_show ON show_aliases(show_id)`)
+    // Added 2026-11-18 -- see shows.js's extractLeadingShowCode() comment
+    // for the real-data finding that motivated this (every episode on file
+    // had program = NULL; the show identity was crammed into episode_num
+    // instead, e.g. "AP8 8199 ..."). A small human-maintained map from a
+    // leading code to a real show name, filled in via the Cue Sheets import
+    // UI the first time an unrecognized code shows up (see
+    // POST /api/show-codes and POST /api/episodes/:id/resolve-show below).
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS show_codes (
+        code       TEXT PRIMARY KEY,   -- normalized (trim + uppercase), e.g. 'AP8'
+        show_name  TEXT NOT NULL,      -- resolved through resolveShowId() same as any other show name
+        created_at TIMESTAMPTZ DEFAULT now()
+      )
+    `)
     console.log('✅ shows tables ready')
   } catch (e) { console.warn('[schema] shows tables:', e.message) }
 
@@ -7944,7 +7958,22 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
       // disconnected duplicate.
       const program = (parsed.meta.program || '').trim() || null
       const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '')
-      const showId = await resolveShowId(client, program)
+      let showId = await resolveShowId(client, program)
+      // Added 2026-11-18: program is blank for every format that has no
+      // separate show-name field at all (confirmed against real data, see
+      // shows.js's extractLeadingShowCode() comment) -- fall back to a
+      // leading code parsed from episode_num/episode ("AP8 8199 ..." ->
+      // "AP8"), looked up in the human-maintained show_codes table. This
+      // never touches the `program` column itself (stays exactly what the
+      // sheet reported, blank or not) -- it only ever feeds show_id.
+      let detectedShowCode = null
+      if (!showId) {
+        detectedShowCode = extractLeadingShowCode(parsed.meta.episodeNum || parsed.meta.episode || '')
+        if (detectedShowCode) {
+          const mapped = await client.query(`SELECT show_name FROM show_codes WHERE code = $1`, [detectedShowCode])
+          if (mapped.rows.length) showId = await resolveShowId(client, mapped.rows[0].show_name)
+        }
+      }
       const existingEpisode = await client.query(
         `SELECT id, show_id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
         [program, episodeNum]
@@ -7965,6 +7994,11 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
         )
         episodeId = newEpisode.rows[0].id
       }
+      // Surfaced in the import result so the Cue Sheets UI can prompt right
+      // there, once, for a show name -- and remember it (show_codes) so the
+      // next file with this same code resolves automatically. null once
+      // showId is set, whether that happened just now or on a prior import.
+      const needsShowCode = !showId ? { code: detectedShowCode, episodeId } : null
 
       // Dedupe: re-uploading the exact same file for the same episode is an
       // easy mistake (and the UI gives no indication a sheet was already
@@ -8048,6 +8082,7 @@ async function importOneCueSheet(filePath, origName, hausPublisherNames, titlesI
         ambiguous: ambiguousCount,
         suggested: suggestedCount,
         unmatched: unmatchedCount,
+        needsShowCode,
       }
     }, 'cue-sheets import')
   } catch (e) {
@@ -8300,6 +8335,54 @@ app.post('/api/writer-aliases', async (req, res) => {
       [alias, canonical], 'writer-aliases upsert'
     )
     res.json({ ok: true, alias: r.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Added 2026-11-18 alongside the show_codes table -- see that table's
+// schema comment and shows.js's extractLeadingShowCode() for the real-data
+// finding that motivated this. GET lists the map (not currently used by the
+// UI, but matches the writer-aliases GET/POST pair for consistency and is
+// useful from a terminal); POST is the upsert the Cue Sheets import UI's
+// "assign a show" prompt calls.
+app.get('/api/show-codes', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const r = await _pgRetry(`SELECT code, show_name FROM show_codes ORDER BY code`, [], 'show-codes list')
+    res.json({ ok: true, codes: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+app.post('/api/show-codes', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const code = String(req.body?.code || '').trim().toUpperCase()
+    const showName = String(req.body?.show_name || '').trim()
+    if (!code || !showName) return res.json({ ok: false, error: 'code and show_name are both required' })
+    const r = await _pgRetry(
+      `INSERT INTO show_codes (code, show_name) VALUES ($1, $2)
+       ON CONFLICT (code) DO UPDATE SET show_name = EXCLUDED.show_name
+       RETURNING code, show_name`,
+      [code, showName], 'show-codes upsert'
+    )
+    res.json({ ok: true, mapping: r.rows[0] })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Applies a show name to one specific episode right now (used immediately
+// after the import-time "assign a show" prompt saves a show_codes mapping,
+// so the episode just imported doesn't have to wait for a future re-import
+// to pick it up). Goes through the same resolveShowId() as everything else
+// -- never a bespoke INSERT -- so a show name that already exists (by exact
+// normalized text) links to it instead of creating a duplicate.
+app.post('/api/episodes/:id/resolve-show', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const showName = String(req.body?.show_name || '').trim()
+    if (!showName) return res.json({ ok: false, error: 'show_name is required' })
+    const showId = await resolveShowId(pgPool, showName)
+    const r = await _pgRetry(`UPDATE episodes SET show_id = $1 WHERE id = $2`, [showId, req.params.id], 'episodes resolve-show')
+    if (!r.rowCount) return res.json({ ok: false, error: 'episode not found' })
+    res.json({ ok: true, showId })
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
