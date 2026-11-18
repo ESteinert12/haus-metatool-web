@@ -215,11 +215,25 @@ function deCamelCaseTitle(str) {
 const CUE_FILENAME_SUFFIX_BASE_WORDS = [
   'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'BUMPER', 'BUMP', 'STINGER', 'STING',
   'MAIN', 'ALT', 'NODRUMS', 'NOLEAD', 'NOVOX', 'NOPERC', 'NOBASS', 'NOSYNTHS',
-  'PERCONLY', 'PERC', 'DRUMS', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
+  'PERCONLY', 'PERC', 'DRUMS', 'DRUM', 'BASS', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
   'NA', 'LOWGTR',
 ];
+// 2026-11-18: BASS/DRUM (singular) added alongside the pre-existing plural
+// DRUMS -- confirmed real, 95 distinct titles across AMERICAN PICKERS/
+// AP_7-12/Season 7/*BACK.xlsx use a trailing "BASS+DRUMS" or "BASS + DRUM
+// MIX" suffix (e.g. "HAUS_Tight N Fast_BASS+DRUMS", "HAUS_Dusty Boots_
+// BASS+DRUMS", "HAUS_Black Magical_BASS + DRUM MIX"). The comment above this
+// list already claimed "BASS+DRUMS" was "confirmed real, frequency-counted"
+// -- it was counted but never actually added, so these 95 titles kept their
+// suffix attached (e.g. decoding to "Tight N Fast BASS+DRUMS" instead of
+// "Tight N Fast"), which even the squash-equivalence match pass can't fix
+// (squash only strips punctuation/whitespace, not un-stripped whole words).
 const CUE_FILENAME_SUFFIX_RE = new RegExp(
-  `^(?:${CUE_FILENAME_SUFFIX_BASE_WORDS.join('|')})[A-Z0-9]{0,2}$`, 'i'
+  // 2026-11-18: allow an optional hyphen before the 0-2 trailing
+  // disambiguator chars -- confirmed real: "HAUS_LouisianaTrot_FULL-01.L"
+  // ("FULL-01"), a hyphenated variant of the same disambiguator convention
+  // STINGB/BUMPERA already cover without a hyphen.
+  `^(?:${CUE_FILENAME_SUFFIX_BASE_WORDS.join('|')})-?[A-Z0-9]{0,2}$`, 'i'
 );
 // A reel/take number segment: optional composer-prefix letter + 1-3 digits +
 // optional 1-2 letters (R04A, S21, S24B, R85, 12A, C38A, C53A, T04b) -- same
@@ -266,6 +280,31 @@ function _isTechnicalFilenameToken(tok) {
     CUE_FILENAME_KEY_LOOSE_RE.test(t);
 }
 
+// 2026-11-18: a bare "NO" is never on its own a technical word (too risky to
+// strip blindly -- a real title could legitimately end in "No"), but
+// confirmed real cases split it from its partner word by a SPACE instead of
+// the compound-word convention already handled (NODRUMS/NOLEAD/NOPERC/
+// NOBASS/NOSYNTHS): "HAUS_WILD WEST_NO DRUMS", "HAUS_HOT RIG_NO LEAD MIX",
+// "HAUS_Black And Blue_No Lead", "HAUS_AllForOne_NO PERC". Rather than add a
+// bare "NO" to the suffix vocabulary (which WOULD risk eating a real
+// trailing "No"), merge a "NO" word with its immediate right neighbor into
+// the existing compound form before testing -- "NO","DRUMS" becomes
+// "NODRUMS", which the vocabulary already recognizes. Only fires when "NO"
+// is immediately followed by another word, so a lone trailing "No" is
+// untouched.
+function _mergeNoPrefixWords(words) {
+  const out = [];
+  for (let i = 0; i < words.length; i++) {
+    if (/^NO$/i.test(words[i]) && i + 1 < words.length) {
+      out.push('NO' + words[i + 1]);
+      i++;
+    } else {
+      out.push(words[i]);
+    }
+  }
+  return out;
+}
+
 // Returns a de-camelCased, spaced-out best-guess title recovered from a
 // HAUS_/AETNHAUS_-prefixed filename that does NOT fit parseHausFilenameTitle's
 // strict 5-part shape, or null if the string isn't HAUS_/AETNHAUS_-prefixed
@@ -294,7 +333,14 @@ function extractCueFilenameTitle(raw) {
   while (segments.length > 1) {
     const last = segments[segments.length - 1].trim();
     if (!last) { segments.pop(); continue; }
-    const words = last.split(/\s+/).filter(Boolean);
+    // 2026-11-18: split on '+' as well as whitespace, not just whitespace --
+    // "BASS+DRUMS" (no spaces) and "BASS + DRUM MIX" (spaces around the +)
+    // are both confirmed-real trailing suffix forms (see
+    // CUE_FILENAME_SUFFIX_BASE_WORDS's own comment); treating '+' as a
+    // delimiter here lets each side be checked as its own word via the same
+    // _isTechnicalFilenameToken() check, rather than needing a literal
+    // "BASS+DRUMS" compound entry in the suffix word list.
+    const words = _mergeNoPrefixWords(last.split(/[\s+]+/).filter(Boolean));
     if (words.length && words.every(_isTechnicalFilenameToken)) {
       segments.pop();
     } else {
