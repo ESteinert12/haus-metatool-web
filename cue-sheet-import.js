@@ -213,13 +213,50 @@ function deCamelCaseTitle(str) {
 // matching first. Each may carry a short trailing disambiguator (a letter or
 // 1-2 digits -- BUMPERA, STINGB, ALT3) -- confirmed real, not a guess.
 const CUE_FILENAME_SUFFIX_BASE_WORDS = [
-  'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'BUMPER', 'BUMP', 'STINGER', 'STING',
+  'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'DND', 'BUMPER', 'BUMP', 'STINGER', 'STING',
   'MAIN', 'ALT', 'NODRUMS', 'NOLEAD', 'NOVOX', 'NOPERC', 'NOBASS', 'NOSYNTHS',
-  'PERCONLY', 'PERC', 'DRUMS', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
+  'PERCONLY', 'PERC', 'DRUMS', 'DRUM', 'BASS', 'BAND', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
   'NA', 'LOWGTR',
 ];
+// 2026-11-18: DND added -- "HAUS_Bloodhound_DND" sits alongside
+// "HAUS_Bloodhound_FULL"/"HAUS_BLOODHOUND_FULL"/"HAUS_Bloodhound_Sting" (same
+// song, same file) as a fourth mix-variant tag. Etymology not confirmed (not
+// the same as the pre-existing DNB/DANDB "drum and bass" genre tag -- kept as
+// its own distinct entry rather than merged with those), but its role as a
+// trailing arrangement-variant tag -- not song content -- is confirmed by
+// direct comparison against its three siblings. Only 1 distinct title today;
+// added for when/if it recurs.
+// 2026-11-18: BAND added -- confirmed real across 9 distinct titles
+// (HAUS_OldBikes_BandD, HAUS_FinalOffer_BandD, HAUS_Back_on_the_Road_BandD,
+// etc., both mixed-case "BandD" and all-caps "BANDD" spellings), always as
+// "Band" + a single trailing disambiguator letter -- the exact same
+// base-word-plus-letter convention STINGB/BUMPERA already cover, just a
+// base word ("BAND") that wasn't in the list yet.
+// 2026-11-18: BASS/DRUM (singular) added alongside the pre-existing plural
+// DRUMS -- confirmed real, 95 distinct titles across AMERICAN PICKERS/
+// AP_7-12/Season 7/*BACK.xlsx use a trailing "BASS+DRUMS" or "BASS + DRUM
+// MIX" suffix (e.g. "HAUS_Tight N Fast_BASS+DRUMS", "HAUS_Dusty Boots_
+// BASS+DRUMS", "HAUS_Black Magical_BASS + DRUM MIX"). The comment above this
+// list already claimed "BASS+DRUMS" was "confirmed real, frequency-counted"
+// -- it was counted but never actually added, so these 95 titles kept their
+// suffix attached (e.g. decoding to "Tight N Fast BASS+DRUMS" instead of
+// "Tight N Fast"), which even the squash-equivalence match pass can't fix
+// (squash only strips punctuation/whitespace, not un-stripped whole words).
+// 2026-11-18: a small set of specific, confirmed-real LONGER hyphenated
+// tags that don't fit the short 0-2-char disambiguator convention -- kept
+// as its own explicit list (not a general length increase, which would
+// risk swallowing real trailing title words) because only this one exact
+// string is confirmed so far: "HAUS_MorganBrosSong_FULL-SpecialOp" /
+// "HAUS_MORGANBROSSONG_FULL-SPECIALOP", confirmed as a mix-variant tag (not
+// title content) by comparing against the same song's properly-5-part-coded
+// sibling "HAUS_MorganBrosSong_C_R11a_FULL" in the same corpus.
+const CUE_FILENAME_LONG_SUFFIX_RE = /^(?:FULL)-(?:SPECIALOP)$/i;
 const CUE_FILENAME_SUFFIX_RE = new RegExp(
-  `^(?:${CUE_FILENAME_SUFFIX_BASE_WORDS.join('|')})[A-Z0-9]{0,2}$`, 'i'
+  // 2026-11-18: allow an optional hyphen before the 0-2 trailing
+  // disambiguator chars -- confirmed real: "HAUS_LouisianaTrot_FULL-01.L"
+  // ("FULL-01"), a hyphenated variant of the same disambiguator convention
+  // STINGB/BUMPERA already cover without a hyphen.
+  `^(?:${CUE_FILENAME_SUFFIX_BASE_WORDS.join('|')})-?[A-Z0-9]{0,2}$`, 'i'
 );
 // A reel/take number segment: optional composer-prefix letter + 1-3 digits +
 // optional 1-2 letters (R04A, S21, S24B, R85, 12A, C38A, C53A, T04b) -- same
@@ -241,6 +278,26 @@ const CUE_FILENAME_REEL_RE = /^[RSCTXZ]?\d{1,3}[A-Z]{0,2}$/i;
 // ShookUpNotStirred_Fm_FULL") always had a letter, so requiring one here
 // keeps that case working while fixing the false-positive.
 const CUE_FILENAME_LEADING_REEL_RE = /^[RSCTXZ]\d{1,3}[A-Z]{0,2}$/i;
+// 2026-11-18: a second, narrower leading shape -- a valid reel code
+// (letter + 1-3 digits + letter, same composer-prefix letters as above)
+// with MORE digits glued directly on afterward, no separating underscore.
+// Confirmed real, 2 cases: "HAUS_R11a029_01_investigation" (real catalog
+// title "Investigation", confirmed by its many clean siblings elsewhere in
+// the corpus -- HAUS_Investigation_FULL, HAUS_INVESTIGATION_FULL, etc.) and
+// "HAUS_R11a1592_God Rest Ye Merry Gentlemen" (a real, well-known carol
+// title). Requires the composer-prefix letter, same reasoning as
+// CUE_FILENAME_LEADING_REEL_RE's own comment on why a bare leading number
+// is too risky to strip on its own.
+const CUE_FILENAME_LEADING_REEL_GLUED_RE = /^[RSCTXZ]\d{1,3}[A-Z]{1,2}\d+$/i;
+// A bare take/version number (pure digits, 1-3 of them) -- only ever
+// stripped as a SECOND leading segment immediately after
+// CUE_FILENAME_LEADING_REEL_GLUED_RE already fired (see
+// extractCueFilenameTitle below), never checked against segment[0] on its
+// own -- a real title's first word can legitimately be a bare number (e.g.
+// "HAUS_24_7_FULL" -> "24 7"), so this is deliberately scoped to only the
+// one confirmed-real compound case (reel-code-with-glued-digits followed by
+// a separate take number), not a general leading-number strip.
+const CUE_FILENAME_LEADING_TAKE_RE = /^\d{1,3}$/;
 // A BPM marker (140BPM, BPM120) -- technical, never part of a title.
 const CUE_FILENAME_BPM_RE = /^(?:\d{2,3}BPM|BPM\d{2,3})$/i;
 // Literal "KEY" + note-letter tokens (KEYD, KEYE, KEYEb, KEYGb, KEYAb) --
@@ -261,9 +318,35 @@ function _isTechnicalFilenameToken(tok) {
   const t = tok.trim();
   if (!t) return false;
   if (!/[A-Za-z0-9]/.test(t)) return true; // pure punctuation joiner (+, &, -)
-  return CUE_FILENAME_SUFFIX_RE.test(t) || CUE_FILENAME_REEL_RE.test(t) ||
+  return CUE_FILENAME_SUFFIX_RE.test(t) || CUE_FILENAME_LONG_SUFFIX_RE.test(t) ||
+    CUE_FILENAME_REEL_RE.test(t) ||
     CUE_FILENAME_BPM_RE.test(t) || CUE_FILENAME_KEYWORD_RE.test(t) ||
     CUE_FILENAME_KEY_LOOSE_RE.test(t);
+}
+
+// 2026-11-18: a bare "NO" is never on its own a technical word (too risky to
+// strip blindly -- a real title could legitimately end in "No"), but
+// confirmed real cases split it from its partner word by a SPACE instead of
+// the compound-word convention already handled (NODRUMS/NOLEAD/NOPERC/
+// NOBASS/NOSYNTHS): "HAUS_WILD WEST_NO DRUMS", "HAUS_HOT RIG_NO LEAD MIX",
+// "HAUS_Black And Blue_No Lead", "HAUS_AllForOne_NO PERC". Rather than add a
+// bare "NO" to the suffix vocabulary (which WOULD risk eating a real
+// trailing "No"), merge a "NO" word with its immediate right neighbor into
+// the existing compound form before testing -- "NO","DRUMS" becomes
+// "NODRUMS", which the vocabulary already recognizes. Only fires when "NO"
+// is immediately followed by another word, so a lone trailing "No" is
+// untouched.
+function _mergeNoPrefixWords(words) {
+  const out = [];
+  for (let i = 0; i < words.length; i++) {
+    if (/^NO$/i.test(words[i]) && i + 1 < words.length) {
+      out.push('NO' + words[i + 1]);
+      i++;
+    } else {
+      out.push(words[i]);
+    }
+  }
+  return out;
 }
 
 // Returns a de-camelCased, spaced-out best-guess title recovered from a
@@ -285,6 +368,15 @@ function extractCueFilenameTitle(raw) {
   // happens to start with something number-shaped).
   if (segments.length > 1 && CUE_FILENAME_LEADING_REEL_RE.test(segments[0].trim())) {
     segments = segments.slice(1);
+  } else if (segments.length > 1 && CUE_FILENAME_LEADING_REEL_GLUED_RE.test(segments[0].trim())) {
+    segments = segments.slice(1);
+    // The glued-digits shape is always immediately followed by a separate
+    // bare take/version number segment in both confirmed real cases
+    // ("R11a029_01_investigation", "R11a1592_God Rest..." -- the latter has
+    // no second number, so this only strips when there actually is one).
+    if (segments.length > 1 && CUE_FILENAME_LEADING_TAKE_RE.test(segments[0].trim())) {
+      segments = segments.slice(1);
+    }
   }
   // Strip trailing segments from the END ONLY while every whitespace-
   // separated word in the last remaining segment is itself a technical
@@ -294,7 +386,34 @@ function extractCueFilenameTitle(raw) {
   while (segments.length > 1) {
     const last = segments[segments.length - 1].trim();
     if (!last) { segments.pop(); continue; }
-    const words = last.split(/\s+/).filter(Boolean);
+    // 2026-11-18: refuse to pop a bare, letterless digit segment (the
+    // branch of CUE_FILENAME_REEL_RE/CUE_FILENAME_SUFFIX_RE's trailing
+    // disambiguator that matches e.g. "30", "13", "18" with no letter at
+    // all) when the PRECEDING remaining segment is ALSO a bare letterless
+    // digit. Confirmed real: "HAUS_24_7_FULL"/"HAUS_24_7_NoLead"/
+    // "HAUS_24_7_BUMPER" is the real title "24/7" -- popping "FULL" is
+    // correct, but then popping "7" too (since a bare digit alone matches
+    // the reel/disambiguator shape) wrongly ate half the title, leaving
+    // just "24". Checked every other confirmed-real bare-digit trailing
+    // case in the full corpus (the dominant ":30"-edit-length convention --
+    // "R36_30", "S24C_30", etc. -- plus "_13"/"_18"/the "_1"/"_2" versioning
+    // after ALT/BUMPER): every one of them is preceded by a segment that
+    // has at least one LETTER in it (a reel code, a key, or a suffix word),
+    // never by another bare digit. Two bare-digit segments back to back is
+    // the signature of a split numeric title phrase, not a marker pair.
+    const lastIsBareDigit = /^\d{1,3}$/.test(last);
+    if (lastIsBareDigit) {
+      const prevSeg = segments[segments.length - 2];
+      if (prevSeg && /^\d{1,3}$/.test(prevSeg.trim())) break;
+    }
+    // 2026-11-18: split on '+' as well as whitespace, not just whitespace --
+    // "BASS+DRUMS" (no spaces) and "BASS + DRUM MIX" (spaces around the +)
+    // are both confirmed-real trailing suffix forms (see
+    // CUE_FILENAME_SUFFIX_BASE_WORDS's own comment); treating '+' as a
+    // delimiter here lets each side be checked as its own word via the same
+    // _isTechnicalFilenameToken() check, rather than needing a literal
+    // "BASS+DRUMS" compound entry in the suffix word list.
+    const words = _mergeNoPrefixWords(last.split(/[\s+]+/).filter(Boolean));
     if (words.length && words.every(_isTechnicalFilenameToken)) {
       segments.pop();
     } else {
@@ -2218,4 +2337,18 @@ module.exports = {
   parseCueSheetFile,
   matchCueToTitles,
   classifyCue,
+  // Exported 2026-11-18 for royalty-import.js's own HAUS-filename-decode
+  // pass (see that file's matchLineToTitles -- royalty statement titles are
+  // the same HAUS-internal filename convention as cue sheets, just
+  // space-delimited instead of underscore-delimited, so the word-level
+  // technical-token classifier and the leading-reel-code regexes are reused
+  // as-is rather than re-implemented). squash() is reused there too, for
+  // the same reason it's used as cue-matching's own 4th-tier pass: a
+  // catalog title and a filename-derived title can differ only in spacing/
+  // punctuation the filename convention doesn't preserve.
+  squash,
+  _isTechnicalFilenameToken,
+  CUE_FILENAME_LEADING_REEL_RE,
+  CUE_FILENAME_LEADING_REEL_GLUED_RE,
+  CUE_FILENAME_LEADING_TAKE_RE,
 };

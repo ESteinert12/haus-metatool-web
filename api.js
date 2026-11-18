@@ -8865,7 +8865,7 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
       const lineRows = []
 
       for (const line of parsed.lines) {
-        const m = matchLineToTitles(line, titlesIndex)
+        const m = matchLineToTitles(line, titlesIndex, parsed.format)
         if (m.status === 'matched') matchedCount++
         else if (m.status === 'ambiguous') ambiguousCount++
         else unmatchedCount++
@@ -8976,7 +8976,7 @@ async function previewRoyaltyStatement(filePath, origName, titlesIndex, mappingO
 
   let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
   for (const line of parsed.lines) {
-    const m = matchLineToTitles(line, titlesIndex)
+    const m = matchLineToTitles(line, titlesIndex, parsed.format)
     if (m.status === 'matched') matchedCount++
     else if (m.status === 'ambiguous') ambiguousCount++
     else unmatchedCount++
