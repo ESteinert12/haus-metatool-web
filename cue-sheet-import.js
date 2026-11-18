@@ -2351,4 +2351,13 @@ module.exports = {
   CUE_FILENAME_LEADING_REEL_RE,
   CUE_FILENAME_LEADING_REEL_GLUED_RE,
   CUE_FILENAME_LEADING_TAKE_RE,
+  // Exported 2026-11-18 for royalty-import.js's title index -- same brand-
+  // prefix alias problem (e.g. catalog "TBT Sting Goes Solo Universal" vs
+  // a HAUS-filename-decoded title with no "TBT" anywhere), same fix: index
+  // the catalog title under its prefix-stripped norm too. See this
+  // function's own comment above for why it's safe (just an extra byNorm
+  // entry pointing at the same title row -- a real future collision falls
+  // through to the existing 2+-candidates -> 'ambiguous' handling same as
+  // any other pass, never silently resolved).
+  _stripCueTitleBrandPrefix,
 };

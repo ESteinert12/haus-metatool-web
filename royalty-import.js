@@ -41,7 +41,7 @@
 
 const fs = require('fs');
 const {
-  normTitle, titleToCamelKey, squash, _isTechnicalFilenameToken, tokenOverlapScore,
+  normTitle, titleToCamelKey, squash, _isTechnicalFilenameToken, tokenOverlapScore, _stripCueTitleBrandPrefix,
   CUE_FILENAME_LEADING_REEL_RE, CUE_FILENAME_LEADING_REEL_GLUED_RE, CUE_FILENAME_LEADING_TAKE_RE,
 } = require('./cue-sheet-import.js');
 
@@ -779,6 +779,20 @@ function _royaltyTitleIndexFor(titlesIndex) {
     for (const t of titlesIndex) {
       if (!idx.has(t.normTitle)) idx.set(t.normTitle, [])
       idx.get(t.normTitle).push(t)
+      // Brand-prefix alias (added 2026-11-18, ported from cue sheets' own
+      // _cueTitleIndexFor -- see _stripCueTitleBrandPrefix's comment there):
+      // also index this title under its prefix-stripped norm, so a royalty
+      // line reported (or HAUS-filename-decoded) WITHOUT the brand prefix
+      // still hits the exact pass above instead of falling through to the
+      // word-strip/truncation/fuzzy tiers or going unmatched entirely.
+      const stripped = _stripCueTitleBrandPrefix(t.title)
+      if (stripped) {
+        const strippedNorm = normTitle(stripped)
+        if (strippedNorm && strippedNorm !== t.normTitle) {
+          if (!idx.has(strippedNorm)) idx.set(strippedNorm, [])
+          idx.get(strippedNorm).push(t)
+        }
+      }
     }
     _royaltyTitleIndexCache.set(titlesIndex, idx)
   }
