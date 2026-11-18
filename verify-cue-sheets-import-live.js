@@ -29,6 +29,7 @@ const fs = require('fs');
 const path = require('path');
 const { Pool } = require('pg');
 const { parseCueSheetFile, matchCueToTitles, normTitle, titleToCamelKey } = require('./cue-sheet-import.js');
+const { resolveShowId, extractLeadingShowCode } = require('./shows.js');
 
 const DEFAULT_CORPUS_ROOT = '/Users/HAUS/Documents/CUE SHEETS';
 const NEW_FORMATS = ['K', 'L', 'M', 'N', 'O'];
@@ -102,6 +103,16 @@ async function _bulkInsert(client, table, cols, items, rowsFn, { returning } = {
 // real existing row), since the point is proving the write path works, not
 // touching real production dedupe state. The transaction rolls back
 // regardless unless --commit, so even this is fully reversible.
+//
+// Re-synced 2026-11-18 (Erik: "should we batch import shows/episodes from
+// our cue sheets folder?") against importOneCueSheet as it stands today --
+// this had drifted out of sync with the 2026-11-18 show_codes feature
+// (resolveShowId/extractLeadingShowCode, episodes.show_id, needsShowCode)
+// and the 2026-11-11 'suggested' match tier (matchCueToTitles can now
+// return 'suggested', not just matched/ambiguous/unmatched -- the old copy
+// here silently lumped every 'suggested' cue into unmatchedCount and never
+// captured its candidate sku_root). Both fixed below to match api.js
+// exactly; re-sync again by eye if importOneCueSheet changes further.
 async function dryRunImportOneCueSheet(client, filePath, origName, hausPublisherNames, titlesIndex) {
   const parsed = parseCueSheetFile(filePath, origName, hausPublisherNames);
   if (parsed.format === 'UNKNOWN' || parsed.format === 'EBR_SKIP') {
@@ -113,21 +124,34 @@ async function dryRunImportOneCueSheet(client, filePath, origName, hausPublisher
 
   const program = (parsed.meta.program || '').trim() || null;
   const episodeNum = (parsed.meta.episodeNum || '').trim() || origName.replace(/\.[^.]+$/, '');
+  let showId = await resolveShowId(client, program);
+  let detectedShowCode = null;
+  if (!showId) {
+    detectedShowCode = extractLeadingShowCode(parsed.meta.episodeNum || parsed.meta.episode || '');
+    if (detectedShowCode) {
+      const mapped = await client.query(`SELECT show_name FROM show_codes WHERE code = $1`, [detectedShowCode]);
+      if (mapped.rows.length) showId = await resolveShowId(client, mapped.rows[0].show_name);
+    }
+  }
   const existingEpisode = await client.query(
-    `SELECT id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
+    `SELECT id, show_id FROM episodes WHERE (program IS NOT DISTINCT FROM $1) AND episode_num = $2 LIMIT 1`,
     [program, episodeNum]
   );
   let episodeId, episodeWasExisting = false;
   if (existingEpisode.rows.length) {
     episodeId = existingEpisode.rows[0].id;
     episodeWasExisting = true;
+    if (showId && !existingEpisode.rows[0].show_id) {
+      await client.query(`UPDATE episodes SET show_id = $1 WHERE id = $2`, [showId, episodeId]);
+    }
   } else {
     const newEpisode = await client.query(
-      `INSERT INTO episodes (program, episode_title, episode_num, air_date) VALUES ($1,$2,$3,$4) RETURNING id`,
-      [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null]
+      `INSERT INTO episodes (program, episode_title, episode_num, air_date, show_id) VALUES ($1,$2,$3,$4,$5) RETURNING id`,
+      [program, parsed.meta.episode || null, episodeNum, parsed.meta.airDate || null, showId]
     );
     episodeId = newEpisode.rows[0].id;
   }
+  const needsShowCode = !showId ? { code: detectedShowCode, episodeId } : null;
 
   const dup = await client.query(
     `SELECT id, imported_at FROM cue_sheets WHERE episode_id = $1 AND source_filename = $2 LIMIT 1`,
@@ -145,13 +169,14 @@ async function dryRunImportOneCueSheet(client, filePath, origName, hausPublisher
   const cueSheetId = sheetRow.rows[0].id;
 
   const hausCues = parsed.cues.filter(c => c.isHaus);
-  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0;
+  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0, suggestedCount = 0;
   const matchResults = hausCues.map(cue => {
     const m = matchCueToTitles(cue, titlesIndex);
     if (m.status === 'matched') matchedCount++;
     else if (m.status === 'ambiguous') ambiguousCount++;
+    else if (m.status === 'suggested') suggestedCount++;
     else unmatchedCount++;
-    const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null;
+    const matchedSku = (m.status === 'matched' || m.status === 'suggested') && m.candidates.length === 1 ? m.candidates[0].sku_root : null;
     return { cue, status: m.status, confidence: m.confidence || null, matchedSku };
   });
 
@@ -172,9 +197,9 @@ async function dryRunImportOneCueSheet(client, filePath, origName, hausPublisher
   );
 
   return {
-    ok: true, origName, format: parsed.format, episodeId, episodeWasExisting, cueSheetId,
+    ok: true, origName, format: parsed.format, episodeId, episodeWasExisting, showId, needsShowCode, cueSheetId,
     totalCues: parsed.cues.length, hausCues: hausCues.length, cuesInserted: cueIds.length,
-    partiesInserted: partyRows.length, matched: matchedCount, ambiguous: ambiguousCount, unmatched: unmatchedCount,
+    partiesInserted: partyRows.length, matched: matchedCount, ambiguous: ambiguousCount, suggested: suggestedCount, unmatched: unmatchedCount,
     sampleDurations: matchResults.slice(0, 3).map(mr => mr.cue.duration),
     sampleAirDate: parsed.meta.airDate,
   };
