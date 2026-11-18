@@ -278,6 +278,26 @@ const CUE_FILENAME_REEL_RE = /^[RSCTXZ]?\d{1,3}[A-Z]{0,2}$/i;
 // ShookUpNotStirred_Fm_FULL") always had a letter, so requiring one here
 // keeps that case working while fixing the false-positive.
 const CUE_FILENAME_LEADING_REEL_RE = /^[RSCTXZ]\d{1,3}[A-Z]{0,2}$/i;
+// 2026-11-18: a second, narrower leading shape -- a valid reel code
+// (letter + 1-3 digits + letter, same composer-prefix letters as above)
+// with MORE digits glued directly on afterward, no separating underscore.
+// Confirmed real, 2 cases: "HAUS_R11a029_01_investigation" (real catalog
+// title "Investigation", confirmed by its many clean siblings elsewhere in
+// the corpus -- HAUS_Investigation_FULL, HAUS_INVESTIGATION_FULL, etc.) and
+// "HAUS_R11a1592_God Rest Ye Merry Gentlemen" (a real, well-known carol
+// title). Requires the composer-prefix letter, same reasoning as
+// CUE_FILENAME_LEADING_REEL_RE's own comment on why a bare leading number
+// is too risky to strip on its own.
+const CUE_FILENAME_LEADING_REEL_GLUED_RE = /^[RSCTXZ]\d{1,3}[A-Z]{1,2}\d+$/i;
+// A bare take/version number (pure digits, 1-3 of them) -- only ever
+// stripped as a SECOND leading segment immediately after
+// CUE_FILENAME_LEADING_REEL_GLUED_RE already fired (see
+// extractCueFilenameTitle below), never checked against segment[0] on its
+// own -- a real title's first word can legitimately be a bare number (e.g.
+// "HAUS_24_7_FULL" -> "24 7"), so this is deliberately scoped to only the
+// one confirmed-real compound case (reel-code-with-glued-digits followed by
+// a separate take number), not a general leading-number strip.
+const CUE_FILENAME_LEADING_TAKE_RE = /^\d{1,3}$/;
 // A BPM marker (140BPM, BPM120) -- technical, never part of a title.
 const CUE_FILENAME_BPM_RE = /^(?:\d{2,3}BPM|BPM\d{2,3})$/i;
 // Literal "KEY" + note-letter tokens (KEYD, KEYE, KEYEb, KEYGb, KEYAb) --
@@ -348,6 +368,15 @@ function extractCueFilenameTitle(raw) {
   // happens to start with something number-shaped).
   if (segments.length > 1 && CUE_FILENAME_LEADING_REEL_RE.test(segments[0].trim())) {
     segments = segments.slice(1);
+  } else if (segments.length > 1 && CUE_FILENAME_LEADING_REEL_GLUED_RE.test(segments[0].trim())) {
+    segments = segments.slice(1);
+    // The glued-digits shape is always immediately followed by a separate
+    // bare take/version number segment in both confirmed real cases
+    // ("R11a029_01_investigation", "R11a1592_God Rest..." -- the latter has
+    // no second number, so this only strips when there actually is one).
+    if (segments.length > 1 && CUE_FILENAME_LEADING_TAKE_RE.test(segments[0].trim())) {
+      segments = segments.slice(1);
+    }
   }
   // Strip trailing segments from the END ONLY while every whitespace-
   // separated word in the last remaining segment is itself a technical
