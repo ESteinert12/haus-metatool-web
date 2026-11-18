@@ -10411,7 +10411,7 @@ function showRoyaltyPreviewModal(preview, file) {
         <div>Period: <b>${esc(preview.period || 'unknown')}</b></div>
         <div>Lines: <b>${preview.totalLines}</b></div>
         <div>Statement total: <b>$${Number(preview.statementTotal || 0).toFixed(2)}</b></div>
-        <div>Matched / ambiguous / unmatched: <b>${preview.matched} / ${preview.ambiguous} / ${preview.unmatched}</b></div>
+        <div>Matched / suggested / ambiguous / unmatched: <b>${preview.matched} / ${preview.suggested || 0} / ${preview.ambiguous} / ${preview.unmatched}</b></div>
       </div>
       ${blockedMsg}
       <div style="display:flex;gap:8px;justify-content:flex-end;margin-top:18px">
@@ -10537,8 +10537,8 @@ function renderRoyaltyLines(lines) {
 
   const total = lines.reduce((s, l) => s + parseFloat(l.amount), 0)
   const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
-  const statusOptions = ['', 'unmatched', 'ambiguous', 'confirmed', 'matched', 'rejected']
-  const statusLabels = { '': 'All statuses', unmatched: 'Unmatched', ambiguous: 'Ambiguous', confirmed: 'Confirmed', matched: 'Matched', rejected: 'Rejected' }
+  const statusOptions = ['', 'unmatched', 'ambiguous', 'suggested', 'confirmed', 'matched', 'rejected']
+  const statusLabels = { '': 'All statuses', unmatched: 'Unmatched', ambiguous: 'Ambiguous', suggested: 'Suggested', confirmed: 'Confirmed', matched: 'Matched', rejected: 'Rejected' }
   // Confirm-all applies to every matched-but-unconfirmed line in the whole
   // statement, ignoring the current filter/status dropdown -- same choice
   // Cue Sheets' confirmAllCues() made (it uses the full currentCueSheetCues,
@@ -10638,7 +10638,7 @@ function renderRoyaltyLinesTableOnly() {
 
   const rows = visible.map(line => {
     const statusColor = {
-      confirmed: '#2e7d32', matched: '#2e7d32',
+      confirmed: '#2e7d32', matched: '#2e7d32', suggested: '#b8860b',
       ambiguous: '#c0392b', unmatched: '#c0392b', rejected: '#777',
     }[line.match_status] || '#777'
     // show_name/episode_name are display-only context for a human resolving

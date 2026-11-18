@@ -41,7 +41,7 @@
 
 const fs = require('fs');
 const {
-  normTitle, titleToCamelKey, squash, _isTechnicalFilenameToken,
+  normTitle, titleToCamelKey, squash, _isTechnicalFilenameToken, tokenOverlapScore,
   CUE_FILENAME_LEADING_REEL_RE, CUE_FILENAME_LEADING_REEL_GLUED_RE, CUE_FILENAME_LEADING_TAKE_RE,
 } = require('./cue-sheet-import.js');
 
@@ -962,6 +962,61 @@ function _matchRoyaltyHausTruncated(titleRaw, format, byNorm, titlesIndex) {
   return { status: 'unmatched' }
 }
 
+// ─── Bounded fuzzy tier for HAUS-filename-shaped titles (added 2026-11-18) ──
+// Direct port of cue-sheet-import.js's _fuzzyMatchDecodedTitle -- same
+// thresholds (FUZZY_MIN_SCORE/FUZZY_MIN_MARGIN/FUZZY_MAX_CANDIDATES_PER_WORD,
+// 0.8/0.3/200, not re-derived here, just matched by value so both pipelines
+// stay in lockstep if either is ever retuned) and the exact same safety
+// posture: only ever scores an already-decoded HAUS/AETNHAUS title (the
+// _royaltyHausWords() output the word-strip and truncation tiers above
+// already use), never a normal free-text PRO title -- a royalty line with
+// no HAUS/AETNHAUS prefix never reaches this at all. Only surfaces a
+// candidate when the best score is both high in absolute terms and clearly
+// ahead of the runner-up; anything less certain stays unmatched for the
+// manual search-to-confirm picker, same as cue sheets. Never 'matched' --
+// always 'suggested', requiring a human to click Confirm before it affects
+// money, same posture as every other suggestion feature in this app.
+const ROYALTY_FUZZY_MIN_SCORE = 0.8;
+const ROYALTY_FUZZY_MIN_MARGIN = 0.3;
+const ROYALTY_FUZZY_MAX_CANDIDATES_PER_WORD = 200;
+const _royaltyWordIndexCache = new WeakMap()
+function _royaltyWordIndexFor(titlesIndex) {
+  let idx = _royaltyWordIndexCache.get(titlesIndex)
+  if (!idx) {
+    idx = new Map()
+    for (const t of titlesIndex) {
+      for (const w of new Set((t.normTitle || '').split(' ').filter(Boolean))) {
+        if (!idx.has(w)) idx.set(w, [])
+        idx.get(w).push(t)
+      }
+    }
+    _royaltyWordIndexCache.set(titlesIndex, idx)
+  }
+  return idx
+}
+function _fuzzyMatchRoyaltyHausWords(words, byWord) {
+  const decodedNorm = normTitle(words.join(' '))
+  if (!decodedNorm) return null
+  const tokens = decodedNorm.split(' ').filter(Boolean)
+  if (tokens.length < 2) return null // too short to score reliably
+  const candidates = new Map() // sku_root -> title row
+  for (const w of tokens) {
+    const titlesForWord = byWord.get(w)
+    if (!titlesForWord || titlesForWord.length > ROYALTY_FUZZY_MAX_CANDIDATES_PER_WORD) continue
+    for (const t of titlesForWord) candidates.set(t.sku_root, t)
+  }
+  if (!candidates.size) return null
+  let best = null, bestScore = -1, second = -1
+  for (const t of candidates.values()) {
+    const score = tokenOverlapScore(decodedNorm, t.normTitle || '')
+    if (score > bestScore) { second = bestScore; bestScore = score; best = t }
+    else if (score > second) { second = score }
+  }
+  if (!best || bestScore < ROYALTY_FUZZY_MIN_SCORE) return null
+  if (second >= 0 && (bestScore - second) < ROYALTY_FUZZY_MIN_MARGIN) return null // too ambiguous, don't guess
+  return { candidate: best, score: bestScore }
+}
+
 // `format` is optional and new (2026-11-18) -- callers that don't pass it
 // (none left in api.js as of this change, but kept backward compatible for
 // any other caller) simply skip the format-gated truncation tier below,
@@ -1006,6 +1061,20 @@ function matchLineToTitles(line, titlesIndex, format) {
     const truncated = _matchRoyaltyHausTruncated(line.titleRaw, format, byNorm, titlesIndex)
     if (truncated.status === 'matched') return { status: 'matched', candidates: truncated.candidates, confidence: truncated.confidence }
     if (truncated.status === 'ambiguous') return { status: 'ambiguous', candidates: truncated.candidates, confidence: truncated.confidence }
+  }
+
+  // Bounded fuzzy tier, last resort -- only reached for a HAUS/AETNHAUS-
+  // shaped title (wordStrip.words is only ever set by _royaltyHausWords
+  // recognizing that shape in the first place) that every exact tier above
+  // has already failed to resolve. A normal free-text PRO title never has
+  // wordStrip.words set, so it never reaches this at all -- see
+  // _fuzzyMatchRoyaltyHausWords's own comment for the rest of the safety
+  // reasoning (same thresholds as cue sheets' equivalent tier).
+  if (wordStrip.words) {
+    const fuzzy = _fuzzyMatchRoyaltyHausWords(wordStrip.words, _royaltyWordIndexFor(titlesIndex))
+    if (fuzzy) {
+      return { status: 'suggested', candidates: [fuzzy.candidate], confidence: `fuzzy-suggested:${fuzzy.score.toFixed(2)}` }
+    }
   }
 
   return { status: 'unmatched', candidates: [] }

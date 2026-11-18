@@ -9014,7 +9014,16 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
       )
       const statementId = statementRow.rows[0].id
 
-      let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+      // matchLineToTitles returns 'matched' | 'ambiguous' | 'unmatched', plus
+      // 'suggested' (added 2026-11-18 -- bounded fuzzy tier for HAUS-shaped
+      // titles, mirroring cue sheets' matchCueToTitles -- see that
+      // function's own comment and royalty-import.js's
+      // _fuzzyMatchRoyaltyHausWords). A 'suggested' line still stores its
+      // candidate's sku_root so the Confirm button is enabled, but
+      // match_status stays 'suggested' (shown distinctly in the UI) rather
+      // than 'matched' until a human actually clicks Confirm -- never
+      // silently treated as matched here or anywhere downstream.
+      let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0, suggestedCount = 0
       const lineRows = []
       const episodeCache = new Map() // show_id -> episodes[], scoped to this one import
 
@@ -9022,9 +9031,10 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
         const m = matchLineToTitles(line, titlesIndex, parsed.format)
         if (m.status === 'matched') matchedCount++
         else if (m.status === 'ambiguous') ambiguousCount++
+        else if (m.status === 'suggested') suggestedCount++
         else unmatchedCount++
 
-        const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
+        const matchedSku = (m.status === 'matched' || m.status === 'suggested') && m.candidates.length === 1 ? m.candidates[0].sku_root : null
 
         let matchedEpisodeId = null
         try {
@@ -9048,6 +9058,7 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
         totalLines: parsed.lines.length,
         matched: matchedCount,
         ambiguous: ambiguousCount,
+        suggested: suggestedCount,
         unmatched: unmatchedCount,
         statementTotal: parsed.meta.statementTotal,
       }
@@ -9134,11 +9145,12 @@ async function previewRoyaltyStatement(filePath, origName, titlesIndex, mappingO
     }
   }
 
-  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
+  let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0, suggestedCount = 0
   for (const line of parsed.lines) {
     const m = matchLineToTitles(line, titlesIndex, parsed.format)
     if (m.status === 'matched') matchedCount++
     else if (m.status === 'ambiguous') ambiguousCount++
+    else if (m.status === 'suggested') suggestedCount++
     else unmatchedCount++
   }
 
@@ -9150,6 +9162,7 @@ async function previewRoyaltyStatement(filePath, origName, titlesIndex, mappingO
     totalLines: parsed.lines.length,
     matched: matchedCount,
     ambiguous: ambiguousCount,
+    suggested: suggestedCount,
     unmatched: unmatchedCount,
     statementTotal: parsed.meta.statementTotal,
     duplicateBlock,
@@ -9325,6 +9338,7 @@ app.get('/api/royalties', async (req, res) => {
         COUNT(l.id) FILTER (WHERE l.match_status = 'confirmed') AS confirmed_count,
         COUNT(l.id) FILTER (WHERE l.match_status = 'unmatched') AS unmatched_count,
         COUNT(l.id) FILTER (WHERE l.match_status = 'ambiguous') AS ambiguous_count,
+        COUNT(l.id) FILTER (WHERE l.match_status = 'suggested') AS suggested_count,
         COALESCE(SUM(l.amount), 0) AS lines_total
       FROM royalty_statements rs
       LEFT JOIN royalty_statement_lines l ON l.statement_id = rs.id
