@@ -61,4 +61,42 @@ async function resolveShowId(client, program) {
   return raced.rows[0]?.show_id ?? showId
 }
 
-module.exports = { normalizeShowAlias, resolveShowId }
+// Added 2026-11-18, for royalty-line episode matching (see
+// royalty-episode-match.js). LOOKUP ONLY -- never creates a show or an
+// alias. Royalty statement show-name text is messier than cue-sheet program
+// text (ASCAP_FOR_LEGACY truncates long names mid-word; ASCAP_FOR sometimes
+// crams episode info into the same field with a "#" separator) -- auto-
+// minting a show/alias from that text risked polluting show_aliases with
+// garbage that could then falsely match something else later. A royalty
+// line whose show text doesn't already resolve to a known alias stays
+// unmatched; a human confirming the right show via the UI is what calls
+// addShowAlias() below to actually teach the alias table, same posture as
+// royalty_format_templates' "map once, remembered forever" pattern.
+async function lookupShowId(client, program) {
+  const raw = String(program || '').trim()
+  if (!raw) return null
+  const alias = normalizeShowAlias(raw)
+  const found = await client.query(`SELECT show_id FROM show_aliases WHERE alias = $1 LIMIT 1`, [alias])
+  return found.rows.length ? found.rows[0].show_id : null
+}
+
+// Added 2026-11-18. Call this ONLY after a human has explicitly confirmed
+// that `rawText` really does refer to the EXISTING show `showId` -- this is
+// how the alias table grows for royalty data, deliberately never automatic.
+// ON CONFLICT DO NOTHING: if this exact normalized text was somehow already
+// aliased (a race, or a duplicate confirm click), this is a silent no-op
+// rather than an error -- the alias existing at all is what matters, not
+// which specific confirm click landed it. Returns true if a new alias row
+// was actually created, false if one already existed for this text.
+async function addShowAlias(client, showId, rawText) {
+  const raw = String(rawText || '').trim()
+  if (!raw) return false
+  const alias = normalizeShowAlias(raw)
+  const saved = await client.query(
+    `INSERT INTO show_aliases (show_id, alias) VALUES ($1,$2) ON CONFLICT (alias) DO NOTHING RETURNING show_id`,
+    [showId, alias]
+  )
+  return saved.rows.length > 0
+}
+
+module.exports = { normalizeShowAlias, resolveShowId, lookupShowId, addShowAlias }
