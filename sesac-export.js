@@ -26,18 +26,11 @@
 const fs = require('fs')
 const path = require('path')
 const XLSX = require('xlsx')
+const { HAUS_PUBLISHERS } = require('./ebr-shared')
 
-// Same routing table as ebr-lot-export.js's HAUS_PUBLISHERS, but SESAC wants
-// the full "PRO - COUNTRY" display string baked into the publisher's PRO
-// field too, per the template's own "SESAC - USA" / "ASCAP - USA" / "BMI -
-// USA" affiliation dropdown values (confirmed against the template's hidden
-// data_validation sheet, which lists these plus ~230 other PRO/country pairs).
-const HAUS_PUBLISHERS_SESAC = {
-  'BMI':   { name: 'SDNYC Music',           pro: 'BMI - USA',   ipi: '554507939' },
-  'SESAC': { name: 'SDBK Music',            pro: 'SESAC - USA', ipi: '555590134' },
-}
-const HAUS_DEFAULT_PUB_SESAC = { name: 'HAUS Collection Musik', pro: 'ASCAP - USA', ipi: '770983501' }
-
+// Country/affiliation display strings for the template's "PRO - COUNTRY"
+// dropdown (confirmed against the template's hidden data_validation sheet,
+// which lists these plus ~230 other PRO/country pairs).
 const PRO_DISPLAY = {
   'ASCAP':  'ASCAP - USA',
   'BMI':    'BMI - USA',
@@ -56,9 +49,19 @@ function proDisplay(pro) {
   return PRO_DISPLAY[p] || pro
 }
 
+// Same HAUS_PUBLISHERS table ebr-lot-export.js / index.html /
+// generate-ebr-export.js all use -- imported from ebr-shared.js (see that
+// file's header comment on why this used to be three hand-synced copies and
+// isn't anymore) -- with SESAC's "PRO - COUNTRY" display string applied to
+// each publisher's .pro field instead of the bare PRO code. Deriving from
+// the shared table rather than hardcoding a second copy of these
+// names/IPIs here means a real change in ebr-shared.js (a publisher
+// rename, an IPI correction) can't silently drift out of sync with what
+// this file submits to SESAC.
 function hausPubForPro(pro) {
   const p = pro ? String(pro).trim().toUpperCase() : ''
-  return HAUS_PUBLISHERS_SESAC[p] || HAUS_DEFAULT_PUB_SESAC
+  const base = HAUS_PUBLISHERS[p] || HAUS_PUBLISHERS['ASCAP']
+  return { name: base.name, ipi: base.ipi, pro: proDisplay(base.pro) }
 }
 
 function nonempty(val) {
@@ -210,12 +213,20 @@ function processSong(rowObj) {
     // ownership percentage (writers sum to ~100%, per generate-ebr-export.js's
     // own bad-split check) -- a different convention from the original
     // FileMaker pipeline transform_sesac.py was built against, where that
-    // field already held the half-share value. SESAC's "% SHARE" column
-    // wants the half-share (same thing ebrBuildRow already computes for
-    // "Original Pub World Own Share" as split_pct / 2, and the template's
-    // own comment on this column confirms it: "will be applied to both the
-    // Writer and Owner Publisher... cannot exceed 50%"), so halve it here
-    // too rather than copying the full share across.
+    // field already held the half-share value. SESAC's "% SHARE" column wants
+    // the half-share instead: the template's own comment on this column says
+    // "will be applied to both the Writer and Owner Publisher... cannot
+    // exceed 50%" -- i.e. writers collectively get 50% of the total pot and
+    // publishers the other 50%, so one writer's own % SHARE here is their
+    // relative split (summing to 100 across writers) scaled onto that 50%
+    // pot, which is just split_pct / 2.
+    // CORRECTION (2026-11-18): an earlier version of this comment claimed
+    // this "mirrors" ebrBuildRow()'s "Original Pub World Own Share" in
+    // ebr-lot-export.js -- it doesn't. That field is set to the full,
+    // unhalved split_pct there; only this SESAC path halves it. The real
+    // precedent for halving is generate-sesac-source-export.js, whose own
+    // header comment independently documents the exact same /2 convention
+    // for SESAC specifically.
     const wShareRaw = rowObj[`Writer Share ${w}`]
     const wShareVal = nonempty(wShareRaw) ? (parseFloat(wShareRaw) || 0) / 2 : 0
 
