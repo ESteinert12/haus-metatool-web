@@ -215,9 +215,15 @@ function deCamelCaseTitle(str) {
 const CUE_FILENAME_SUFFIX_BASE_WORDS = [
   'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'BUMPER', 'BUMP', 'STINGER', 'STING',
   'MAIN', 'ALT', 'NODRUMS', 'NOLEAD', 'NOVOX', 'NOPERC', 'NOBASS', 'NOSYNTHS',
-  'PERCONLY', 'PERC', 'DRUMS', 'DRUM', 'BASS', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
+  'PERCONLY', 'PERC', 'DRUMS', 'DRUM', 'BASS', 'BAND', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
   'NA', 'LOWGTR',
 ];
+// 2026-11-18: BAND added -- confirmed real across 9 distinct titles
+// (HAUS_OldBikes_BandD, HAUS_FinalOffer_BandD, HAUS_Back_on_the_Road_BandD,
+// etc., both mixed-case "BandD" and all-caps "BANDD" spellings), always as
+// "Band" + a single trailing disambiguator letter -- the exact same
+// base-word-plus-letter convention STINGB/BUMPERA already cover, just a
+// base word ("BAND") that wasn't in the list yet.
 // 2026-11-18: BASS/DRUM (singular) added alongside the pre-existing plural
 // DRUMS -- confirmed real, 95 distinct titles across AMERICAN PICKERS/
 // AP_7-12/Season 7/*BACK.xlsx use a trailing "BASS+DRUMS" or "BASS + DRUM
