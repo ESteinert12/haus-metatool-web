@@ -9799,6 +9799,10 @@ async function loadRoyaltiesSection() {
   royaltyStatementsCache = r.statements
   renderRoyaltyList()
   refreshEpisodeReferenceStatus()
+  // Shared with Cue Sheets' writer_aliases table (see loadCueSheetsSection's
+  // own call) -- loaded here too so royaltyWritersMismatch() gets real
+  // alias resolution even if Royalties is opened before Cue Sheets ever is.
+  if (!Object.keys(writerAliasMap).length) loadWriterAliasMap()
 }
 
 // ── Shows & Episodes (added 2026-11-18, Erik: "a display of tv shows and
@@ -10591,6 +10595,45 @@ function royaltyLineFilterChanged() {
 // anything else in the pane. Reads currentRoyaltyLines + _royaltyLineFilter
 // fresh every call, so it stays correct after confirmRoyaltyMatch patches
 // currentRoyaltyLines in place and calls this indirectly via renderRoyaltyLines.
+// Writer/payee validation (added 2026-11-18) -- mirrors cue sheets'
+// splitsMismatch(), deliberately scoped to BMI only. BMI's "W OR P" column
+// makes payee_role reliably 'writer'/'publisher' (see royalty-import.js's
+// parseBMI comment) -- every other format either reports no payee name at
+// all or no reliable role, and comparing an unfiltered mix of writer +
+// publisher names against team_writers is exactly the false-positive bug
+// splitsMismatch() hit on cue sheets (fixed 2026-10-14), worse here since
+// it's money -- so every other format is deliberately left unchecked (no
+// indicator shown at all, never a guess) rather than risk that again.
+//
+// A single BMI song is reported across MANY separate lines in one
+// statement -- one row per writer/publisher share, often per platform too
+// (confirmed real, see /api/royalties/:id/lines' own comment) -- never one
+// row with a full party list the way a cue sheet row already has. So this
+// aggregates every writer-role payee sharing this line's matched_sku_root
+// across the WHOLE statement into one reported-writers set before
+// comparing, rather than comparing this one line's single payee name
+// against the full catalog list -- which would show nearly every writer as
+// "missing" on every single line, a different but equally real false
+// positive.
+function royaltyWritersMismatch(line) {
+  const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
+  if (!stmt || stmt.format !== 'BMI') return null
+  if (!line.matched_sku_root || !line.catalogWriters || !line.catalogWriters.length) return null
+
+  const reported = currentRoyaltyLines
+    .filter(l => l.matched_sku_root === line.matched_sku_root && (l.payee_role || '').trim().toLowerCase() === 'writer')
+    .map(l => resolveWriterAlias(l.payee_name)).filter(Boolean)
+  if (!reported.length) return null // nothing writer-role reported for this song at all -- say nothing, don't guess
+
+  const onFile = line.catalogWriters.map(w => resolveWriterAlias(w.writer_name))
+  const reportedSet = new Set(reported)
+  const onFileSet = new Set(onFile)
+  const missingFromCatalog = [...new Set(reported.filter(n => !onFileSet.has(n)))]
+  const missingFromStatement = [...new Set(onFile.filter(n => !reportedSet.has(n)))]
+  if (!missingFromCatalog.length && !missingFromStatement.length) return null
+  return { missingFromCatalog, missingFromStatement }
+}
+
 function renderRoyaltyLinesTableOnly() {
   const wrap = document.getElementById('royalty-lines-table-wrap')
   if (!wrap) return
@@ -10668,6 +10711,7 @@ function renderRoyaltyLinesTableOnly() {
         <td style="padding:8px;font-size:11px">${esc(line.usage_type || '')}</td>
         <td style="padding:8px;font-size:12px">
           ${line.matched_title ? esc(line.matched_title) + `<div style="font-size:10px;color:var(--text3)">${esc(line.matched_sku_root)}</div>` : '<span style="color:var(--text3)">—</span>'}
+          ${(() => { const wm = royaltyWritersMismatch(line); return wm ? `<div style="font-size:10px;color:#c0392b;margin-top:2px">writers: ${wm.missingFromCatalog.length ? 'not on file -- ' + wm.missingFromCatalog.map(esc).join(', ') : ''}${wm.missingFromCatalog.length && wm.missingFromStatement.length ? ' · ' : ''}${wm.missingFromStatement.length ? 'not reported -- ' + wm.missingFromStatement.map(esc).join(', ') : ''}</div>` : '' })()}
           <div style="margin-top:4px"><input placeholder="search to override…" style="font-size:11px;width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:4px;padding:3px 6px" oninput="royaltyTitleSearch(this, ${line.id})"></div>
           <div id="royalty-search-results-${line.id}"></div>
         </td>

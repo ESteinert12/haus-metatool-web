@@ -9474,7 +9474,8 @@ app.get('/api/royalties/:id/lines', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const linesRes = await _pgRetry(
-      `SELECT l.*, t.title AS matched_title, me.episode_title AS matched_episode_title, ms.name AS matched_episode_show_name
+      `SELECT l.*, t.title AS matched_title, t.team_id AS matched_team_id,
+              me.episode_title AS matched_episode_title, ms.name AS matched_episode_show_name
        FROM royalty_statement_lines l
        LEFT JOIN titles t ON t.sku_root = l.matched_sku_root
        LEFT JOIN episodes me ON me.id = l.matched_episode_id
@@ -9495,9 +9496,24 @@ app.get('/api/royalties/:id/lines', async (req, res) => {
         unresolvedCountByTitle[l.title_normalized] = (unresolvedCountByTitle[l.title_normalized] || 0) + 1
       }
     }
+    // Writer/payee validation (added 2026-11-18, BMI only -- see
+    // royaltyWritersMismatch() in index.html for why every other format is
+    // skipped: payee_role is only reliable for BMI's own W/P column,
+    // everywhere else a publisher row can't be told apart from a writer row,
+    // which is exactly the false-positive bug splitsMismatch() hit on cue
+    // sheets, worse here since it's money). Same join cue sheets' own
+    // /api/cue-sheets/:id/cues route uses: titles.team_id -> team_writers.
+    const teamIds = [...new Set(linesRes.rows.map(l => l.matched_team_id).filter(Boolean))]
+    const writersRes = teamIds.length
+      ? await _pgRetry(`SELECT id, team_id, writer_name, pro, split_pct, ipi FROM team_writers WHERE team_id = ANY($1::text[]) ORDER BY team_id, id`, [teamIds], 'royalties team writers')
+      : { rows: [] }
+    const writersByTeam = {}
+    for (const w of writersRes.rows) (writersByTeam[w.team_id] ||= []).push(w)
+
     const lines = linesRes.rows.map(l => ({
       ...l,
       sameTitleUnresolvedCount: Math.max(0, (unresolvedCountByTitle[l.title_normalized] || 0) - (l.match_status === 'unmatched' || l.match_status === 'ambiguous' ? 1 : 0)),
+      catalogWriters: l.matched_team_id ? (writersByTeam[l.matched_team_id] || []) : [],
     }))
     res.json({ ok: true, lines })
   } catch (e) { res.json({ ok: false, error: e.message }) }
