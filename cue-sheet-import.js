@@ -2337,4 +2337,18 @@ module.exports = {
   parseCueSheetFile,
   matchCueToTitles,
   classifyCue,
+  // Exported 2026-11-18 for royalty-import.js's own HAUS-filename-decode
+  // pass (see that file's matchLineToTitles -- royalty statement titles are
+  // the same HAUS-internal filename convention as cue sheets, just
+  // space-delimited instead of underscore-delimited, so the word-level
+  // technical-token classifier and the leading-reel-code regexes are reused
+  // as-is rather than re-implemented). squash() is reused there too, for
+  // the same reason it's used as cue-matching's own 4th-tier pass: a
+  // catalog title and a filename-derived title can differ only in spacing/
+  // punctuation the filename convention doesn't preserve.
+  squash,
+  _isTechnicalFilenameToken,
+  CUE_FILENAME_LEADING_REEL_RE,
+  CUE_FILENAME_LEADING_REEL_GLUED_RE,
+  CUE_FILENAME_LEADING_TAKE_RE,
 };

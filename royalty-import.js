@@ -40,7 +40,10 @@
 // here means wrong money, not just a wrong "aired" record.
 
 const fs = require('fs');
-const { normTitle, titleToCamelKey } = require('./cue-sheet-import.js');
+const {
+  normTitle, titleToCamelKey, squash, _isTechnicalFilenameToken,
+  CUE_FILENAME_LEADING_REEL_RE, CUE_FILENAME_LEADING_REEL_GLUED_RE, CUE_FILENAME_LEADING_TAKE_RE,
+} = require('./cue-sheet-import.js');
 
 // Full quote-aware CSV line splitter (same approach as cue-sheet-import.js's
 // splitCsvLine -- no embedded newlines inside these statement fields, so the
@@ -782,7 +785,188 @@ function _royaltyTitleIndexFor(titlesIndex) {
   return idx
 }
 
-function matchLineToTitles(line, titlesIndex) {
+// ─── HAUS-internal-filename-as-title decode (added 2026-11-18) ────────────
+// Erik: "does this parsing work in the royalties area too? we need all our
+// naming logic fixes and what not there as well" -- this is that. A real-
+// corpus check (612 real statement files, 8,597 HAUS_/AETNHAUS_-prefixed
+// lines) found the exact-match tiers above resolve NONE of them (0 of
+// 8,597) -- not because the decode logic from cue-sheet-import.js's
+// extractCueFilenameTitle()/_isTechnicalFilenameToken() doesn't apply, but
+// because royalty statement titles carry the SAME HAUS filename convention
+// space-delimited instead of underscore-delimited ("HAUS COW STOMP ALT" vs
+// cue sheets' "HAUS_Cow Stomp_ALT"). extractCueFilenameTitle() only strips
+// a whole underscore-bounded SEGMENT, and a space-delimited string is one
+// single segment, so it can never fire here -- see
+// handoff-2026-11-18-royalty-haus-filename-gap.md for the full writeup.
+//
+// This is NOT a port of extractCueFilenameTitle(). The underscore boundary
+// is exactly what lets that function tell "real multi-word title content"
+// apart from "a technical tag word" without guessing -- a segment is only
+// ever popped as a WHOLE. Without that boundary, naively treating every
+// space as a splittable boundary and greedily stripping every trailing
+// technical-looking word would risk eating a real title word that
+// happens to collide with the suffix vocabulary (FAST is a recognized mix
+// tag AND a real trailing word in the catalog title "Tight N Fast").
+//
+// The fix that makes this safe for money: never trust the vocabulary
+// alone to decide how much to strip. Try stripping 0, 1, 2, ... trailing
+// words (each one individually a recognized technical token) and take the
+// FIRST (shallowest -- fewest words removed) result that resolves to
+// EXACTLY ONE catalog title. "Tight N Fast Bass+Drums" over-strips to
+// "Tight N" if you greedily strip every technical-looking trailing word
+// (FAST is in the vocabulary too) -- but stops correctly at "Tight N Fast"
+// here because that's the shallowest strip depth that already uniquely
+// matches the catalog, so "Fast" is never even considered for removal.
+// Multiple strip depths landing on different unique catalogs never
+// happens in practice (removing more text is monotonically narrowing,
+// not widening), but if depth 0 already matches, this is never reached at
+// all (handled by the exact-match tiers above).
+const ROYALTY_MAX_STRIP_WORDS = 5;
+function _wordStripAgainstCatalog(words, byNorm) {
+  for (let depth = 0; depth <= Math.min(ROYALTY_MAX_STRIP_WORDS, words.length - 1); depth++) {
+    if (depth > 0) {
+      const removed = words.slice(words.length - depth)
+      if (!removed.every(_isTechnicalFilenameToken)) break // can't justify stripping this deep -- stop, don't skip ahead
+    }
+    const remaining = words.slice(0, words.length - depth)
+    if (!remaining.length) break
+    const norm = normTitle(remaining.join(' '))
+    const hits = byNorm.get(norm) || []
+    if (hits.length === 1) return { status: 'matched', candidates: hits, depth, candidate: remaining.join(' ') }
+    if (hits.length > 1) return { status: 'ambiguous', candidates: hits, depth }
+  }
+  return { status: 'unmatched' }
+}
+
+// Splits a HAUS/AETNHAUS-prefixed royalty title into words, drops the
+// prefix word, and strips a single leading reel/take code if present --
+// same shapes and same reasoning as extractCueFilenameTitle()'s own
+// leading-strip block (CUE_FILENAME_LEADING_REEL_RE/_GLUED_RE), just
+// applied to the first SPACE-delimited word instead of the first
+// underscore segment (space vs underscore makes no difference to a reel
+// code, which is never multi-word either way).
+function _royaltyHausWords(titleRaw) {
+  const noExt = String(titleRaw || '').trim()
+  if (!/^(AETNHAUS|HAUSJUP|HAUS)[_ ]+/i.test(noExt)) return null // not a HAUS-filename-shaped title at all
+  let words = noExt.split(/[_\s+]+/).filter(Boolean)
+  words = words.slice(1) // drop the HAUS/AETNHAUS(JUP) prefix word
+  if (!words.length) return []
+  if (words.length > 1 && CUE_FILENAME_LEADING_REEL_RE.test(words[0])) {
+    words = words.slice(1)
+  } else if (words.length > 1 && CUE_FILENAME_LEADING_REEL_GLUED_RE.test(words[0])) {
+    words = words.slice(1)
+    if (words.length > 1 && CUE_FILENAME_LEADING_TAKE_RE.test(words[0])) words = words.slice(1)
+  }
+  return words
+}
+
+function _matchRoyaltyHausWordStrip(titleRaw, byNorm) {
+  const words = _royaltyHausWords(titleRaw)
+  if (!words || !words.length) return { status: 'unmatched' }
+  return Object.assign({ words }, _wordStripAgainstCatalog(words, byNorm))
+}
+
+// ─── Truncated-title recovery (added 2026-11-18, format-gated) ────────────
+// A separate, harder problem found alongside the space-delimiting one:
+// some PRO export fields cut HAUS-internal titles off mid-word (e.g. "HAUS
+// CHICKEN FRIED STRUT NODRU", "HAUS BARGAIN DRIVE BASS DRUM M"). This is
+// confirmed REAL, not assumed -- a length histogram of all 806 distinct
+// HAUS-prefixed titles in the real corpus shows an unmistakable spike at
+// EXACTLY 30 characters for BMI (73 titles vs a smooth 16/27/53 trend on
+// either side) and ASCAP_FOR_LEGACY (tops out at exactly 30, nothing
+// longer at all, vs a smooth climb up to 26). ASCAP_FOR shows NO such
+// spike -- its titles climb smoothly past 30 all the way to 35+ with no
+// cutoff artifact -- so it is NOT gated here; applying this to a format
+// with no verified truncation would be a guess, not a fix. ASCAP_DOM's
+// sample is too small (3 titles) to independently confirm but is kept in
+// the gated set since its one 30-char title is consistent with the same
+// legacy fixed-width-field lineage as BMI/ASCAP_FOR_LEGACY. Never applied
+// to a title whose length isn't exactly this confirmed cutoff -- a title
+// that merely happens to be long is not evidence of truncation.
+//
+// Two different things get truncated, handled separately then reconciled:
+//   (a) the title was already recoverable by the word-strip above, but its
+//       FINAL trailing tag word itself got chopped mid-word ("NODRU" isn't
+//       "NODRUMS", so _isTechnicalFilenameToken() correctly refuses to
+//       recognize it as technical and the strip loop stops too early).
+//       Fix: drop that last word unconditionally (we don't need to know
+//       what it used to say) and retry the normal word-strip search on
+//       what remains.
+//   (b) there's no space/underscore left to split on at all -- the TITLE
+//       ITSELF was glued (no camelCase signal survives in all-caps PRO
+//       data) and chopped mid-word ("HAUS TRINKETLIBERATIONINDECISI").
+//       Fix: squash() both sides (strip everything but letters/digits,
+//       same as cue-matching's own 4th-tier pass) and look for a catalog
+//       title that is a strict prefix/superset match either direction --
+//       the catalog's bare title can be a prefix of the longer royalty
+//       string (real title + un-stripped tag remnant), or the royalty
+//       fragment can be a prefix of the longer catalog title (the title
+//       itself was cut). A floor on how short the squashed string can be
+//       (8 chars) keeps this from firing on short, coincidental prefixes.
+// If both sub-cases resolve and agree, that's extra confidence, not
+// required. If they resolve to DIFFERENT titles, that's a genuine
+// ambiguity -- never silently pick one; if either alone resolves to more
+// than one catalog candidate, same thing. Only a clean, single, agreed (or
+// single-sided) answer is ever returned as 'matched'.
+const ROYALTY_TRUNCATION_CUTOFF = 30;
+const ROYALTY_TRUNCATING_FORMATS = new Set(['BMI', 'ASCAP_FOR_LEGACY', 'ASCAP_DOM']);
+const ROYALTY_MIN_SQUASH_LEN = 8;
+const _royaltySquashIndexCache = new WeakMap()
+function _royaltySquashIndexFor(titlesIndex) {
+  let idx = _royaltySquashIndexCache.get(titlesIndex)
+  if (!idx) {
+    const list = []
+    for (const t of titlesIndex) {
+      const sq = squash(t.title)
+      if (sq.length >= ROYALTY_MIN_SQUASH_LEN) list.push({ sq, row: t })
+    }
+    idx = list
+    _royaltySquashIndexCache.set(titlesIndex, idx)
+  }
+  return idx
+}
+function _matchRoyaltyHausTruncated(titleRaw, format, byNorm, titlesIndex) {
+  if (!ROYALTY_TRUNCATING_FORMATS.has(format)) return { status: 'unmatched' }
+  const noExt = String(titleRaw || '').trim()
+  if (noExt.length !== ROYALTY_TRUNCATION_CUTOFF) return { status: 'unmatched' }
+  const words = _royaltyHausWords(noExt)
+  if (!words) return { status: 'unmatched' }
+
+  let caseA = { status: 'unmatched' }
+  if (words.length > 1) caseA = _wordStripAgainstCatalog(words.slice(0, -1), byNorm)
+
+  const stripped = noExt.replace(/^(AETNHAUS|HAUSJUP|HAUS)[_ ]+/i, '')
+  const sRoy = squash(stripped)
+  let caseB = { status: 'unmatched' }
+  if (sRoy.length >= ROYALTY_MIN_SQUASH_LEN) {
+    const squashList = _royaltySquashIndexFor(titlesIndex)
+    const hits = []
+    for (const { sq, row } of squashList) {
+      if (sq === sRoy) continue // would already have matched an earlier exact tier
+      if (sq.startsWith(sRoy) || sRoy.startsWith(sq)) hits.push(row)
+    }
+    const uniq = [...new Set(hits)]
+    if (uniq.length === 1) caseB = { status: 'matched', candidates: uniq }
+    else if (uniq.length > 1) caseB = { status: 'ambiguous', candidates: uniq }
+  }
+
+  if (caseA.status === 'matched' && caseB.status === 'matched') {
+    const skuA = caseA.candidates[0].sku_root, skuB = caseB.candidates[0].sku_root
+    if (skuA === skuB) return { status: 'matched', candidates: caseA.candidates, confidence: 'haus-filename-truncated-both' }
+    return { status: 'ambiguous', candidates: [...caseA.candidates, ...caseB.candidates], confidence: 'haus-filename-truncated-conflict' }
+  }
+  if (caseA.status === 'matched') return { status: 'matched', candidates: caseA.candidates, confidence: 'haus-filename-truncated-tag-remnant' }
+  if (caseB.status === 'matched') return { status: 'matched', candidates: caseB.candidates, confidence: 'haus-filename-truncated-prefix' }
+  if (caseA.status === 'ambiguous') return { status: 'ambiguous', candidates: caseA.candidates, confidence: 'haus-filename-truncated-ambiguous' }
+  if (caseB.status === 'ambiguous') return { status: 'ambiguous', candidates: caseB.candidates, confidence: 'haus-filename-truncated-ambiguous' }
+  return { status: 'unmatched' }
+}
+
+// `format` is optional and new (2026-11-18) -- callers that don't pass it
+// (none left in api.js as of this change, but kept backward compatible for
+// any other caller) simply skip the format-gated truncation tier below,
+// never a behavior change to the tiers that already existed.
+function matchLineToTitles(line, titlesIndex, format) {
   const byNorm = _royaltyTitleIndexFor(titlesIndex)
   const norm = line.titleNormalized
   if (norm) {
@@ -809,6 +993,21 @@ function matchLineToTitles(line, titlesIndex) {
       if (withTheMatches.length > 1) return { status: 'ambiguous', candidates: withTheMatches, confidence: 'exact-with-article-multiple' }
     }
   }
+
+  // HAUS-internal-filename-as-title decode tiers (see the long comment
+  // above) -- only ever fire on a HAUS_/AETNHAUS_-prefixed titleRaw, so a
+  // normal free-text royalty title (the overwhelming majority of real
+  // lines) is completely unaffected, same as every tier above.
+  const wordStrip = _matchRoyaltyHausWordStrip(line.titleRaw, byNorm)
+  if (wordStrip.status === 'matched') return { status: 'matched', candidates: wordStrip.candidates, confidence: `haus-filename-wordstrip-${wordStrip.depth}` }
+  if (wordStrip.status === 'ambiguous') return { status: 'ambiguous', candidates: wordStrip.candidates, confidence: 'haus-filename-wordstrip-multiple' }
+
+  if (format) {
+    const truncated = _matchRoyaltyHausTruncated(line.titleRaw, format, byNorm, titlesIndex)
+    if (truncated.status === 'matched') return { status: 'matched', candidates: truncated.candidates, confidence: truncated.confidence }
+    if (truncated.status === 'ambiguous') return { status: 'ambiguous', candidates: truncated.candidates, confidence: truncated.confidence }
+  }
+
   return { status: 'unmatched', candidates: [] }
 }
 
