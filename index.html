@@ -1172,7 +1172,26 @@ webview{flex:1;border:none}
       <button class="btn btn-primary" onclick="document.getElementById('royalty-file-input').click()"><i class="ti ti-upload"></i> Import Statement</button>
     </div>
     <div style="display:flex;flex:1;overflow:hidden;min-height:0">
-      <div style="width:300px;flex-shrink:0;border-right:0.5px solid var(--border);overflow-y:auto;background:#C0C9CD" id="royalty-list"></div>
+      <div style="width:300px;flex-shrink:0;border-right:0.5px solid var(--border);display:flex;flex-direction:column;overflow:hidden;background:#C0C9CD">
+        <div style="padding:8px 10px;border-bottom:0.5px solid rgba(0,0,0,0.08);flex-shrink:0;display:flex;flex-direction:column;gap:6px">
+          <input id="royalty-list-filter" placeholder="Search source, period, filename…" oninput="royaltyListFilterChanged()" style="font-size:11px;padding:4px 6px;border:1px solid var(--border);border-radius:4px;background:#fff;box-sizing:border-box">
+          <div style="display:flex;gap:6px">
+            <select id="royalty-list-status-filter" onchange="royaltyListFilterChanged()" style="font-size:11px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;flex:1;min-width:0">
+              <option value="">All statements</option>
+              <option value="needs_review">Needs review</option>
+              <option value="reconciled">Reconciled</option>
+            </select>
+            <select id="royalty-list-sort" onchange="royaltyListFilterChanged()" style="font-size:11px;padding:3px 4px;border:1px solid var(--border);border-radius:4px;flex:1;min-width:0">
+              <option value="imported_desc">Most recent</option>
+              <option value="imported_asc">Oldest first</option>
+              <option value="amount_desc">Amount: high → low</option>
+              <option value="amount_asc">Amount: low → high</option>
+              <option value="review_desc">Most needing review</option>
+            </select>
+          </div>
+        </div>
+        <div style="flex:1;overflow-y:auto" id="royalty-list"></div>
+      </div>
       <div style="flex:1;overflow-y:auto;padding:20px 24px" id="royalty-detail">
         <div style="color:var(--text3);font-size:13px">Import a royalty statement, or pick one from the list, to review matches.</div>
       </div>
@@ -9769,6 +9788,7 @@ async function confirmSelectedCues() {
 let royaltyStatementsCache = []
 let currentRoyaltyStatementId = null
 let currentRoyaltyLines = []   // lines for currentRoyaltyStatementId, kept in sync by confirmRoyaltyMatch
+let _royaltyLineFilter = { q: '', status: '', col: null, dir: 1, forStatementId: undefined }  // persists across a same-statement rebuild, reset on statement switch
 
 async function loadRoyaltiesSection() {
   const r = await fetch('/api/royalties').then(r => r.json()).catch(() => ({ ok: false }))
@@ -10067,13 +10087,51 @@ async function suggestEpisodeForLine(lineId, queryTitle) {
   ).join('')
 }
 
+// Client-side filter + sort over royaltyStatementsCache (small in-memory list,
+// already fully fetched by loadRoyaltiesSection -- no new server round trip
+// needed, same posture as the royalty-lines table filter/sort below).
+function royaltyListFilterChanged() {
+  renderRoyaltyList()
+}
+
 function renderRoyaltyList() {
   const el = document.getElementById('royalty-list')
   if (!royaltyStatementsCache.length) {
     el.innerHTML = `<div style="padding:14px;color:#4b5a5e;font-size:12px">No royalty statements imported yet.</div>`
     return
   }
-  el.innerHTML = royaltyStatementsCache.map(rs => {
+
+  const q = (document.getElementById('royalty-list-filter')?.value || '').trim().toLowerCase()
+  const statusFilter = document.getElementById('royalty-list-status-filter')?.value || ''
+  const sortKey = document.getElementById('royalty-list-sort')?.value || 'imported_desc'
+
+  let rows = royaltyStatementsCache.filter(rs => {
+    if (q) {
+      const hay = `${rs.source || ''} ${rs.period || ''} ${rs.source_filename || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    const warn = parseInt(rs.unmatched_count) + parseInt(rs.ambiguous_count)
+    const reconciled = warn === 0 && parseInt(rs.line_count) > 0
+    if (statusFilter === 'needs_review' && warn === 0) return false
+    if (statusFilter === 'reconciled' && !reconciled) return false
+    return true
+  })
+
+  // imported_desc is the server's own default order (ORDER BY imported_at DESC),
+  // so re-sorting for it would just reproduce the array we already have --
+  // skip the no-op sort rather than relying on Array.sort's stability for it.
+  if (sortKey === 'imported_asc') rows = [...rows].reverse()
+  else if (sortKey === 'amount_desc') rows = [...rows].sort((a, b) => parseFloat(b.lines_total) - parseFloat(a.lines_total))
+  else if (sortKey === 'amount_asc') rows = [...rows].sort((a, b) => parseFloat(a.lines_total) - parseFloat(b.lines_total))
+  else if (sortKey === 'review_desc') rows = [...rows].sort((a, b) =>
+    (parseInt(b.unmatched_count) + parseInt(b.ambiguous_count)) - (parseInt(a.unmatched_count) + parseInt(a.ambiguous_count)))
+
+  if (!rows.length) {
+    el.innerHTML = `<div style="padding:14px;color:#4b5a5e;font-size:12px">No statements match this filter.</div>`
+    return
+  }
+
+  el.innerHTML = rows.map(rs => {
     const active = rs.id === currentRoyaltyStatementId
     const warn = parseInt(rs.unmatched_count) + parseInt(rs.ambiguous_count)
     // Reconciled (per Erik's 2026-11-04 call): every line is matched or explicitly
@@ -10465,10 +10523,112 @@ async function openRoyaltyDetail(id) {
 }
 
 function renderRoyaltyLines(lines) {
+  currentRoyaltyLines = lines
+  // Filter/sort state is kept across a confirm-triggered rebuild of this same
+  // statement (confirmRoyaltyMatch calls this function again after patching
+  // currentRoyaltyLines) -- only reset it when the user has actually switched
+  // to a different statement, so confirming a line doesn't silently clear
+  // whatever the user had filtered/sorted down to.
+  if (_royaltyLineFilter.forStatementId !== currentRoyaltyStatementId) {
+    _royaltyLineFilter = { q: '', status: '', col: null, dir: 1, forStatementId: currentRoyaltyStatementId }
+  }
   const detail = document.getElementById('royalty-detail')
   if (!lines.length) { detail.innerHTML = `<div style="color:var(--text3);font-size:12px">No lines in this statement.</div>`; return }
 
-  const rows = lines.map(line => {
+  const total = lines.reduce((s, l) => s + parseFloat(l.amount), 0)
+  const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
+  const statusOptions = ['', 'unmatched', 'ambiguous', 'confirmed', 'matched', 'rejected']
+  const statusLabels = { '': 'All statuses', unmatched: 'Unmatched', ambiguous: 'Ambiguous', confirmed: 'Confirmed', matched: 'Matched', rejected: 'Rejected' }
+  detail.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+      <div id="royalty-lines-count" style="font-size:12px;color:var(--text3)">${lines.length} lines · $${total.toFixed(2)} total</div>
+      <div style="display:flex;gap:8px">
+        ${stmt?.b2_key ? `<a href="/api/royalties/${currentRoyaltyStatementId}/original" target="_blank" class="btn" style="font-size:11px;padding:4px 8px;text-decoration:none">Download original</a>` : ''}
+        <button class="btn" style="font-size:11px;padding:4px 8px;color:#c0392b" onclick="deleteRoyaltyStatement(${currentRoyaltyStatementId})">Delete statement</button>
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-bottom:10px">
+      <input id="royalty-lines-filter" placeholder="Filter by title, payee, show/episode, or matched title…" oninput="royaltyLineFilterChanged()"
+        value="${esc(_royaltyLineFilter.q)}" style="font-size:12px;flex:1;padding:5px 8px;border:1px solid var(--border);border-radius:4px;box-sizing:border-box">
+      <select id="royalty-lines-status-filter" onchange="royaltyLineFilterChanged()" style="font-size:12px;padding:5px 8px;border:1px solid var(--border);border-radius:4px">
+        ${statusOptions.map(v => `<option value="${v}" ${_royaltyLineFilter.status === v ? 'selected' : ''}>${statusLabels[v]}</option>`).join('')}
+      </select>
+    </div>
+    <div id="royalty-lines-table-wrap"></div>`
+  renderRoyaltyLinesTableOnly()
+}
+
+// Click a column header to sort; click again to reverse. Mirrors the
+// Composers tab's sortComposers() pattern (same ↑/↓ header-indicator
+// convention) for consistency across the app.
+function sortRoyaltyLines(col) {
+  if (_royaltyLineFilter.col === col) _royaltyLineFilter.dir *= -1
+  else { _royaltyLineFilter.col = col; _royaltyLineFilter.dir = 1 }
+  renderRoyaltyLinesTableOnly()
+}
+
+let royaltyLineFilterDebounce = null
+function royaltyLineFilterChanged() {
+  clearTimeout(royaltyLineFilterDebounce)
+  royaltyLineFilterDebounce = setTimeout(() => {
+    _royaltyLineFilter.q = document.getElementById('royalty-lines-filter')?.value.trim().toLowerCase() || ''
+    _royaltyLineFilter.status = document.getElementById('royalty-lines-status-filter')?.value || ''
+    renderRoyaltyLinesTableOnly()
+  }, 150)
+}
+
+// Renders just the <table> -- never the filter/status controls or the
+// summary/download/delete header above them -- so typing in the filter box
+// or clicking a sort header doesn't rebuild (and steal focus/scroll from)
+// anything else in the pane. Reads currentRoyaltyLines + _royaltyLineFilter
+// fresh every call, so it stays correct after confirmRoyaltyMatch patches
+// currentRoyaltyLines in place and calls this indirectly via renderRoyaltyLines.
+function renderRoyaltyLinesTableOnly() {
+  const wrap = document.getElementById('royalty-lines-table-wrap')
+  if (!wrap) return
+  const { q, status, col, dir } = _royaltyLineFilter
+
+  let visible = currentRoyaltyLines.filter(line => {
+    if (status && line.match_status !== status) return false
+    if (q) {
+      const hay = `${line.title_raw || ''} ${line.payee_name || ''} ${line.show_name || ''} ${line.episode_name || ''} ${line.matched_title || ''}`.toLowerCase()
+      if (!hay.includes(q)) return false
+    }
+    return true
+  })
+
+  if (col) {
+    visible = [...visible].sort((a, b) => {
+      let av = a[col], bv = b[col]
+      if (col === 'amount') { av = parseFloat(av) || 0; bv = parseFloat(bv) || 0 }
+      else if (col === 'show_name') { av = (a.show_name || a.episode_name || ''); bv = (b.show_name || b.episode_name || '') }
+      if (typeof av === 'string' || typeof bv === 'string') {
+        av = (av ?? '').toString().toLowerCase(); bv = (bv ?? '').toString().toLowerCase()
+      }
+      return av < bv ? -dir : av > bv ? dir : 0
+    })
+  }
+
+  const countEl = document.getElementById('royalty-lines-count')
+  if (countEl) {
+    const total = currentRoyaltyLines.reduce((s, l) => s + parseFloat(l.amount), 0)
+    countEl.textContent = (visible.length === currentRoyaltyLines.length)
+      ? `${currentRoyaltyLines.length} lines · $${total.toFixed(2)} total`
+      : `${visible.length} of ${currentRoyaltyLines.length} lines shown (filtered) · $${total.toFixed(2)} total`
+  }
+
+  if (!visible.length) {
+    wrap.innerHTML = `<div style="color:var(--text3);font-size:12px;padding:12px 0">No lines match this filter.</div>`
+    return
+  }
+
+  const headerCell = (key, label, align) => {
+    const active = col === key
+    const arrow = active ? (dir === 1 ? ' ↑' : ' ↓') : ''
+    return `<th style="padding:8px;cursor:pointer;user-select:none;white-space:nowrap${align ? ';text-align:' + align : ''}" onclick="sortRoyaltyLines('${key}')">${esc(label)}${arrow}</th>`
+  }
+
+  const rows = visible.map(line => {
     const statusColor = {
       confirmed: '#2e7d32', matched: '#2e7d32',
       ambiguous: '#c0392b', unmatched: '#c0392b', rejected: '#777',
@@ -10503,22 +10663,13 @@ function renderRoyaltyLines(lines) {
       </tr>`
   }).join('')
 
-  const total = lines.reduce((s, l) => s + parseFloat(l.amount), 0)
-  const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
-  detail.innerHTML = `
-    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
-      <div style="font-size:12px;color:var(--text3)">${lines.length} lines · $${total.toFixed(2)} total</div>
-      <div style="display:flex;gap:8px">
-        ${stmt?.b2_key ? `<a href="/api/royalties/${currentRoyaltyStatementId}/original" target="_blank" class="btn" style="font-size:11px;padding:4px 8px;text-decoration:none">Download original</a>` : ''}
-        <button class="btn" style="font-size:11px;padding:4px 8px;color:#c0392b" onclick="deleteRoyaltyStatement(${currentRoyaltyStatementId})">Delete statement</button>
-      </div>
-    </div>
+  wrap.innerHTML = `
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
-          <th style="padding:8px">Statement title</th><th style="padding:8px">Show / episode</th><th style="padding:8px">Payee</th><th style="padding:8px;text-align:right">Amount</th>
-          <th style="padding:8px">Usage</th><th style="padding:8px">Matched catalog title</th>
-          <th style="padding:8px">Status</th><th style="padding:8px"></th>
+          ${headerCell('title_raw', 'Statement title')}${headerCell('show_name', 'Show / episode')}${headerCell('payee_name', 'Payee')}
+          ${headerCell('amount', 'Amount', 'right')}${headerCell('usage_type', 'Usage')}${headerCell('matched_title', 'Matched catalog title')}
+          ${headerCell('match_status', 'Status')}<th style="padding:8px"></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
