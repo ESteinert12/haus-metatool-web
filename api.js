@@ -8973,9 +8973,11 @@ app.get('/api/royalties/:id/lines', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const linesRes = await _pgRetry(
-      `SELECT l.*, t.title AS matched_title
+      `SELECT l.*, t.title AS matched_title, me.episode_title AS matched_episode_title, ms.name AS matched_episode_show_name
        FROM royalty_statement_lines l
        LEFT JOIN titles t ON t.sku_root = l.matched_sku_root
+       LEFT JOIN episodes me ON me.id = l.matched_episode_id
+       LEFT JOIN shows ms ON ms.id = me.show_id
        WHERE l.statement_id = $1
        ORDER BY l.amount DESC, l.id`,
       [req.params.id],
