@@ -17,10 +17,25 @@
 // can share a single advisory-locked transaction -- something the old
 // client-side ebrAutoRunForLot could not do, because its pgQ() only ever
 // held a connection for the length of one HTTP request.
+//
+// SESAC path (added 2026-11-18, rebased from the old feature/sesac-lot-export
+// branch onto this file's current state): per Erik's 2026-10-28 decision
+// (commit c0d2cf4, "EBR eligibility: stop excluding mixed-PRO titles"), a
+// title with SOME SESAC writers and some ASCAP/BMI writers already goes
+// through the normal EBR/MusicMark path below -- the SESAC writer's row is
+// built inline like any other writer, via ebrPublisherFor()'s existing
+// HAUS_PUBLISHERS.SESAC entry. Only a PURE-SESAC title (every writer SESAC,
+// no ASCAP/BMI claim at all) has no EBR path -- that's what sesac-export.js
+// now handles, building a separate SESAC Bulk Song Recordings file from the
+// same wide ebrBuildRow() rows. This is a narrower scope than the original
+// branch, which routed ANY title with a SESAC writer here -- that routing
+// predated Erik's mixed-PRO decision and would have double-submitted mixed
+// titles (once via EBR, once via this file) had it been merged as-is.
 
 const fs = require('fs');
 const path = require('path');
 const XLSX = require('xlsx');
+const sesacExport = require('./sesac-export');
 
 const EBR_SEQ_LOCK_KEY = 771983501; // same key generate-ebr-export.js uses
 const SPLIT_TOLERANCE_PCT = 0.5;     // same tolerance as Fix 4 / the index.html port
@@ -128,7 +143,7 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
      ORDER BY t.title ASC`,
     [lotId]
   );
-  if (!titleRows.length) return { ok: true, exported: 0, skipped: [], reason: 'no titles in lot' };
+  if (!titleRows.length) return { ok: true, exported: 0, sesacExported: 0, skipped: [], reason: 'no titles in lot' };
 
   const teamIds = [...new Set(titleRows.map(t => t.team_id).filter(Boolean))];
   const skuRoots = titleRows.map(t => t.sku_root);
@@ -154,60 +169,108 @@ async function runLotAutoExport(pgPool, { lotId, lotName, outDir, senderCode }) 
     stemsBySku[s.sku_root].push(s);
   });
 
-  const exportable = [], skipped = [];
+  // Pure-SESAC titles (every writer SESAC, no ASCAP/BMI claim at all) go to
+  // sesacCandidates instead of `skipped` -- see the file-header comment for
+  // why this is "every", not "some" (Erik's 2026-10-28 mixed-PRO decision).
+  const exportable = [], sesacCandidates = [], skipped = [];
   titleRows.forEach(t => {
     const w = writersByTeam[t.team_id] || [];
     const splitSum = w.slice(0, 10).reduce((s, x) => s + parseFloat(x.split_pct || 0), 0);
     const badSplit = w.length > 0 && Math.abs(splitSum - 100) > SPLIT_TOLERANCE_PCT;
-    if (t.ack_status === 'RA')                skipped.push({ sku: t.sku_root, reason: 'already accepted by MusicMark' });
-    else if (t.is_jup)                        skipped.push({ sku: t.sku_root, reason: 'JUP title — not supported yet' });
+    const allSesac = w.length > 0 && w.every(x => x.pro === 'SESAC');
+    if (t.ack_status === 'RA')                   skipped.push({ sku: t.sku_root, reason: 'already accepted by MusicMark' });
+    else if (t.is_jup)                           skipped.push({ sku: t.sku_root, reason: 'JUP title — not supported yet' });
     else if (/x/i.test(t.composer_prefix || '')) skipped.push({ sku: t.sku_root, reason: 'X-composer team — excluded from EBR' });
-    else if (!w.length)                       skipped.push({ sku: t.sku_root, reason: 'no writers on file' });
-    else if (w.every(x => x.pro === 'SESAC'))  skipped.push({ sku: t.sku_root, reason: 'all writers SESAC — not an EBR/joint ASCAP-BMI work' });
-    else if (badSplit)                        skipped.push({ sku: t.sku_root, reason: `writer splits sum to ${splitSum}%, not ~100% — fix before export` });
-    else                                       exportable.push(t);
+    else if (!w.length)                          skipped.push({ sku: t.sku_root, reason: 'no writers on file' });
+    else if (badSplit)                           skipped.push({ sku: t.sku_root, reason: `writer splits sum to ${splitSum}%, not ~100% — fix before export` });
+    else if (allSesac)                           sesacCandidates.push(t);
+    else                                          exportable.push(t);
   });
 
-  if (!exportable.length) return { ok: true, exported: 0, skipped, reason: 'nothing eligible after filters' };
+  if (!exportable.length && !sesacCandidates.length) {
+    return { ok: true, exported: 0, sesacExported: 0, skipped, reason: 'nothing eligible after filters' };
+  }
 
   const dataRows = exportable.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
+  const sesacWideRows = sesacCandidates.map(t => ebrBuildRow(t, writersByTeam, stemsBySku));
 
   fs.mkdirSync(outDir, { recursive: true });
 
   const client = await pgPool.connect();
-  let fileName, outPath, seq;
+  let fileName, outPath, sesacFileName, sesacOutPath, sesacWarnings = [];
   try {
     await client.query('BEGIN');
     await client.query('SELECT pg_advisory_xact_lock($1)', [EBR_SEQ_LOCK_KEY]);
 
-    const { rows: seqRows } = await client.query(`SELECT COALESCE(MAX(sequence_num),0) + 1 AS next FROM ebr_export_log`);
-    seq = seqRows.length ? seqRows[0].next : 1;
+    const claimSeq = async () => {
+      const { rows } = await client.query(`SELECT COALESCE(MAX(sequence_num),0) + 1 AS next FROM ebr_export_log`);
+      return rows.length ? rows[0].next : 1;
+    };
     const yy = String(new Date().getFullYear()).slice(-2);
-    const nnnn = String(seq).padStart(4, '0');
-    fileName = `EB${yy}${nnnn}${senderCode}_707.xlsx`;
-    outPath = path.join(outDir, fileName);
 
-    const ws = XLSX.utils.aoa_to_sheet([EBR_HEADERS, ...dataRows]);
-    const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, ws, 'Registrations');
-    XLSX.writeFile(wb, outPath);
+    if (exportable.length) {
+      const seq = await claimSeq();
+      const nnnn = String(seq).padStart(4, '0');
+      fileName = `EB${yy}${nnnn}${senderCode}_707.xlsx`;
+      outPath = path.join(outDir, fileName);
 
-    await client.query(
-      `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
-      [seq, fileName, exportable.length, exportable.map(t => t.sku_root).join(',')]
-    );
+      const ws = XLSX.utils.aoa_to_sheet([EBR_HEADERS, ...dataRows]);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Registrations');
+      XLSX.writeFile(wb, outPath);
+
+      await client.query(
+        `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
+        [seq, fileName, exportable.length, exportable.map(t => t.sku_root).join(',')]
+      );
+    }
+
+    if (sesacCandidates.length) {
+      // sesac-export.js does the actual column transform (one row per
+      // writer, IPI-matched publisher routing, 50%-share validation) --
+      // ported from transform_sesac.py, see that module's header comment.
+      // Logged into the same ebr_export_log table under its own
+      // freshly-claimed sequence number -- no dedicated SESAC log table,
+      // and reusing this one keeps a single audit trail and keeps
+      // sequencing consistent with the ASCAP/BMI path.
+      const { rows: sesacRows, warnings } = sesacExport.buildSesacExport(EBR_HEADERS, sesacWideRows);
+      sesacWarnings = warnings;
+      const sesacSeq = await claimSeq();
+      const sesacNnnn = String(sesacSeq).padStart(4, '0');
+      sesacFileName = `EB${yy}${sesacNnnn}${senderCode}_707_SESAC.xlsx`;
+      sesacOutPath = path.join(outDir, sesacFileName);
+
+      sesacExport.writeSesacFile(sesacRows, sesacOutPath);
+
+      await client.query(
+        `INSERT INTO ebr_export_log (sequence_num, file_name, title_count, sku_list) VALUES ($1,$2,$3,$4)`,
+        [sesacSeq, sesacFileName, sesacCandidates.length, sesacCandidates.map(t => t.sku_root).join(',')]
+      );
+    }
+
     await client.query('COMMIT');
   } catch (e) {
     await client.query('ROLLBACK').catch(() => {});
     if (outPath && fs.existsSync(outPath)) {
       try { fs.unlinkSync(outPath); } catch {}
     }
+    if (sesacOutPath && fs.existsSync(sesacOutPath)) {
+      try { fs.unlinkSync(sesacOutPath); } catch {}
+    }
     return { ok: false, error: e.message };
   } finally {
     client.release();
   }
 
-  return { ok: true, exported: exportable.length, fileName, skipped };
+  return {
+    ok: true,
+    exported: exportable.length,
+    fileName,
+    sesacExported: sesacCandidates.length,
+    sesacFileName,
+    sesacWarnings,
+    skipped,
+  };
 }
 
 module.exports = { runLotAutoExport, EBR_HEADERS, ebrBuildRow, ebrSplitName, ebrPublisherFor, HAUS_PUBLISHERS };
