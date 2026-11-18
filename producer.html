@@ -660,7 +660,7 @@ function selectAssignment(id) {
   const sc = {Pending:'gray','In Progress':'blue','Needs Review':'amber',Delivered:'green'}
   document.getElementById('assign-detail').innerHTML = `
     <div style="margin-bottom:14px">
-      <div style="font-size:16px;font-weight:600;margin-bottom:6px;line-height:1.4">${a.title}</div>
+      <div style="font-size:16px;font-weight:600;margin-bottom:6px;line-height:1.4">${escapeHtml(a.title)}</div>
       <div style="display:flex;gap:5px;flex-wrap:wrap">
         <span class="pill ${sc[a.status]}">${a.status}</span>
         <span class="pill gray">${a.type}</span>
@@ -668,21 +668,21 @@ function selectAssignment(id) {
       </div>
     </div>
     <div class="detail-block">
-      ${a.track?`<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px"><span style="color:var(--text3)">Track</span><span style="font-family:monospace;font-size:11px">${a.track}</span></div>`:''}
+      ${a.track?`<div style="display:flex;justify-content:space-between;font-size:12px;margin-bottom:5px"><span style="color:var(--text3)">Track</span><span style="font-family:monospace;font-size:11px">${escapeHtml(a.track)}</span></div>`:''}
       <div style="display:flex;justify-content:space-between;font-size:12px"><span style="color:var(--text3)">Due</span><span style="font-weight:500">${a.dueDate?fmtDateFull(a.dueDate):'—'}</span></div>
     </div>
-    ${a.notes?`<div class="detail-block" style="color:var(--amber-text);font-size:12px">${a.notes}</div>`:''}
+    ${a.notes?`<div class="detail-block" style="color:var(--amber-text);font-size:12px">${escapeHtml(a.notes)}</div>`:''}
     <div class="detail-block">
       <div class="section-lbl">Brief</div>
-      <div style="font-size:13px;color:var(--text);line-height:1.65">${a.brief || '—'}</div>
+      <div style="font-size:13px;color:var(--text);line-height:1.65">${escapeHtml(a.brief || '—')}</div>
     </div>
     <div class="detail-block">
       <div class="section-lbl">Source files</div>
-      ${a.files.length ? a.files.map(f=>`<div class="file-row"><i class="ti ti-file-music"></i><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${f}</span></div>`).join('') : '<p style="font-size:12px;color:var(--text3)">None attached</p>'}
+      ${a.files.length ? a.files.map(f=>`<div class="file-row"><i class="ti ti-file-music"></i><span style="flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${escapeHtml(f)}</span></div>`).join('') : '<p style="font-size:12px;color:var(--text3)">None attached</p>'}
     </div>
     <div class="detail-block">
       <div class="section-lbl">Deliverables</div>
-      ${a.deliverables.length ? a.deliverables.map(f=>`<div class="deliv-row"><i class="ti ti-circle-check"></i><span style="flex:1">${f}</span></div>`).join('') : '<p style="font-size:12px;color:var(--text3)">None yet</p>'}
+      ${a.deliverables.length ? a.deliverables.map(f=>`<div class="deliv-row"><i class="ti ti-circle-check"></i><span style="flex:1">${escapeHtml(f)}</span></div>`).join('') : '<p style="font-size:12px;color:var(--text3)">None yet</p>'}
       <p style="font-size:11px;color:var(--text3);margin-top:8px"><i class="ti ti-info-circle"></i> File upload for deliverables isn’t wired up on the server yet — send files the usual way, and move the status below when it’s ready for review.</p>
     </div>`
   const nextActions = {
@@ -705,14 +705,14 @@ async function setAssignStatus(id, status) {
 async function loadMyTitles() {
   const el = document.getElementById('titles-list')
   const r = await _get('/api/writer-portal/my-titles')
-  if (!r.ok) { el.innerHTML = `<div class="empty-state"><i class="ti ti-alert-circle"></i><p>${r.error || 'Could not load titles.'}</p></div>`; return }
+  if (!r.ok) { el.innerHTML = `<div class="empty-state"><i class="ti ti-alert-circle"></i><p>${escapeHtml(r.error || 'Could not load titles.')}</p></div>`; return }
   if (!r.titles.length) { el.innerHTML = `<div class="empty-state"><i class="ti ti-music-off"></i><p>No titles yet</p></div>`; return }
   el.innerHTML = r.titles.map(t => `
     <div class="file-row" style="padding:10px 0">
       <i class="ti ti-music"></i>
       <div style="flex:1;min-width:0">
-        <div style="font-size:13px;font-weight:500">${t.title}</div>
-        <div style="font-size:11px;color:var(--text3)">${t.sku_root} · ${t.genre||'—'} · ${t.status||'—'}${t.has_stems?' · stems delivered':''}</div>
+        <div style="font-size:13px;font-weight:500">${escapeHtml(t.title)}</div>
+        <div style="font-size:11px;color:var(--text3)">${escapeHtml(t.sku_root)} · ${escapeHtml(t.genre||'—')} · ${escapeHtml(t.status||'—')}${t.has_stems?' · stems delivered':''}</div>
       </div>
     </div>`).join('')
 }
@@ -734,7 +734,7 @@ function renderNotifPanel() {
     ? `<div class="empty-state" style="padding:20px"><i class="ti ti-bell-off"></i><p>No notifications</p></div>`
     : NOTIFICATIONS.map(n => `
         <div onclick="markNotifRead(${n.notification_id})" style="padding:10px 14px;border-bottom:0.5px solid var(--border);cursor:pointer;${n.read_at?'opacity:0.55':''}">
-          <div style="font-size:12px;color:var(--text)">${n.message}</div>
+          <div style="font-size:12px;color:var(--text)">${escapeHtml(n.message)}</div>
           <div style="font-size:10px;color:var(--text3);margin-top:3px">${fmtDateFull(n.created_at)}</div>
         </div>`).join('')
 }
@@ -1011,6 +1011,7 @@ function clearRef(){
 }
 
 // ── Utilities ─────────────────────────────────────────────────
+function escapeHtml(s) { return String(s == null ? '' : s).replace(/[&<>"\']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
 function fmtDate(s){ if(!s)return'—'; const d=new Date(s.length<=10 ? s+'T12:00:00' : s); return `${MONTHS[d.getUTCMonth()].slice(0,3)} ${d.getUTCDate()}` }
 function fmtDateFull(s){ if(!s)return'—'; const d=new Date(s.length<=10 ? s+'T12:00:00' : s); return `${MONTHS[d.getUTCMonth()]} ${d.getUTCDate()}, ${d.getUTCFullYear()}` }
 function autoResize(el){ el.style.height='auto'; el.style.height=Math.min(el.scrollHeight,120)+'px' }
