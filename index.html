@@ -10642,10 +10642,19 @@ function renderRoyaltyLinesTableOnly() {
          <div><a href="#" data-suggest-title="${esc(episodeQueryTitle)}" data-line-id="${line.id}" onclick="event.preventDefault();suggestEpisodeForLine(this.dataset.lineId, this.dataset.suggestTitle)" style="font-size:10px">suggest episode</a></div>
          <div id="episode-suggest-${line.id}"></div>`
       : '<span style="color:var(--text3)">—</span>'
+    // Real link from the parsed show_name/episode_name text to an actual
+    // episodes row (see royalty-episode-match.js) -- distinct from the
+    // episodeContext column above, which is raw display text plus the
+    // unrelated, pre-existing episode_reference "suggest" link.
+    const linkedEpisodeCell = line.matched_episode_id
+      ? `${esc(line.matched_episode_show_name || '')}${line.matched_episode_show_name && line.matched_episode_title ? ' — ' : ''}${esc(line.matched_episode_title || '')}`
+      : `<input placeholder="search show/episode…" style="font-size:11px;width:100%;box-sizing:border-box;border:1px solid var(--border);border-radius:4px;padding:3px 6px" oninput="royaltyEpisodeSearch(this, ${line.id})">
+         <div id="royalty-episode-search-results-${line.id}"></div>`
     return `
       <tr style="border-bottom:1px solid var(--border)">
         <td style="padding:8px;font-size:12px">${esc(line.title_raw)}</td>
         <td style="padding:8px;font-size:11px">${episodeContext}</td>
+        <td style="padding:8px;font-size:11px">${linkedEpisodeCell}</td>
         <td style="padding:8px;font-size:11px">${esc(line.payee_name || '')}${line.payee_role ? ` <span style="color:var(--text3)">(${esc(line.payee_role)})</span>` : ''}</td>
         <td style="padding:8px;font-size:12px;text-align:right">$${parseFloat(line.amount).toFixed(2)}</td>
         <td style="padding:8px;font-size:11px">${esc(line.usage_type || '')}</td>
@@ -10667,13 +10676,44 @@ function renderRoyaltyLinesTableOnly() {
     <table style="width:100%;border-collapse:collapse;font-size:12px">
       <thead>
         <tr style="text-align:left;border-bottom:2px solid var(--border);color:var(--text3);font-size:11px;text-transform:uppercase">
-          ${headerCell('title_raw', 'Statement title')}${headerCell('show_name', 'Show / episode')}${headerCell('payee_name', 'Payee')}
+          ${headerCell('title_raw', 'Statement title')}${headerCell('show_name', 'Show / episode')}${headerCell('matched_episode_title', 'Linked episode')}${headerCell('payee_name', 'Payee')}
           ${headerCell('amount', 'Amount', 'right')}${headerCell('usage_type', 'Usage')}${headerCell('matched_title', 'Matched catalog title')}
           ${headerCell('match_status', 'Status')}<th style="padding:8px"></th>
         </tr>
       </thead>
       <tbody>${rows}</tbody>
     </table>`
+}
+
+let royaltyEpisodeSearchDebounce = null
+function royaltyEpisodeSearch(input, lineId) {
+  clearTimeout(royaltyEpisodeSearchDebounce)
+  const q = input.value.trim()
+  const resultsEl = document.getElementById(`royalty-episode-search-results-${lineId}`)
+  if (q.length < 2) { resultsEl.innerHTML = ''; return }
+  royaltyEpisodeSearchDebounce = setTimeout(async () => {
+    const r = await fetch(`/api/royalties/episode-search?q=${encodeURIComponent(q)}`).then(r => r.json()).catch(() => ({ ok: false }))
+    if (!r.ok || !r.episodes.length) { resultsEl.innerHTML = `<div style="font-size:10px;color:var(--text3)">no matches</div>`; return }
+    resultsEl.innerHTML = r.episodes.map(ep =>
+      `<div onclick="linkRoyaltyEpisode(${lineId}, ${ep.id})" style="font-size:11px;padding:3px 4px;cursor:pointer;border-radius:3px" onmouseover="this.style.background='var(--bg2)'" onmouseout="this.style.background=''">${esc(ep.show_name)} — ${esc(ep.episode_title)}${ep.episode_num ? ` <span style="color:var(--text3)">(#${esc(String(ep.episode_num))})</span>` : ''}</div>`
+    ).join('')
+  }, 250)
+}
+
+// Human-confirm action: links this one line to the picked episode, and lets
+// the server teach show_aliases + retroactively resolve any other
+// currently-unmatched line in this statement sharing the exact same raw
+// show_name (see the /link-episode route for why). That server-side fan-out
+// means a full refetch (not an in-memory patch like confirmRoyaltyMatch's)
+// is the only way to show the real resulting state -- correctness over the
+// extra round trip here, since more than just this one row can change.
+async function linkRoyaltyEpisode(lineId, episodeId) {
+  const r = await fetch(`/api/royalties/lines/${lineId}/link-episode`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ episodeId })
+  }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+  if (!r.ok) { alert(r.error || 'Link failed -- the line was not changed, try again.'); return }
+  await openRoyaltyDetail(currentRoyaltyStatementId)
 }
 
 let royaltySearchDebounce = null

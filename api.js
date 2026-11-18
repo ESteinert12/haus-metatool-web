@@ -36,7 +36,8 @@ process.on('unhandledRejection', e => {
 
 require('dotenv').config()
 
-const { normalizeShowAlias, resolveShowId, extractLeadingShowCode } = require('./shows.js')
+const { normalizeShowAlias, resolveShowId, extractLeadingShowCode, lookupShowId, addShowAlias } = require('./shows.js')
+const { resolveRoyaltyLineEpisode } = require('./royalty-episode-match.js')
 
 const express    = require('express')
 const session    = require('express-session')
@@ -1304,6 +1305,19 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_royalty_lines_sku ON royalty_statement_lines(matched_sku_root)`)
     console.log('✅ royalty tracker tables ready')
   } catch (e) { console.warn('[schema] royalty tracker tables:', e.message) }
+
+  // 2026-11-18: real link from a royalty line to the specific episode it
+  // aired in, resolved from the line's own show_name/episode_name text via
+  // royalty-episode-match.js -- see that module for the full matching
+  // design. Nullable, additive, ON DELETE SET NULL: losing an episode must
+  // never touch the underlying title match/confirmed $ total, which is
+  // computed independently of this column. Own try/catch, must run after
+  // both `episodes` and `royalty_statement_lines` exist (guaranteed by
+  // position -- this runs right after the block that creates the latter).
+  try {
+    await pool.query(`ALTER TABLE royalty_statement_lines ADD COLUMN IF NOT EXISTS matched_episode_id INTEGER REFERENCES episodes(id) ON DELETE SET NULL`)
+    console.log('✅ royalty_statement_lines.matched_episode_id ready')
+  } catch (e) { console.warn('[schema] royalty_statement_lines.matched_episode_id:', e.message) }
 
   // ─── Episode reference import (added 2026-10) ─────────────────────────
   // Kyle's own maintained cross-show episode master list (title/show
@@ -8880,7 +8894,8 @@ app.get('/api/cue-sheets/title-search', async (req, res) => {
 // across chunks"). Now either the whole statement lands -- dedupe checks,
 // `royalty_statements` row, and every line -- or none of it does.
 const ROYALTY_LINE_COLS = ['statement_id', 'title_raw', 'title_normalized', 'payee_name', 'payee_role', 'amount',
-  'usage_type', 'country', 'work_id', 'show_name', 'episode_name', 'bonus_amount', 'match_status', 'matched_sku_root']
+  'usage_type', 'country', 'work_id', 'show_name', 'episode_name', 'bonus_amount', 'match_status', 'matched_sku_root',
+  'matched_episode_id']
 
 function royaltyHeaderSignature(fields) {
   return crypto.createHash('sha256').update(fields.map(f => String(f).trim().toUpperCase()).join('|')).digest('hex')
@@ -9001,6 +9016,7 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
 
       let matchedCount = 0, unmatchedCount = 0, ambiguousCount = 0
       const lineRows = []
+      const episodeCache = new Map() // show_id -> episodes[], scoped to this one import
 
       for (const line of parsed.lines) {
         const m = matchLineToTitles(line, titlesIndex, parsed.format)
@@ -9010,9 +9026,15 @@ async function importOneRoyaltyStatement(filePath, origName, titlesIndex, import
 
         const matchedSku = (m.status === 'matched' && m.candidates.length === 1) ? m.candidates[0].sku_root : null
 
+        let matchedEpisodeId = null
+        try {
+          const er = await resolveRoyaltyLineEpisode(client, { showNameRaw: line.showName, episodeNameRaw: line.episodeName }, episodeCache)
+          matchedEpisodeId = er.matchedEpisodeId
+        } catch (e) { console.warn('[royalty-episode-match] resolution failed for one line (non-fatal, falls back to unmatched):', e.message) }
+
         lineRows.push([statementId, line.titleRaw, line.titleNormalized, line.payeeName || null, line.payeeRole || null, line.amount,
            line.usageType || null, line.country || null, line.workId || null, line.showName || null, line.episodeName || null,
-           line.bonusAmount || null, m.status, matchedSku])
+           line.bonusAmount || null, m.status, matchedSku, matchedEpisodeId])
       }
 
       await _bulkInsert(client, 'royalty_statement_lines', ROYALTY_LINE_COLS, lineRows, row => row)
@@ -9438,9 +9460,11 @@ app.get('/api/royalties/:id/lines', async (req, res) => {
   if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
   try {
     const linesRes = await _pgRetry(
-      `SELECT l.*, t.title AS matched_title
+      `SELECT l.*, t.title AS matched_title, me.episode_title AS matched_episode_title, ms.name AS matched_episode_show_name
        FROM royalty_statement_lines l
        LEFT JOIN titles t ON t.sku_root = l.matched_sku_root
+       LEFT JOIN episodes me ON me.id = l.matched_episode_id
+       LEFT JOIN shows ms ON ms.id = me.show_id
        WHERE l.statement_id = $1
        ORDER BY l.amount DESC, l.id`,
       [req.params.id],
@@ -9524,6 +9548,83 @@ app.get('/api/royalties/title-search', async (req, res) => {
     const q = `%${(req.query.q || '').trim()}%`
     const r = await _pgRetry(`SELECT sku_root, title FROM titles WHERE title ILIKE $1 ORDER BY title LIMIT 25`, [q], 'royalties title-search')
     res.json({ ok: true, titles: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// 2026-11-18: episode picker for the manual "link episode" action below.
+// Searches by episode title OR show name, everyone with access to the
+// (already admin-gated) Royalties tab can search -- it's catalog/episode
+// metadata, not a dollar figure.
+app.get('/api/royalties/episode-search', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  try {
+    const q = `%${(req.query.q || '').trim()}%`
+    const r = await _pgRetry(
+      `SELECT e.id, e.episode_title, e.episode_num, s.name AS show_name
+       FROM episodes e
+       JOIN shows s ON s.id = e.show_id
+       WHERE e.episode_title ILIKE $1 OR s.name ILIKE $1
+       ORDER BY s.name, e.episode_title
+       LIMIT 25`,
+      [q], 'royalties episode-search'
+    )
+    res.json({ ok: true, episodes: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// 2026-11-18: human-confirm action. A reviewer picked a real episode for a
+// line whose show/episode text didn't auto-resolve (or was resolved wrong).
+// This (a) teaches show_aliases the raw show_name -> that episode's show,
+// so every future import of a line with this EXACT raw text resolves
+// automatically from then on (never auto-done, see shows.js's
+// lookupShowId/addShowAlias comments), and (b) retroactively re-resolves
+// any other currently-unmatched line in THIS statement that shares the
+// exact same raw show_name -- each one independently, via its own
+// episode_name text/number, never just copied from this line's episode.
+app.post('/api/royalties/lines/:id/link-episode', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'DB not connected' })
+  const episodeId = parseInt(req.body?.episodeId, 10)
+  if (!episodeId) return res.json({ ok: false, error: 'episodeId is required' })
+  try {
+    const result = await _pgRetryTransaction(async (client) => {
+      const lineRes = await client.query(
+        `SELECT statement_id, show_name FROM royalty_statement_lines WHERE id = $1`,
+        [req.params.id]
+      )
+      if (!lineRes.rows.length) { const e = new Error('Line not found'); e.royaltyDuplicate = null; throw e }
+      const { statement_id: statementId, show_name: rawShowName } = lineRes.rows[0]
+
+      const episodeRes = await client.query(`SELECT show_id FROM episodes WHERE id = $1`, [episodeId])
+      if (!episodeRes.rows.length) throw new Error('Episode not found')
+      const showId = episodeRes.rows[0].show_id
+
+      let aliasAdded = false
+      if (rawShowName && rawShowName.trim()) {
+        aliasAdded = await addShowAlias(client, showId, rawShowName)
+      }
+
+      await client.query(`UPDATE royalty_statement_lines SET matched_episode_id = $1 WHERE id = $2`, [episodeId, req.params.id])
+
+      let retroactiveCount = 0
+      if (rawShowName && rawShowName.trim()) {
+        const siblings = await client.query(
+          `SELECT id, show_name, episode_name FROM royalty_statement_lines
+           WHERE statement_id = $1 AND show_name = $2 AND matched_episode_id IS NULL AND id != $3`,
+          [statementId, rawShowName, req.params.id]
+        )
+        const episodeCache = new Map()
+        for (const sib of siblings.rows) {
+          const er = await resolveRoyaltyLineEpisode(client, { showNameRaw: sib.show_name, episodeNameRaw: sib.episode_name }, episodeCache)
+          if (er.matchedEpisodeId) {
+            await client.query(`UPDATE royalty_statement_lines SET matched_episode_id = $1 WHERE id = $2`, [er.matchedEpisodeId, sib.id])
+            retroactiveCount++
+          }
+        }
+      }
+
+      return { ok: true, aliasAdded, retroactiveCount }
+    })
+    res.json(result)
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
