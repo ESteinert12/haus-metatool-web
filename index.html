@@ -9442,8 +9442,16 @@ function renderCueSheetCues(cues, episode, siblingSheets) {
   }).join('')
 
   const confirmableCount = cues.filter(c => c.matched_sku_root && c.match_status !== 'confirmed').length
+  // Added 2026-11-17 (Erik: "i still need a confirm all cues at the top and
+  // bottom of the page") -- one click confirms every matched, unconfirmed
+  // cue on this sheet without having to use the select-all checkbox first.
+  // Rendered identically above and below the table so a long cue sheet
+  // doesn't force a scroll back to the top just to confirm. Reuses
+  // confirmSelectedCues()'s batch-confirm logic (single re-render, one
+  // summary toast) rather than duplicating it.
   const toolbar = `
-    <div style="display:flex;align-items:center;gap:10px;margin-bottom:8px">
+    <div style="display:flex;align-items:center;gap:10px;margin:8px 0">
+      <button class="btn btn-primary" style="font-size:12px;padding:5px 10px" onclick="confirmAllCues()" ${confirmableCount === 0 ? 'disabled' : ''}>Confirm all (${confirmableCount})</button>
       <button class="btn" style="font-size:12px;padding:5px 10px" onclick="confirmSelectedCues()" ${selectedCueIds.size === 0 ? 'disabled' : ''}>Confirm selected (${selectedCueIds.size})</button>
       <span style="font-size:11px;color:var(--text3)">${confirmableCount} matched cue${confirmableCount === 1 ? '' : 's'} awaiting confirmation</span>
     </div>`
@@ -9459,7 +9467,7 @@ function renderCueSheetCues(cues, episode, siblingSheets) {
         </tr>
       </thead>
       <tbody>${rows}</tbody>
-    </table>`
+    </table>` + toolbar
 }
 
 let cueSearchDebounce = null
@@ -9558,6 +9566,20 @@ function toggleSelectAllCues(checked) {
     selectedCueIds.clear()
   }
   renderCueSheetCues(currentCueSheetCues, currentCueSheetEpisode, currentCueSheetSiblings)
+}
+
+// "Confirm all" (added 2026-11-17, same ask as the top+bottom toolbar
+// placement) -- selects every matched, unconfirmed cue on the sheet and
+// hands off to confirmSelectedCues() rather than duplicating its batch
+// logic. Skips cues with no matched_sku_root (nothing to confirm) and
+// cues already confirmed, same filter toggleSelectAllCues's checked branch
+// uses.
+function confirmAllCues() {
+  selectedCueIds = new Set(
+    currentCueSheetCues.filter(c => c.matched_sku_root && c.match_status !== 'confirmed').map(c => c.id)
+  )
+  if (!selectedCueIds.size) { toast('Nothing to confirm -- no matched, unconfirmed cues on this sheet', 'info'); return }
+  confirmSelectedCues()
 }
 
 // 2026-11-17, Erik: batch confirm for the new checkbox column. Deliberately
