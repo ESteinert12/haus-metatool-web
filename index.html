@@ -10539,10 +10539,18 @@ function renderRoyaltyLines(lines) {
   const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
   const statusOptions = ['', 'unmatched', 'ambiguous', 'confirmed', 'matched', 'rejected']
   const statusLabels = { '': 'All statuses', unmatched: 'Unmatched', ambiguous: 'Ambiguous', confirmed: 'Confirmed', matched: 'Matched', rejected: 'Rejected' }
+  // Confirm-all applies to every matched-but-unconfirmed line in the whole
+  // statement, ignoring the current filter/status dropdown -- same choice
+  // Cue Sheets' confirmAllCues() made (it uses the full currentCueSheetCues,
+  // not whatever's currently visible), for the same reason: filtering is for
+  // finding things, not for scoping a bulk action, and a hidden line that
+  // silently didn't get confirmed would be a surprising, easy-to-miss gap.
+  const confirmableLineCount = lines.filter(l => l.matched_sku_root && l.match_status !== 'confirmed').length
   detail.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
       <div id="royalty-lines-count" style="font-size:12px;color:var(--text3)">${lines.length} lines · $${total.toFixed(2)} total</div>
       <div style="display:flex;gap:8px">
+        <button class="btn btn-primary" style="font-size:11px;padding:4px 8px" onclick="confirmAllRoyaltyLines()" ${confirmableLineCount === 0 ? 'disabled' : ''}>Confirm all (${confirmableLineCount})</button>
         ${stmt?.b2_key ? `<a href="/api/royalties/${currentRoyaltyStatementId}/original" target="_blank" class="btn" style="font-size:11px;padding:4px 8px;text-decoration:none">Download original</a>` : ''}
         <button class="btn" style="font-size:11px;padding:4px 8px;color:#c0392b" onclick="deleteRoyaltyStatement(${currentRoyaltyStatementId})">Delete statement</button>
       </div>
@@ -10826,6 +10834,42 @@ async function confirmRoyaltyMatch(lineId, skuRoot, applyToAllInStatement) {
       detail.prepend(banner)
     }
   }
+}
+
+// 2026-11-18, Erik: bulk confirm for the Royalties line table, mirroring
+// Cue Sheets' confirmAllCues()/confirmSelectedCues() pattern -- one POST per
+// line (the /confirm route has no batch form) but a single re-render at the
+// end instead of one per line. Only targets lines whose Confirm button is
+// already enabled (matched_sku_root set, not already confirmed): this is
+// exactly "click Confirm on every row that has one", never a different
+// match than what's already shown, and never touches unmatched/ambiguous/
+// rejected lines -- those still need a human to pick or dismiss a match.
+async function confirmAllRoyaltyLines() {
+  const targets = currentRoyaltyLines.filter(l => l.matched_sku_root && l.match_status !== 'confirmed')
+  if (!targets.length) { toast('Nothing to confirm -- no matched, unconfirmed lines in this statement', 'info'); return }
+
+  const bucketKey = s => s === 'confirmed' ? 'confirmed_count' : s === 'unmatched' ? 'unmatched_count' : s === 'ambiguous' ? 'ambiguous_count' : null
+  const stmt = royaltyStatementsCache.find(rs => rs.id === currentRoyaltyStatementId)
+
+  let okCount = 0, failCount = 0
+  for (const line of targets) {
+    const r = await fetch(`/api/royalties/lines/${line.id}/confirm`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ sku_root: line.matched_sku_root, applyToAllInStatement: false })
+    }).then(r => r.json()).catch(e => ({ ok: false, error: e.message }))
+    if (!r.ok) { failCount++; continue }
+    if (stmt) {
+      const oldKey = bucketKey(line.match_status), newKey = bucketKey('confirmed')
+      if (oldKey) stmt[oldKey] = String(Math.max(0, parseInt(stmt[oldKey] || 0) - 1))
+      if (newKey) stmt[newKey] = String(parseInt(stmt[newKey] || 0) + 1)
+    }
+    line.match_status = 'confirmed'
+    okCount++
+  }
+
+  renderRoyaltyList()
+  renderRoyaltyLines(currentRoyaltyLines)
+  toast(failCount ? `Confirmed ${okCount} of ${targets.length} (${failCount} failed)` : `Confirmed ${okCount} line${okCount === 1 ? '' : 's'}`, failCount ? 'error' : 'success')
 }
 
 // ── Missing Registrations tab (added 2026-09-29) ────────────────────────────
