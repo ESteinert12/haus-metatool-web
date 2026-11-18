@@ -213,11 +213,19 @@ function deCamelCaseTitle(str) {
 // matching first. Each may carry a short trailing disambiguator (a letter or
 // 1-2 digits -- BUMPERA, STINGB, ALT3) -- confirmed real, not a guess.
 const CUE_FILENAME_SUFFIX_BASE_WORDS = [
-  'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'BUMPER', 'BUMP', 'STINGER', 'STING',
+  'FULLMIX', 'FULL', 'DANDB', 'DNB', 'NODNB', 'DND', 'BUMPER', 'BUMP', 'STINGER', 'STING',
   'MAIN', 'ALT', 'NODRUMS', 'NOLEAD', 'NOVOX', 'NOPERC', 'NOBASS', 'NOSYNTHS',
   'PERCONLY', 'PERC', 'DRUMS', 'DRUM', 'BASS', 'BAND', 'LEAD', 'MIX', 'FAST', 'INSTRUMENTAL', 'INSTR',
   'NA', 'LOWGTR',
 ];
+// 2026-11-18: DND added -- "HAUS_Bloodhound_DND" sits alongside
+// "HAUS_Bloodhound_FULL"/"HAUS_BLOODHOUND_FULL"/"HAUS_Bloodhound_Sting" (same
+// song, same file) as a fourth mix-variant tag. Etymology not confirmed (not
+// the same as the pre-existing DNB/DANDB "drum and bass" genre tag -- kept as
+// its own distinct entry rather than merged with those), but its role as a
+// trailing arrangement-variant tag -- not song content -- is confirmed by
+// direct comparison against its three siblings. Only 1 distinct title today;
+// added for when/if it recurs.
 // 2026-11-18: BAND added -- confirmed real across 9 distinct titles
 // (HAUS_OldBikes_BandD, HAUS_FinalOffer_BandD, HAUS_Back_on_the_Road_BandD,
 // etc., both mixed-case "BandD" and all-caps "BANDD" spellings), always as
@@ -234,6 +242,15 @@ const CUE_FILENAME_SUFFIX_BASE_WORDS = [
 // suffix attached (e.g. decoding to "Tight N Fast BASS+DRUMS" instead of
 // "Tight N Fast"), which even the squash-equivalence match pass can't fix
 // (squash only strips punctuation/whitespace, not un-stripped whole words).
+// 2026-11-18: a small set of specific, confirmed-real LONGER hyphenated
+// tags that don't fit the short 0-2-char disambiguator convention -- kept
+// as its own explicit list (not a general length increase, which would
+// risk swallowing real trailing title words) because only this one exact
+// string is confirmed so far: "HAUS_MorganBrosSong_FULL-SpecialOp" /
+// "HAUS_MORGANBROSSONG_FULL-SPECIALOP", confirmed as a mix-variant tag (not
+// title content) by comparing against the same song's properly-5-part-coded
+// sibling "HAUS_MorganBrosSong_C_R11a_FULL" in the same corpus.
+const CUE_FILENAME_LONG_SUFFIX_RE = /^(?:FULL)-(?:SPECIALOP)$/i;
 const CUE_FILENAME_SUFFIX_RE = new RegExp(
   // 2026-11-18: allow an optional hyphen before the 0-2 trailing
   // disambiguator chars -- confirmed real: "HAUS_LouisianaTrot_FULL-01.L"
@@ -281,7 +298,8 @@ function _isTechnicalFilenameToken(tok) {
   const t = tok.trim();
   if (!t) return false;
   if (!/[A-Za-z0-9]/.test(t)) return true; // pure punctuation joiner (+, &, -)
-  return CUE_FILENAME_SUFFIX_RE.test(t) || CUE_FILENAME_REEL_RE.test(t) ||
+  return CUE_FILENAME_SUFFIX_RE.test(t) || CUE_FILENAME_LONG_SUFFIX_RE.test(t) ||
+    CUE_FILENAME_REEL_RE.test(t) ||
     CUE_FILENAME_BPM_RE.test(t) || CUE_FILENAME_KEYWORD_RE.test(t) ||
     CUE_FILENAME_KEY_LOOSE_RE.test(t);
 }
