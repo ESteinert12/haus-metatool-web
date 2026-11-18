@@ -386,6 +386,26 @@ function extractCueFilenameTitle(raw) {
   while (segments.length > 1) {
     const last = segments[segments.length - 1].trim();
     if (!last) { segments.pop(); continue; }
+    // 2026-11-18: refuse to pop a bare, letterless digit segment (the
+    // branch of CUE_FILENAME_REEL_RE/CUE_FILENAME_SUFFIX_RE's trailing
+    // disambiguator that matches e.g. "30", "13", "18" with no letter at
+    // all) when the PRECEDING remaining segment is ALSO a bare letterless
+    // digit. Confirmed real: "HAUS_24_7_FULL"/"HAUS_24_7_NoLead"/
+    // "HAUS_24_7_BUMPER" is the real title "24/7" -- popping "FULL" is
+    // correct, but then popping "7" too (since a bare digit alone matches
+    // the reel/disambiguator shape) wrongly ate half the title, leaving
+    // just "24". Checked every other confirmed-real bare-digit trailing
+    // case in the full corpus (the dominant ":30"-edit-length convention --
+    // "R36_30", "S24C_30", etc. -- plus "_13"/"_18"/the "_1"/"_2" versioning
+    // after ALT/BUMPER): every one of them is preceded by a segment that
+    // has at least one LETTER in it (a reel code, a key, or a suffix word),
+    // never by another bare digit. Two bare-digit segments back to back is
+    // the signature of a split numeric title phrase, not a marker pair.
+    const lastIsBareDigit = /^\d{1,3}$/.test(last);
+    if (lastIsBareDigit) {
+      const prevSeg = segments[segments.length - 2];
+      if (prevSeg && /^\d{1,3}$/.test(prevSeg.trim())) break;
+    }
     // 2026-11-18: split on '+' as well as whitespace, not just whitespace --
     // "BASS+DRUMS" (no spaces) and "BASS + DRUM MIX" (spaces around the +)
     // are both confirmed-real trailing suffix forms (see
