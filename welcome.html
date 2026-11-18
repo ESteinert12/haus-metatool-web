@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>HAUS — Welcome</title>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/@tabler/icons-webfont@3.10.0/dist/tabler-icons.min.css">
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#f5f4f0;--bg2:#eceae4;--bg3:#fff;
+  --text:#1a1a18;--text2:#6b6b67;--text3:#9e9d99;
+  --border:rgba(0,0,0,0.08);--border2:rgba(0,0,0,0.13);
+  --accent:#1a1a18;--radius:14px;--radius-sm:8px;
+  --blue:#1a6cf6;--blue-bg:#eef4fe;--blue-text:#1251c2;
+}
+body{font-family:-apple-system,BlinkMacSystemFont,'SF Pro Text',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;display:flex;flex-direction:column}
+header{display:flex;align-items:center;justify-content:space-between;padding:22px 36px}
+header img{height:28px}
+header .tag{font-size:12px;color:var(--text3);letter-spacing:0.04em;text-transform:uppercase}
+main{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:20px 24px 60px}
+.hero{text-align:center;max-width:620px;margin-bottom:44px}
+.hero h1{font-size:32px;font-weight:700;letter-spacing:-0.01em;margin-bottom:10px}
+.hero p{font-size:15px;color:var(--text2);line-height:1.6}
+.cards{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;width:100%;max-width:980px}
+@media (max-width:860px){.cards{grid-template-columns:1fr;max-width:420px}}
+.card{background:var(--bg3);border:0.5px solid var(--border);border-radius:var(--radius);padding:26px 22px;text-decoration:none;color:inherit;display:flex;flex-direction:column;gap:12px;transition:transform 0.12s, border-color 0.12s, box-shadow 0.12s}
+.card:hover{transform:translateY(-2px);border-color:var(--border2);box-shadow:0 10px 28px rgba(0,0,0,0.08)}
+.card .icon{width:40px;height:40px;border-radius:10px;background:var(--bg2);display:flex;align-items:center;justify-content:center;font-size:19px;color:var(--text)}
+.card h2{font-size:16px;font-weight:600}
+.card p{font-size:12.5px;color:var(--text2);line-height:1.55;flex:1}
+.card .enter{font-size:12px;font-weight:600;color:var(--blue-text);display:flex;align-items:center;gap:5px}
+footer{text-align:center;padding:20px;font-size:11px;color:var(--text3)}
+</style>
+</head>
+<body>
+
+<header>
+  <img src="/assets/atmosphere-logo.svg" alt="Atmosphere">
+  <span class="tag">HAUS Music Library</span>
+</header>
+
+<main>
+  <div class="hero">
+    <h1>Welcome to HAUS</h1>
+    <p>One place for the HAUS Music catalog, the people who make it, and the people who license it. Pick where you're headed.</p>
+  </div>
+
+  <div class="cards">
+    <a class="card" href="/index.html">
+      <div class="icon"><i class="ti ti-database"></i></div>
+      <h2>Catalog &amp; Admin</h2>
+      <p>Browse the full catalog, manage titles, lots, royalties, cue sheets, and registrations. For HAUS staff.</p>
+      <span class="enter">Open Workspace <i class="ti ti-arrow-right"></i></span>
+    </a>
+    <a class="card" href="/producer.html">
+      <div class="icon"><i class="ti ti-music"></i></div>
+      <h2>Composer &amp; Editor Portal</h2>
+      <p>See your assignments, track the titles credited to you, and collaborate with the team. For composers and editors.</p>
+      <span class="enter">Open Portal <i class="ti ti-arrow-right"></i></span>
+    </a>
+    <a class="card" href="/client-portal.html">
+      <div class="icon"><i class="ti ti-briefcase"></i></div>
+      <h2>Client Portal</h2>
+      <p>Review pitches, briefs, and licenses, and browse the library HAUS has shared with you. For producers and licensees.</p>
+      <span class="enter">Open Portal <i class="ti ti-arrow-right"></i></span>
+    </a>
+  </div>
+</main>
+
+<footer>HAUS Music — if you don't have a login yet, ask your HAUS contact for an invite.</footer>
+
+</body>
+</html>

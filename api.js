@@ -168,6 +168,19 @@ app.use(session({
 }))
 if (secureCookie) app.set('trust proxy', 1)   // Vercel/Cloudflare terminate TLS upstream
 
+// Baseline security response headers. No new dependency (helmet) pulled in for
+// this -- it's four headers, not worth the extra package. CSP is intentionally
+// left out: every page here is one big inline <script>/<style> file, and a CSP
+// strict enough to matter would need 'unsafe-inline' anyway, which defeats the
+// point -- a real CSP is a follow-up that needs the inline JS extracted first.
+app.use((req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff')
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN')
+  res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin')
+  if (secureCookie) res.setHeader('Strict-Transport-Security', 'max-age=15552000; includeSubDomains')
+  next()
+})
+
 // Always revalidate with the server (never serve a stale copy from the
 // browser's cache without asking first), but allow a conditional GET so an
 // unchanged file gets a 304 (no body) instead of the full bytes every time.
@@ -198,7 +211,7 @@ app.get('/haus-api.js', (req, res) => {
 // backup and GET /api.js returned this file, connection string and all. Serve only
 // the handful of things the browser actually asks for.
 app.use('/assets', express.static(path.join(__dirname, 'assets')))
-for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'ebr-shared.js', 'producer.html', 'client-portal.html']) {
+for (const f of ['b2-missing-files-checker.js', 'rename-validation.js', 'ebr-shared.js', 'producer.html', 'client-portal.html', 'welcome.html', 'reset-password.html']) {
   app.get('/' + f, (req, res) => res.sendFile(path.join(__dirname, f)))
 }
 
@@ -216,7 +229,10 @@ const PUBLIC_ROUTES = [
   'POST /auth/login',
   'GET /auth/me',
   'GET /pg/status',
-  'GET /cfg/server-paths'
+  'GET /cfg/server-paths',
+  // The landing page for an admin-approved reset link (reset-password.html) --
+  // deliberately NOT scoped to haus_users; see that endpoint's own comment.
+  'POST /password-reset/complete'
 ]
 // Routes that can do damage no amount of SQL could reproduce: host side effects,
 // bucket mutations, and config the whole team shares. Admin only.
@@ -248,7 +264,8 @@ const ADMIN_ROUTES = [
 // A portal login must never satisfy the admin guard below, or vice versa.
 const PORTAL_PUBLIC_ROUTES = [
   'POST /portal/auth/login',
-  'GET /portal/auth/me'
+  'GET /portal/auth/me',
+  'POST /portal/request-reset'
 ]
 
 // Writer/composer portal (producer.html) -- a third identity, same isolation
@@ -256,7 +273,8 @@ const PORTAL_PUBLIC_ROUTES = [
 // .portalUser, so none of the three logins can satisfy either other guard.
 const WRITER_PORTAL_PUBLIC_ROUTES = [
   'POST /writer-portal/auth/login',
-  'GET /writer-portal/auth/me'
+  'GET /writer-portal/auth/me',
+  'POST /writer-portal/request-reset'
 ]
 
 app.use('/api', (req, res, next) => {
@@ -290,7 +308,9 @@ app.use('/api', (req, res, next) => {
   // DELETE verb is gated. Erik's call, 2026-11-11.
   const isCueSheetDeleteRoute = req.method === 'DELETE' &&
                          (req.path === '/cue-sheets' || req.path.startsWith('/cue-sheets/'))
-  if ((ADMIN_ROUTES.includes(sig) || isRoyaltyRoute || isCueSheetDeleteRoute) && req.session.user.role !== 'admin') {
+  // Password-reset review queue: admin-only, same reasoning (carries a :id param).
+  const isResetAdminRoute = req.path.startsWith('/admin/reset-requests')
+  if ((ADMIN_ROUTES.includes(sig) || isRoyaltyRoute || isCueSheetDeleteRoute || isResetAdminRoute) && req.session.user.role !== 'admin') {
     console.warn(`[authz] ${req.session.user.username} denied ${sig} (role=${req.session.user.role})`)
     return res.status(403).json({ ok: false, error: 'Admin only' })
   }
@@ -329,6 +349,83 @@ function _verifyPassword(pw, stored) {
   const b = Buffer.from(stored, 'utf8')
   const ok = a.length === b.length && crypto.timingSafeEqual(a, b)
   return { ok, needsUpgrade: ok }
+}
+
+// A fixed-cost dummy verify so "no such account" and "wrong password" take the
+// same amount of time to answer -- otherwise an attacker can tell which emails
+// or usernames exist just by timing the response, since the real check below
+// never runs scrypt at all for a row that doesn't exist.
+const _DUMMY_HASH = _hashPassword('not-a-real-password-used-only-for-timing-safety')
+
+// ─── Login throttling (brute-force protection) ─────────────────────────────
+// Account-level and IP-level failure counters, persisted in Postgres rather
+// than in memory -- same reasoning as the session store above: this runs as a
+// Vercel serverless function, so an in-memory counter would reset on every
+// cold start and wouldn't be shared across concurrent instances anyway.
+const LOGIN_FAIL_WINDOW_SEC   = 15 * 60  // a burst of failures older than this no longer counts
+const ACCOUNT_LOCK_THRESHOLD  = 6        // failed attempts against one account...
+const ACCOUNT_LOCK_SEC        = 15 * 60  // ...before that account is locked out for this long
+const IP_LOCK_THRESHOLD       = 25       // failed attempts from one IP across any account(s)...
+const IP_LOCK_SEC             = 15 * 60  // ...before that IP is locked out for this long
+
+async function _throttleStatus(scope, key) {
+  if (!pgPool) return { locked: false }
+  try {
+    const r = await _pgRetry(
+      `SELECT locked_until FROM login_throttle WHERE scope=$1 AND throttle_key=$2`,
+      [scope, key], 'throttle-status')
+    const row = r.rows[0]
+    if (row && row.locked_until && new Date(row.locked_until) > new Date()) {
+      return { locked: true, retryAfterSec: Math.max(1, Math.ceil((new Date(row.locked_until) - Date.now()) / 1000)) }
+    }
+  } catch (e) { console.warn('[throttle] status check failed:', e.message) }
+  return { locked: false }
+}
+async function _throttleFail(scope, key, threshold, lockSec) {
+  if (!pgPool) return
+  try {
+    await _pgRetry(`
+      INSERT INTO login_throttle (scope, throttle_key, fail_count, last_failed_at, locked_until)
+      VALUES ($1, $2, 1, now(), NULL)
+      ON CONFLICT (scope, throttle_key) DO UPDATE SET
+        fail_count = CASE
+          WHEN login_throttle.last_failed_at < now() - ($3 * interval '1 second') THEN 1
+          ELSE login_throttle.fail_count + 1
+        END,
+        last_failed_at = now(),
+        locked_until = CASE
+          WHEN (CASE WHEN login_throttle.last_failed_at < now() - ($3 * interval '1 second') THEN 1 ELSE login_throttle.fail_count + 1 END) >= $4
+          THEN now() + ($5 * interval '1 second')
+          ELSE login_throttle.locked_until
+        END
+    `, [scope, key, LOGIN_FAIL_WINDOW_SEC, threshold, lockSec], 'throttle-fail')
+  } catch (e) { console.warn('[throttle] record-failure failed:', e.message) }
+}
+async function _throttleClear(scope, key) {
+  if (!pgPool) return
+  await _pgRetry(`DELETE FROM login_throttle WHERE scope=$1 AND throttle_key=$2`, [scope, key], 'throttle-clear').catch(() => {})
+}
+// Session fixation hardening: issue a brand-new session id on every successful
+// login instead of reusing whatever session id the client walked in with.
+// Promise-wrapped since express-session's regenerate() is callback-based.
+function _regenerateSession(req) {
+  return new Promise((resolve, reject) => {
+    req.session.regenerate(err => err ? reject(err) : resolve())
+  })
+}
+
+// ─── Password reset (client portal + composer portal only, see migration
+// comment on password_reset_requests for why haus_users is excluded) ───────
+const RESET_TOKEN_TTL_SEC = 60 * 60       // link is good for 1 hour after an admin approves it
+const RESET_REQUEST_ACCOUNT_THRESHOLD = 3 // a person mashing the button doesn't need 3 separate rows
+const RESET_REQUEST_IP_THRESHOLD = 10
+const RESET_REQUEST_WINDOW_SEC = 15 * 60
+
+function _genResetToken() {
+  return crypto.randomBytes(32).toString('hex')
+}
+function _hashResetToken(token) {
+  return crypto.createHash('sha256').update(token).digest('hex')
 }
 
 // ─── Filesystem access control ─────────────────────────────────────────────
@@ -1236,6 +1333,57 @@ async function runServerMigrations(pool) {
     await pool.query(`CREATE INDEX IF NOT EXISTS idx_episode_reference_title ON episode_reference(title_normalized)`)
     console.log('✅ episode reference tables ready')
   } catch (e) { console.warn('[schema] episode reference tables:', e.message) }
+
+  // Login brute-force throttling (see _throttleStatus/_throttleFail/_throttleClear
+  // above) -- one row per (scope, throttle_key), where throttle_key is either
+  // "acct:<email-or-username>" or "ip:<address>". No foreign keys: scope spans
+  // three separate login tables (haus_users/portal_users/writer_portal_users)
+  // plus raw IPs, so there's nothing single table to reference.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS login_throttle (
+        scope           TEXT NOT NULL,
+        throttle_key    TEXT NOT NULL,
+        fail_count      INTEGER NOT NULL DEFAULT 0,
+        last_failed_at  TIMESTAMPTZ,
+        locked_until    TIMESTAMPTZ,
+        PRIMARY KEY (scope, throttle_key)
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_login_throttle_locked ON login_throttle(locked_until)`)
+    console.log('✅ login throttle table ready')
+  } catch (e) { console.warn('[schema] login throttle table:', e.message) }
+
+  // Self-service "forgot password" requests for the client portal and composer
+  // portal only (NOT haus_users -- the desktop Electron app's own login in
+  // main.js is still on the old unsalted-sha256 scheme and a scrypt-format
+  // password from this flow would break it; fixing that is a separate piece
+  // of work). A request never emails anyone -- there's no email-sending
+  // capability anywhere in this app -- an admin reviews it in the Workspace
+  // and approves/denies by hand, which is what generates the real token.
+  // token_hash is only ever set at approval time, and only the plaintext
+  // token (never stored) is handed to the admin once, in the approve
+  // response -- a DB read alone can never recover a usable reset link.
+  try {
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS password_reset_requests (
+        id               SERIAL PRIMARY KEY,
+        scope            TEXT NOT NULL CHECK (scope IN ('portal', 'writer')),
+        identifier       TEXT NOT NULL,
+        status           TEXT NOT NULL DEFAULT 'pending'
+                           CHECK (status IN ('pending', 'approved', 'used', 'denied')),
+        requested_ip     TEXT,
+        requested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+        token_hash       TEXT,
+        token_expires_at TIMESTAMPTZ,
+        approved_at      TIMESTAMPTZ,
+        approved_by      INTEGER REFERENCES haus_users(user_id) ON DELETE SET NULL,
+        used_at          TIMESTAMPTZ
+      )
+    `)
+    await pool.query(`CREATE INDEX IF NOT EXISTS idx_reset_requests_status ON password_reset_requests(status, requested_at)`)
+    console.log('✅ password reset request table ready')
+  } catch (e) { console.warn('[schema] password reset request table:', e.message) }
 }
 
 // ─── Neon connection ───────────────────────────────────────────────────────
@@ -1331,7 +1479,16 @@ _logFsRoots()
 app.post('/api/auth/login', async (req, res) => {
   const { username, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const ip = req.ip || 'unknown'
+  const acctKey = `acct:${String(username || '').toLowerCase()}`
+  const ipKey = `ip:${ip}`
   try {
+    const acctThrottle = await _throttleStatus('haus', acctKey)
+    const ipThrottle = await _throttleStatus('haus', ipKey)
+    if (acctThrottle.locked || ipThrottle.locked) {
+      const retryAfterSec = Math.max(acctThrottle.retryAfterSec || 0, ipThrottle.retryAfterSec || 0)
+      return res.status(429).json({ ok: false, error: `Too many failed attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` })
+    }
     // Fetch by username, then verify — the old query compared the hash in SQL, which
     // cannot work once each row has its own salt. Wrapped in _pgRetry: Neon drops
     // idle clients and a login attempt during that window should retry, not fail.
@@ -1342,9 +1499,18 @@ app.post('/api/auth/login', async (req, res) => {
       'auth/login'
     )
     const row = result.rows[0]
-    if (!row) return res.json({ ok: false, error: 'Invalid username or password' })
+    if (!row) {
+      _verifyPassword(password || '', _DUMMY_HASH) // burn equivalent time to a real check
+      await _throttleFail('haus', acctKey, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_SEC)
+      await _throttleFail('haus', ipKey, IP_LOCK_THRESHOLD, IP_LOCK_SEC)
+      return res.json({ ok: false, error: 'Invalid username or password' })
+    }
     const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
-    if (!ok) return res.json({ ok: false, error: 'Invalid username or password' })
+    if (!ok) {
+      await _throttleFail('haus', acctKey, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_SEC)
+      await _throttleFail('haus', ipKey, IP_LOCK_THRESHOLD, IP_LOCK_SEC)
+      return res.json({ ok: false, error: 'Invalid username or password' })
+    }
     // Transparent re-hash: an account on the legacy scheme is migrated the first
     // time it signs in, without anyone being locked out.
     if (needsUpgrade) {
@@ -1359,6 +1525,8 @@ app.post('/api/auth/login', async (req, res) => {
       role: row.role || 'user',
       must_change_password: row.must_change_password === true
     }
+    await _throttleClear('haus', acctKey)
+    await _regenerateSession(req)
     req.session.user = user
     res.json({ ok: true, user })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -1395,6 +1563,96 @@ app.post('/api/auth/change-password', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
+// ─── Password reset requests (admin review) ────────────────────────────────
+// A client or composer who forgot their password hits "Forgot password?" on
+// their own login screen, which creates a row here (see /api/portal/request-reset
+// and /api/writer-portal/request-reset above) -- no email is ever sent. An
+// admin reviews pending requests here and approves or denies each one by hand.
+// Admin-only, enforced below by path prefix (same style as the royalty-tracker
+// and cue-sheet-delete guards further up) since these routes carry a :id param
+// ADMIN_ROUTES' exact-string match can't express.
+app.get('/api/admin/reset-requests', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const r = await _pgRetry(
+      `SELECT id, scope, identifier, status, requested_ip, requested_at, approved_at, used_at
+         FROM password_reset_requests
+        ORDER BY (status = 'pending') DESC, requested_at DESC
+        LIMIT 50`)
+    res.json({ ok: true, requests: r.rows })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// Generates the real token right here, at approval time, and returns it to
+// the admin exactly once -- only its hash is ever written to the database, so
+// nothing recoverable from a DB read alone can be used to reset the password.
+app.post('/api/admin/reset-requests/:id/approve', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const cur = await _pgRetry(`SELECT id, scope, identifier, status FROM password_reset_requests WHERE id=$1`, [req.params.id])
+    const row = cur.rows[0]
+    if (!row) return res.status(404).json({ ok: false, error: 'No such request' })
+    if (row.status !== 'pending') return res.json({ ok: false, error: `This request is already "${row.status}".` })
+    const token = _genResetToken()
+    await _pgRetry(
+      `UPDATE password_reset_requests
+          SET status='approved', token_hash=$1, token_expires_at=now() + ($2 * interval '1 second'),
+              approved_at=now(), approved_by=$3
+        WHERE id=$4`,
+      [_hashResetToken(token), RESET_TOKEN_TTL_SEC, req.session.user.user_id, row.id])
+    const link = `${req.protocol}://${req.get('host')}/reset-password.html?scope=${row.scope}&id=${row.id}&token=${token}`
+    res.json({ ok: true, link, expiresInMinutes: Math.round(RESET_TOKEN_TTL_SEC / 60) })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+app.post('/api/admin/reset-requests/:id/deny', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  try {
+    const r = await _pgRetry(
+      `UPDATE password_reset_requests SET status='denied' WHERE id=$1 AND status='pending' RETURNING id`,
+      [req.params.id])
+    if (!r.rowCount) return res.json({ ok: false, error: 'No such pending request' })
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// POST /api/password-reset/complete -- the public page the admin's link points
+// to (reset-password.html). Public by necessity: the person isn't logged in
+// yet, that's the whole point. haus_users is deliberately not reachable here
+// at all (see the password_reset_requests CHECK constraint) -- the desktop
+// app's own login is on a different, older hash scheme, and a scrypt-format
+// password from this endpoint would break it; see reset-password.html's
+// comment for the full reasoning.
+app.post('/api/password-reset/complete', async (req, res) => {
+  if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const { scope, id, token, newPassword } = req.body
+  if (!['portal', 'writer'].includes(scope)) return res.json({ ok: false, error: 'Invalid reset link.' })
+  if (!newPassword || String(newPassword).length < 12) {
+    return res.json({ ok: false, error: 'New password must be at least 12 characters' })
+  }
+  try {
+    const cur = await _pgRetry(
+      `SELECT id, scope, identifier, status, token_hash, token_expires_at
+         FROM password_reset_requests WHERE id=$1 AND scope=$2`,
+      [id, scope])
+    const row = cur.rows[0]
+    const genericError = { ok: false, error: 'This reset link is invalid or has expired.' }
+    if (!row || row.status !== 'approved' || !row.token_hash) return res.json(genericError)
+    if (new Date(row.token_expires_at) < new Date()) return res.json(genericError)
+    const presented = Buffer.from(_hashResetToken(String(token || '')), 'utf8')
+    const stored = Buffer.from(row.token_hash, 'utf8')
+    const match = presented.length === stored.length && crypto.timingSafeEqual(presented, stored)
+    if (!match) return res.json(genericError)
+
+    const table = scope === 'portal' ? 'portal_users' : 'writer_portal_users'
+    const idCol = scope === 'portal' ? 'portal_user_id' : 'writer_portal_user_id'
+    await _pgRetry(
+      `UPDATE ${table} SET password_hash=$1, must_change_password=false WHERE LOWER(email)=$2`,
+      [_hashPassword(newPassword), row.identifier])
+    await _pgRetry(`UPDATE password_reset_requests SET status='used', used_at=now() WHERE id=$1`, [row.id])
+    await _throttleClear(scope, `acct:${row.identifier}`) // a legitimate reset also clears any login lockout
+    res.json({ ok: true })
+  } catch (e) { res.json({ ok: false, error: e.message }) }
+})
 
 // HAUS is a two-person shop (Erik + Kyle) and Erik is the point of contact for
 // every client — there is no per-client rep assignment to manage.
@@ -1408,7 +1666,16 @@ const HAUS_REP = 'Erik Steinert'
 app.post('/api/portal/auth/login', async (req, res) => {
   const { email, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const ip = req.ip || 'unknown'
+  const acctKey = `acct:${String(email || '').toLowerCase()}`
+  const ipKey = `ip:${ip}`
   try {
+    const acctThrottle = await _throttleStatus('portal', acctKey)
+    const ipThrottle = await _throttleStatus('portal', ipKey)
+    if (acctThrottle.locked || ipThrottle.locked) {
+      const retryAfterSec = Math.max(acctThrottle.retryAfterSec || 0, ipThrottle.retryAfterSec || 0)
+      return res.status(429).json({ ok: false, error: `Too many failed attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` })
+    }
     const result = await _pgRetry(
       `SELECT pu.portal_user_id, pu.client_id, pu.email, pu.display_name,
               pu.password_hash, pu.must_change_password,
@@ -1419,9 +1686,18 @@ app.post('/api/portal/auth/login', async (req, res) => {
       [email]
     )
     const row = result.rows[0]
-    if (!row) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (!row) {
+      _verifyPassword(password || '', _DUMMY_HASH)
+      await _throttleFail('portal', acctKey, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_SEC)
+      await _throttleFail('portal', ipKey, IP_LOCK_THRESHOLD, IP_LOCK_SEC)
+      return res.json({ ok: false, error: 'Invalid email or password' })
+    }
     const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
-    if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (!ok) {
+      await _throttleFail('portal', acctKey, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_SEC)
+      await _throttleFail('portal', ipKey, IP_LOCK_THRESHOLD, IP_LOCK_SEC)
+      return res.json({ ok: false, error: 'Invalid email or password' })
+    }
     if (needsUpgrade) {
       await _pgRetry(`UPDATE portal_users SET password_hash=$1 WHERE portal_user_id=$2`,
         [_hashPassword(password), row.portal_user_id]).catch(e => console.warn('[portal-auth] rehash failed:', e.message))
@@ -1435,6 +1711,8 @@ app.post('/api/portal/auth/login', async (req, res) => {
       haus_rep: HAUS_REP,
       must_change_password: row.must_change_password === true
     }
+    await _throttleClear('portal', acctKey)
+    await _regenerateSession(req)
     req.session.portalUser = portalUser
     res.json({ ok: true, user: portalUser })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -1470,6 +1748,32 @@ app.post('/api/portal/auth/change-password', async (req, res) => {
   } catch (e) { res.json({ ok: false, error: e.message }) }
 })
 
+// POST /api/portal/request-reset -- "Forgot password?" on the client-portal
+// login screen. Never reveals whether the email exists (same response either
+// way) and never emails anyone -- there's no email-sending capability in this
+// app. It just drops a row an admin can see and approve in the Workspace.
+app.post('/api/portal/request-reset', async (req, res) => {
+  const GENERIC_OK = { ok: true, message: "If that email has a client-portal login, we've let the HAUS team know. They'll be in touch with a reset link." }
+  if (!pgPool) return res.json(GENERIC_OK)
+  const email = String(req.body?.email || '').trim().toLowerCase()
+  const ip = req.ip || 'unknown'
+  if (!email) return res.json(GENERIC_OK)
+  try {
+    const acctThrottle = await _throttleStatus('reset-portal', `acct:${email}`)
+    const ipThrottle = await _throttleStatus('reset-portal', `ip:${ip}`)
+    if (acctThrottle.locked || ipThrottle.locked) return res.json(GENERIC_OK) // don't reveal throttling either
+    await _throttleFail('reset-portal', `acct:${email}`, RESET_REQUEST_ACCOUNT_THRESHOLD, RESET_REQUEST_WINDOW_SEC)
+    await _throttleFail('reset-portal', `ip:${ip}`, RESET_REQUEST_IP_THRESHOLD, RESET_REQUEST_WINDOW_SEC)
+    const exists = await _pgRetry(`SELECT 1 FROM portal_users WHERE LOWER(email)=$1`, [email])
+    if (exists.rowCount) {
+      await _pgRetry(
+        `INSERT INTO password_reset_requests (scope, identifier, requested_ip) VALUES ('portal', $1, $2)`,
+        [email, ip])
+    }
+  } catch (e) { console.warn('[reset-request] portal failed:', e.message) }
+  res.json(GENERIC_OK)
+})
+
 // ─── Writer/Composer Portal routes ──────────────────────────────────────────
 // producer.html's real backend. A writer logs in with their own email +
 // password (writer_portal_users), scoped by composer_id -- req.session.writerUser,
@@ -1485,7 +1789,16 @@ app.post('/api/portal/auth/change-password', async (req, res) => {
 app.post('/api/writer-portal/auth/login', async (req, res) => {
   const { email, password } = req.body
   if (!pgPool) return res.json({ ok: false, error: 'Database not connected' })
+  const ip = req.ip || 'unknown'
+  const acctKey = `acct:${String(email || '').toLowerCase()}`
+  const ipKey = `ip:${ip}`
   try {
+    const acctThrottle = await _throttleStatus('writer', acctKey)
+    const ipThrottle = await _throttleStatus('writer', ipKey)
+    if (acctThrottle.locked || ipThrottle.locked) {
+      const retryAfterSec = Math.max(acctThrottle.retryAfterSec || 0, ipThrottle.retryAfterSec || 0)
+      return res.status(429).json({ ok: false, error: `Too many failed attempts. Try again in ${Math.ceil(retryAfterSec / 60)} minute(s).` })
+    }
     const result = await _pgRetry(
       `SELECT wpu.writer_portal_user_id, wpu.composer_id, wpu.email, wpu.display_name,
               wpu.password_hash, wpu.must_change_password,
@@ -1496,9 +1809,18 @@ app.post('/api/writer-portal/auth/login', async (req, res) => {
       [email]
     )
     const row = result.rows[0]
-    if (!row) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (!row) {
+      _verifyPassword(password || '', _DUMMY_HASH)
+      await _throttleFail('writer', acctKey, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_SEC)
+      await _throttleFail('writer', ipKey, IP_LOCK_THRESHOLD, IP_LOCK_SEC)
+      return res.json({ ok: false, error: 'Invalid email or password' })
+    }
     const { ok, needsUpgrade } = _verifyPassword(password || '', row.password_hash)
-    if (!ok) return res.json({ ok: false, error: 'Invalid email or password' })
+    if (!ok) {
+      await _throttleFail('writer', acctKey, ACCOUNT_LOCK_THRESHOLD, ACCOUNT_LOCK_SEC)
+      await _throttleFail('writer', ipKey, IP_LOCK_THRESHOLD, IP_LOCK_SEC)
+      return res.json({ ok: false, error: 'Invalid email or password' })
+    }
     if (needsUpgrade) {
       await _pgRetry(`UPDATE writer_portal_users SET password_hash=$1 WHERE writer_portal_user_id=$2`,
         [_hashPassword(password), row.writer_portal_user_id]).catch(e => console.warn('[writer-portal-auth] rehash failed:', e.message))
@@ -1511,6 +1833,8 @@ app.post('/api/writer-portal/auth/login', async (req, res) => {
       composer_name: row.composer_name,
       must_change_password: row.must_change_password === true
     }
+    await _throttleClear('writer', acctKey)
+    await _regenerateSession(req)
     req.session.writerUser = writerUser
     res.json({ ok: true, user: writerUser })
   } catch (e) { res.json({ ok: false, error: e.message }) }
@@ -1544,6 +1868,31 @@ app.post('/api/writer-portal/auth/change-password', async (req, res) => {
     req.session.writerUser.must_change_password = false
     res.json({ ok: true })
   } catch (e) { res.json({ ok: false, error: e.message }) }
+})
+
+// POST /api/writer-portal/request-reset -- "Forgot password?" on the composer
+// portal login screen. Same shape and same reasoning as /api/portal/request-reset:
+// generic response either way, no email sent, an admin approves it by hand.
+app.post('/api/writer-portal/request-reset', async (req, res) => {
+  const GENERIC_OK = { ok: true, message: "If that email has a composer-portal login, we've let the HAUS team know. They'll be in touch with a reset link." }
+  if (!pgPool) return res.json(GENERIC_OK)
+  const email = String(req.body?.email || '').trim().toLowerCase()
+  const ip = req.ip || 'unknown'
+  if (!email) return res.json(GENERIC_OK)
+  try {
+    const acctThrottle = await _throttleStatus('reset-writer', `acct:${email}`)
+    const ipThrottle = await _throttleStatus('reset-writer', `ip:${ip}`)
+    if (acctThrottle.locked || ipThrottle.locked) return res.json(GENERIC_OK)
+    await _throttleFail('reset-writer', `acct:${email}`, RESET_REQUEST_ACCOUNT_THRESHOLD, RESET_REQUEST_WINDOW_SEC)
+    await _throttleFail('reset-writer', `ip:${ip}`, RESET_REQUEST_IP_THRESHOLD, RESET_REQUEST_WINDOW_SEC)
+    const exists = await _pgRetry(`SELECT 1 FROM writer_portal_users WHERE LOWER(email)=$1`, [email])
+    if (exists.rowCount) {
+      await _pgRetry(
+        `INSERT INTO password_reset_requests (scope, identifier, requested_ip) VALUES ('writer', $1, $2)`,
+        [email, ip])
+    }
+  } catch (e) { console.warn('[reset-request] writer failed:', e.message) }
+  res.json(GENERIC_OK)
 })
 
 // GET /api/writer-portal/my-assignments -- every assignment handed to this
